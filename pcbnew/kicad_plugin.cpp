@@ -1129,71 +1129,6 @@ void PCB_IO::formatLayers( LSET aLayerMask, int aNestLevel ) const
 
     output += "(layers";
 
-    static const LSET cu_all( LSET::AllCuMask() );
-    static const LSET fr_bk( 2, B_Cu,       F_Cu );
-    static const LSET adhes( 2, B_Adhes,    F_Adhes );
-    static const LSET paste( 2, B_Paste,    F_Paste );
-    static const LSET silks( 2, B_SilkS,    F_SilkS );
-    static const LSET mask(  2, B_Mask,     F_Mask );
-    static const LSET crt_yd(2, B_CrtYd,    F_CrtYd );
-    static const LSET fab(   2, B_Fab,      F_Fab );
-
-    LSET cu_mask = cu_all;
-
-    if( m_board )
-        cu_mask &= m_board->GetEnabledLayers();
-
-    // output copper layers first, then non copper
-
-    if( ( aLayerMask & cu_mask ) == cu_mask )
-    {
-        output += " *.Cu";
-        aLayerMask &= ~cu_all;          // clear bits, so they are not output again below
-    }
-    else if( ( aLayerMask & cu_mask ) == fr_bk )
-    {
-        output += " F&B.Cu";
-        aLayerMask &= ~fr_bk;
-    }
-
-    if( ( aLayerMask & adhes ) == adhes )
-    {
-        output += " *.Adhes";
-        aLayerMask &= ~adhes;
-    }
-
-    if( ( aLayerMask & paste ) == paste )
-    {
-        output += " *.Paste";
-        aLayerMask &= ~paste;
-    }
-
-    if( ( aLayerMask & silks ) == silks )
-    {
-        output += " *.SilkS";
-        aLayerMask &= ~silks;
-    }
-
-    if( ( aLayerMask & mask ) == mask )
-    {
-        output += " *.Mask";
-        aLayerMask &= ~mask;
-    }
-
-    if( ( aLayerMask & crt_yd ) == crt_yd )
-    {
-        output += " *.CrtYd";
-        aLayerMask &= ~crt_yd;
-    }
-
-    if( ( aLayerMask & fab ) == fab )
-    {
-        output += " *.Fab";
-        aLayerMask &= ~fab;
-    }
-
-    // output any individual layers not handled in wildcard combos above
-
     if( m_board )
         aLayerMask &= m_board->GetEnabledLayers();
 
@@ -1374,7 +1309,7 @@ void PCB_IO::format( TEXTE_MODULE* aText, int aNestLevel ) const
         orient += parent->GetOrientation();
 
     m_out->Print( aNestLevel, "(fp_text %s %s (at %s",
-                  m_out->Quotew( type ).c_str(),
+                  (const char *)type.utf8_str(),
                   m_out->Quotew( aText->GetText() ).c_str(),
                   FMT_IU( aText->GetPos0() ).c_str() );
 

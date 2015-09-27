@@ -614,6 +614,9 @@ public:
 
         const char* quote = out->GetQuoteChar( layer_id.c_str() );
 
+        if ( layer_id == "signal" || layer_id == "pcb" )
+            quote = "";
+
         const int RIGHTMARGIN = 70;
         int perLine = out->Print( nestLevel, "(%s %s%s%s %.6g",
                                Name(),

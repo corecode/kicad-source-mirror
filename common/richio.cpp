@@ -368,35 +368,7 @@ char* INPUTSTREAM_LINE_READER::ReadLine() throw( IO_ERROR )
 
 const char* OUTPUTFORMATTER::GetQuoteChar( const char* wrapee, const char* quote_char )
 {
-    // Include '#' so a symbol is not confused with a comment.  We intend
-    // to wrap any symbol starting with a '#'.
-    // Our LEXER class handles comments, and comments appear to be an extension
-    // to the SPECCTRA DSN specification.
-    if( *wrapee == '#' )
-        return quote_char;
-
-    if( strlen( wrapee ) == 0 )
-        return quote_char;
-
-    bool isFirst = true;
-
-    for(  ; *wrapee;  ++wrapee, isFirst = false )
-    {
-        static const char quoteThese[] = "\t ()"
-            "%"     // per Alfons of freerouting.net, he does not like this unquoted as of 1-Feb-2008
-            "{}"    // guessing that these are problems too
-            ;
-
-        // if the string to be wrapped (wrapee) has a delimiter in it,
-        // return the quote_char so caller wraps the wrapee.
-        if( strchr( quoteThese, *wrapee ) )
-            return quote_char;
-
-        if( !isFirst  &&  '-' == *wrapee )
-            return quote_char;
-    }
-
-    return "";  // caller does not need to wrap, can use an unwrapped string.
+    return quote_char;
 }
 
 
@@ -474,50 +446,40 @@ int OUTPUTFORMATTER::Print( int nestLevel, const char* fmt, ... ) throw( IO_ERRO
 
 std::string OUTPUTFORMATTER::Quotes( const std::string& aWrapee ) throw( IO_ERROR )
 {
-    static const char quoteThese[] = "\t ()\n\r";
+    std::string ret;
 
-    if( !aWrapee.size() ||  // quote null string as ""
-        aWrapee[0]=='#' ||  // quote a potential s-expression comment, so it is not a comment
-        aWrapee[0]=='"' ||  // NextTok() will travel through DSN_STRING path anyway, then must apply escapes
-        aWrapee.find_first_of( quoteThese ) != std::string::npos )
+    ret.reserve( aWrapee.size()*2 + 2 );
+
+    ret += '"';
+
+    for( std::string::const_iterator it = aWrapee.begin(); it!=aWrapee.end(); ++it )
     {
-        std::string ret;
-
-        ret.reserve( aWrapee.size()*2 + 2 );
-
-        ret += '"';
-
-        for( std::string::const_iterator it = aWrapee.begin(); it!=aWrapee.end(); ++it )
+        switch( *it )
         {
-            switch( *it )
-            {
-            case '\n':
-                ret += '\\';
-                ret += 'n';
-                break;
-            case '\r':
-                ret += '\\';
-                ret += 'r';
-                break;
-            case '\\':
-                ret += '\\';
-                ret += '\\';
-                break;
-            case '"':
-                ret += '\\';
-                ret += '"';
-                break;
-            default:
-                ret += *it;
-            }
+        case '\n':
+            ret += '\\';
+            ret += 'n';
+            break;
+        case '\r':
+            ret += '\\';
+            ret += 'r';
+            break;
+        case '\\':
+            ret += '\\';
+            ret += '\\';
+            break;
+        case '"':
+            ret += '\\';
+            ret += '"';
+            break;
+        default:
+            ret += *it;
         }
-
-        ret += '"';
-
-        return ret;
     }
 
-    return aWrapee;
+    ret += '"';
+
+    return ret;
 }
 
 
@@ -610,4 +572,3 @@ void STREAM_OUTPUTFORMATTER::write( const char* aOutBuf, int aCount ) throw( IO_
         }
     }
 }
-
