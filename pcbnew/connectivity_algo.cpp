@@ -244,6 +244,9 @@ bool CN_CONNECTIVITY_ALGO::Add( BOARD_ITEM* aItem )
         if( m_itemMap.find ( static_cast<D_PAD*>( aItem ) ) != m_itemMap.end() )
             return false;
 
+        if ( ( static_cast<D_PAD*>( aItem )->GetLayerSet() & LSET::AllCuMask() ) == 0 )
+            return false;
+
         add( m_padList, static_cast<D_PAD*>( aItem ) );
 
         break;
