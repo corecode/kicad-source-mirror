@@ -97,14 +97,14 @@ public:
 
     int GetModifyHash() const override;
 
-    SCH_SHEET* Load( const wxString& aFileName, KIWAY* aKiway,
-                     SCH_SHEET* aAppendToMe = nullptr, 
+    SCH_SHEET* Load( const wxString& aFileName, PROJECT& aProject,
+                     SCH_SHEET* aAppendToMe = nullptr,
                      const PROPERTIES* aProperties = nullptr ) override;
 
     void LoadContent( LINE_READER& aReader, SCH_SCREEN* aScreen,
                       int version = EESCHEMA_VERSION );
 
-    void Save( const wxString& aFileName, SCH_SCREEN* aScreen, KIWAY* aKiway,
+    void Save( const wxString& aFileName, SCH_SCREEN* aScreen, PROJECT& aProject,
                const PROPERTIES* aProperties = nullptr ) override;
 
     void Format( SCH_SCREEN* aScreen );
@@ -141,7 +141,7 @@ public:
     static void FormatPart( LIB_PART* aPart, OUTPUTFORMATTER& aFormatter );
 
 private:
-    void loadHierarchy( SCH_SHEET* aSheet );
+    void loadHierarchy( SCH_SHEET* aSheet, PROJECT& aProject );
     void loadHeader( LINE_READER& aReader, SCH_SCREEN* aScreen );
     void loadPageSettings( LINE_READER& aReader, SCH_SCREEN* aScreen );
     void loadFile( const wxString& aFileName, SCH_SCREEN* aScreen );
@@ -179,13 +179,12 @@ protected:
     wxString             m_path;       ///< Root project path for loading child sheets.
     std::stack<wxString> m_currentPath;///< Stack to maintain nested sheet paths
     const PROPERTIES*    m_props;      ///< Passed via Save() or Load(), no ownership, may be nullptr.
-    KIWAY*               m_kiway;      ///< Required for path to legacy component libraries.
     SCH_SHEET*           m_rootSheet;  ///< The root sheet of the schematic being loaded..
     OUTPUTFORMATTER*     m_out;        ///< The output formatter for saving SCH_SCREEN objects.
     SCH_LEGACY_PLUGIN_CACHE* m_cache;
 
     /// initialize PLUGIN like a constructor would.
-    void init( KIWAY* aKiway, const PROPERTIES* aProperties = nullptr );
+    void init( const PROPERTIES* aProperties = nullptr );
 };
 
 #endif  // _SCH_LEGACY_PLUGIN_H_

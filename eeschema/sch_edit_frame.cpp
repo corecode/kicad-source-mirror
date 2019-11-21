@@ -144,11 +144,6 @@ SEARCH_STACK* PROJECT::SchSearchS()
 
         // append all paths from aSList
         add_search_paths( ss, Kiface().KifaceSearch(), -1 );
-
-        // addLibrarySearchPaths( SEARCH_STACK* aSP, wxConfigBase* aCfg )
-        // This is undocumented, but somebody wanted to store !schematic!
-        // library search paths in the .kicad_common file?
-        add_search_paths( ss, Pgm().CommonSettings(), -1 );
     }
 
     return ss;
@@ -429,7 +424,7 @@ void SCH_EDIT_FRAME::CreateScreens()
 
     if( g_RootSheet->GetScreen() == NULL )
     {
-        SCH_SCREEN* screen = new SCH_SCREEN( &Kiway() );
+        SCH_SCREEN* screen = new SCH_SCREEN( Kiway().Prj() );
         screen->SetMaxUndoItems( m_UndoRedoCountMax );
         g_RootSheet->SetScreen( screen );
         SetScreen( g_RootSheet->GetScreen() );
@@ -443,7 +438,7 @@ void SCH_EDIT_FRAME::CreateScreens()
 
     if( GetScreen() == NULL )
     {
-        SCH_SCREEN* screen = new SCH_SCREEN( &Kiway() );
+        SCH_SCREEN* screen = new SCH_SCREEN( Kiway().Prj() );
         screen->SetMaxUndoItems( m_UndoRedoCountMax );
         SetScreen( screen );
     }

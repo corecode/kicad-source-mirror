@@ -101,9 +101,9 @@ static GRID_TYPE SchematicGridList[] = {
 };
 
 
-SCH_SCREEN::SCH_SCREEN( KIWAY* aKiway ) :
+SCH_SCREEN::SCH_SCREEN( PROJECT& aProject ) :
     BASE_SCREEN( SCH_SCREEN_T ),
-    KIWAY_HOLDER( aKiway, KIWAY_HOLDER::HOLDER_TYPE::SCREEN ),
+    m_project( aProject ),
     m_paper( wxT( "A4" ) )
 {
     m_modification_sync = 0;
@@ -501,7 +501,7 @@ void SCH_SCREEN::UpdateSymbolLinks( bool aForce )
     // therefore the calculation time is usually very low.
     if( m_drawList.GetCount() )
     {
-        SYMBOL_LIB_TABLE* libs = Prj().SchSymbolLibTable();
+        SYMBOL_LIB_TABLE* libs = m_project.SchSymbolLibTable();
         int mod_hash = libs->GetModifyHash();
         EE_TYPE_COLLECTOR c;
 
@@ -510,7 +510,7 @@ void SCH_SCREEN::UpdateSymbolLinks( bool aForce )
         // Must we resolve?
         if( (m_modification_sync != mod_hash) || aForce )
         {
-            SCH_COMPONENT::ResolveAll( c, *libs, Prj().SchLibs()->GetCacheLibrary() );
+            SCH_COMPONENT::ResolveAll( c, *libs, m_project.SchLibs()->GetCacheLibrary() );
 
             m_modification_sync = mod_hash;     // note the last mod_hash
         }

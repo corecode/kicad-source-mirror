@@ -29,7 +29,6 @@
 #include <wx/tokenzr.h>
 #include <pgm_base.h>
 #include <gr_text.h>
-#include <kiway.h>
 #include <kicad_string.h>
 #include <richio.h>
 #include <core/typeinfo.h>
@@ -559,7 +558,7 @@ public:
 
 SCH_LEGACY_PLUGIN::SCH_LEGACY_PLUGIN()
 {
-    init( NULL );
+    init();
 }
 
 
@@ -569,21 +568,20 @@ SCH_LEGACY_PLUGIN::~SCH_LEGACY_PLUGIN()
 }
 
 
-void SCH_LEGACY_PLUGIN::init( KIWAY* aKiway, const PROPERTIES* aProperties )
+void SCH_LEGACY_PLUGIN::init( const PROPERTIES* aProperties )
 {
     m_version = 0;
     m_rootSheet = NULL;
     m_props = aProperties;
-    m_kiway = aKiway;
     m_cache = NULL;
     m_out = NULL;
 }
 
 
-SCH_SHEET* SCH_LEGACY_PLUGIN::Load( const wxString& aFileName, KIWAY* aKiway,
+SCH_SHEET* SCH_LEGACY_PLUGIN::Load( const wxString& aFileName, PROJECT& aProject,
                                     SCH_SHEET* aAppendToMe, const PROPERTIES* aProperties )
 {
-    wxASSERT( !aFileName || aKiway != NULL );
+    wxASSERT( !aFileName );
 
     LOCALE_IO   toggle;     // toggles on, then off, the C locale.
     SCH_SHEET*  sheet;
@@ -609,17 +607,17 @@ SCH_SHEET* SCH_LEGACY_PLUGIN::Load( const wxString& aFileName, KIWAY* aKiway,
         }
 
         if( m_path.IsEmpty() )
-            m_path = aKiway->Prj().GetProjectPath();
+            m_path = aProject.GetProjectPath();
 
         wxLogTrace( traceSchLegacyPlugin, "Normalized append path \"%s\".", m_path );
     }
     else
     {
-        m_path = aKiway->Prj().GetProjectPath();
+        m_path = aProject.GetProjectPath();
     }
 
     m_currentPath.push( m_path );
-    init( aKiway, aProperties );
+    init( aProperties );
 
     if( aAppendToMe == NULL )
     {
@@ -627,7 +625,7 @@ SCH_SHEET* SCH_LEGACY_PLUGIN::Load( const wxString& aFileName, KIWAY* aKiway,
         std::unique_ptr< SCH_SHEET > newSheet( new SCH_SHEET );
         newSheet->SetFileName( aFileName );
         m_rootSheet = newSheet.get();
-        loadHierarchy( newSheet.get() );
+        loadHierarchy( newSheet.get(), aProject );
 
         // If we got here, the schematic loaded successfully.
         sheet = newSheet.release();
@@ -637,7 +635,7 @@ SCH_SHEET* SCH_LEGACY_PLUGIN::Load( const wxString& aFileName, KIWAY* aKiway,
         m_rootSheet = aAppendToMe->GetRootSheet();
         wxASSERT( m_rootSheet != NULL );
         sheet = aAppendToMe;
-        loadHierarchy( sheet );
+        loadHierarchy( sheet, aProject );
     }
 
     wxASSERT( m_currentPath.size() == 1 );  // only the project path should remain
@@ -648,7 +646,7 @@ SCH_SHEET* SCH_LEGACY_PLUGIN::Load( const wxString& aFileName, KIWAY* aKiway,
 
 // Everything below this comment is recursive.  Modify with care.
 
-void SCH_LEGACY_PLUGIN::loadHierarchy( SCH_SHEET* aSheet )
+void SCH_LEGACY_PLUGIN::loadHierarchy( SCH_SHEET* aSheet, PROJECT& aProject )
 {
     SCH_SCREEN* screen = NULL;
 
@@ -680,7 +678,7 @@ void SCH_LEGACY_PLUGIN::loadHierarchy( SCH_SHEET* aSheet )
         }
         else
         {
-            aSheet->SetScreen( new SCH_SCREEN( m_kiway ) );
+            aSheet->SetScreen( new SCH_SCREEN( aProject ) );
             aSheet->GetScreen()->SetFileName( fileName.GetFullPath() );
 
             try
@@ -703,7 +701,7 @@ void SCH_LEGACY_PLUGIN::loadHierarchy( SCH_SHEET* aSheet )
                         sheet->SetParent( aSheet );
 
                         // Recursion starts here.
-                        loadHierarchy( sheet );
+                        loadHierarchy( sheet, aProject );
                     }
 
                     item = item->Next();
@@ -1781,7 +1779,7 @@ std::shared_ptr<BUS_ALIAS> SCH_LEGACY_PLUGIN::loadBusAlias( LINE_READER& aReader
 }
 
 
-void SCH_LEGACY_PLUGIN::Save( const wxString& aFileName, SCH_SCREEN* aScreen, KIWAY* aKiway,
+void SCH_LEGACY_PLUGIN::Save( const wxString& aFileName, SCH_SCREEN* aScreen, PROJECT& aProject,
                               const PROPERTIES* aProperties )
 {
     wxCHECK_RET( aScreen != NULL, "NULL SCH_SCREEN object." );
@@ -1789,7 +1787,7 @@ void SCH_LEGACY_PLUGIN::Save( const wxString& aFileName, SCH_SCREEN* aScreen, KI
 
     LOCALE_IO   toggle;     // toggles on, then off, the C locale, to write floating point values.
 
-    init( aKiway, aProperties );
+    init( aProperties );
 
     wxFileName fn = aFileName;
 
@@ -1808,7 +1806,6 @@ void SCH_LEGACY_PLUGIN::Save( const wxString& aFileName, SCH_SCREEN* aScreen, KI
 void SCH_LEGACY_PLUGIN::Format( SCH_SCREEN* aScreen )
 {
     wxCHECK_RET( aScreen != NULL, "NULL SCH_SCREEN* object." );
-    wxCHECK_RET( m_kiway != NULL, "NULL KIWAY* object." );
 
     // Write the header
     m_out->Print( 0, "%s %s %d\n", "EESchema", SCHEMATIC_HEAD_STRING, EESCHEMA_VERSION );

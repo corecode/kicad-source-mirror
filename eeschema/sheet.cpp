@@ -92,7 +92,7 @@ bool SCH_EDIT_FRAME::checkForNoFullyDefinedLibIds( SCH_SHEET* aSheet )
 
 void SCH_EDIT_FRAME::InitSheet( SCH_SHEET* aSheet, const wxString& aNewFilename )
 {
-    aSheet->SetScreen( new SCH_SCREEN( &Kiway() ) );
+    aSheet->SetScreen( new SCH_SCREEN( Kiway().Prj() ) );
     aSheet->GetScreen()->SetModify();
     aSheet->GetScreen()->SetMaxUndoItems( m_UndoRedoCountMax );
     aSheet->GetScreen()->SetFileName( aNewFilename );
@@ -129,12 +129,12 @@ bool SCH_EDIT_FRAME::LoadSheetFromFile( SCH_SHEET* aSheet, SCH_SHEET_PATH* aHier
     {
         if( aSheet->GetScreen() != nullptr )
         {
-            newSheet.reset( pi->Load( fullFilename, &Kiway() ) );
+            newSheet.reset( pi->Load( fullFilename, Kiway().Prj() ) );
         }
         else
         {
             newSheet->SetFileName( fullFilename );
-            pi->Load( fullFilename, &Kiway(), newSheet.get() );
+            pi->Load( fullFilename, Kiway().Prj(), newSheet.get() );
         }
 
         if( !pi->GetError().IsEmpty() )
@@ -666,7 +666,7 @@ bool SCH_EDIT_FRAME::EditSheet( SCH_SHEET* aSheet, SCH_SHEET_PATH* aHierarchy,
 
             try
             {
-                pi->Save( newFilename, aSheet->GetScreen(), &Kiway() );
+                pi->Save( newFilename, aSheet->GetScreen(), Kiway().Prj() );
             }
             catch( const IO_ERROR& ioe )
             {
@@ -907,5 +907,3 @@ void SCH_EDIT_FRAME::DrawCurrentSheetToClipboard()
     screen->m_DrawOrg   = old_org;
     screen->SetZoom( tmpzoom );
 }
-
-

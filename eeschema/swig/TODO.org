@@ -1,0 +1,14 @@
+** Pgm() Crashes
+
+#+BEGIN_SRC python
+import eeschema
+p=eeschema.PROJECT()
+s=eeschema.SCH_IO_MGR.Load(eeschema.SCH_IO_MGR.SCH_LEGACY, "/home/corecode/flux/flux-jfr/Flux-JFR.sch", p)
+pl=eeschema.PDF_PLOTTER()
+pl.OpenFile("o.pdf")
+pl.StartPlot()
+sc=s.GetScreen()
+eeschema.PlotWorkSheet(pl, sc.GetTitleBlock(), sc.GetPageSettings(), sc.m_ScreenNumber, sc.m_NumberOfScreens, "XXX", sc.GetFileName())
+sc.Plot(pl)
+pl.EndPlot()
+#+END_SRC
