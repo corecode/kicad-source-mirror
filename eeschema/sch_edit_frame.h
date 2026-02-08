@@ -64,6 +64,7 @@ class DIALOG_SYMBOL_FIELDS_TABLE;
 class DIALOG_SCH_FIND;
 class RESCUER;
 class HIERARCHY_PANE;
+class PDN_PANEL;
 class API_HANDLER_SCH;
 class DIALOG_SCHEMATIC_SETUP;
 
@@ -78,6 +79,7 @@ enum SCH_SEARCH_T
 
 wxDECLARE_EVENT( EDA_EVT_SCHEMATIC_CHANGING, wxCommandEvent );
 wxDECLARE_EVENT( EDA_EVT_SCHEMATIC_CHANGED, wxCommandEvent );
+wxDECLARE_EVENT( EDA_EVT_SCH_SELECTION_CHANGED, wxCommandEvent );
 
 
 /**
@@ -918,6 +920,10 @@ public:
 
     void ToggleNetNavigator();
 
+    static const wxString PdnAnalyzerPaneName() { return wxS( "PdnAnalyzer" ); }
+
+    void TogglePdnAnalyzer();
+
     PLUGIN_ACTION_SCOPE PluginActionScope() const override
     {
         return PLUGIN_ACTION_SCOPE::SCHEMATIC;
@@ -1079,8 +1085,9 @@ private:
 
 
     wxTreeCtrl*                 m_netNavigator;
+    PDN_PANEL*                  m_pdnPanel;
 
-	bool                        m_syncingPcbToSchSelection; // Recursion guard when synchronizing selection from PCB
+    bool                        m_syncingPcbToSchSelection; // Recursion guard when synchronizing selection from PCB
     bool                        m_show_search;
     bool                        m_highlightedConnChanged;
 

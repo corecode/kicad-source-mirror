@@ -274,6 +274,8 @@ set( EESCHEMA_SIM_SRCS
 
     sim/legacy_workbook.cpp
 
+    sim/pdn_analyzer.cpp
+
     widgets/tuner_slider.cpp
     widgets/tuner_slider_base.cpp
     )
@@ -291,6 +293,7 @@ set( EESCHEMA_WIDGETS
     widgets/symbol_diff_widget.cpp
     widgets/sch_properties_panel.cpp
     widgets/sch_search_pane.cpp
+    widgets/pdn_panel.cpp
     widgets/search_handlers.cpp
     widgets/symbol_filter_combobox.cpp
     widgets/symbol_preview_widget.cpp

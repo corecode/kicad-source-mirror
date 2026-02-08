@@ -36,6 +36,7 @@
 #include <schematic.h>
 #include <widgets/design_block_pane.h>
 #include <widgets/hierarchy_pane.h>
+#include <widgets/pdn_panel.h>
 #include <widgets/sch_search_pane.h>
 #include <widgets/panel_sch_selection_filter.h>
 #include <widgets/properties_panel.h>
@@ -340,6 +341,9 @@ void SCH_EDIT_FRAME::SaveSettings( APP_SETTINGS_BASE* aCfg )
         }
 
         m_designBlocksPane->SaveSettings();
+
+        wxAuiPaneInfo& pdnPane = m_auimgr.GetPane( PdnAnalyzerPaneName() );
+        cfg->m_AuiPanels.show_pdn_analyzer = pdnPane.IsShown();
     }
 }
 

@@ -960,6 +960,12 @@ TOOL_ACTION SCH_ACTIONS::showNetNavigator( TOOL_ACTION_ARGS()
         .FriendlyName( _( "Net Navigator" ) )
         .Tooltip( _( "Show/hide the net navigator" ) ) );
 
+TOOL_ACTION SCH_ACTIONS::showPdnAnalyzer( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.showPdnAnalyzer" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "PDN Analyzer" ) )
+        .Tooltip( _( "Show/hide the PDN impedance analyzer" ) ) );
+
 TOOL_ACTION SCH_ACTIONS::editWithLibEdit( TOOL_ACTION_ARGS()
         .Name( "eeschema.EditorControl.editWithSymbolEditor" )
         .Scope( AS_GLOBAL )

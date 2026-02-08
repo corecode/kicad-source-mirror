@@ -187,6 +187,9 @@ void SCH_EDIT_FRAME::doReCreateMenuBar()
     if( ADVANCED_CFG::GetCfg().m_IncrementalConnectivity )
         showHidePanels->Add( SCH_ACTIONS::showNetNavigator, ACTION_MENU::CHECK );
 
+    if( ADVANCED_CFG::GetCfg().m_EnablePdnAnalyzer )
+        showHidePanels->Add( SCH_ACTIONS::showPdnAnalyzer, ACTION_MENU::CHECK );
+
     if( ADVANCED_CFG::GetCfg().m_EnableDesignBlocks )
         showHidePanels->Add( SCH_ACTIONS::showDesignBlockPanel, ACTION_MENU::CHECK,
                              _( "Design Blocks" ) );

@@ -33,6 +33,7 @@ using KIGFX::COLOR4D;
 
 
 extern const wxAuiPaneInfo& defaultNetNavigatorPaneInfo();
+extern const wxAuiPaneInfo& defaultPdnAnalyzerPaneInfo();
 extern const wxAuiPaneInfo& defaultPropertiesPaneInfo( wxWindow* aWindow );
 extern const wxAuiPaneInfo& defaultSchSelectionFilterPaneInfo( wxWindow* aWindow );
 extern const wxAuiPaneInfo& defaultDesignBlocksPaneInfo( wxWindow* aWindow );
@@ -108,6 +109,7 @@ public:
         int  design_blocks_panel_docked_width;
         int  design_blocks_panel_float_width;
         int  design_blocks_panel_float_height;
+        bool show_pdn_analyzer;
     };
 
     struct AUTOPLACE_FIELDS

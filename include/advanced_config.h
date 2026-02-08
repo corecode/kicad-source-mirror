@@ -480,6 +480,15 @@ public:
     bool m_EnableDesignBlocks;
 
     /**
+     * Enable the PDN impedance analyzer panel in eeschema.
+     *
+     * Setting name: "EnablePdnAnalyzer"
+     * Valid values: true or false
+     * Default value: true
+     */
+    bool m_EnablePdnAnalyzer;
+
+    /**
      * Enable support for generators.
      *
      * Setting name: "EnableGenerators"
