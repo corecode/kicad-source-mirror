@@ -244,6 +244,10 @@ set( PCBNEW_EXPORTERS
     exporters/gendrill_gerber_writer.cpp
     exporters/gerber_jobfile_writer.cpp
     exporters/gerber_placefile_writer.cpp
+    exporters/parasitic_extraction/fastcap_exporter.cpp
+    exporters/parasitic_extraction/fasthenry_exporter.cpp
+    exporters/parasitic_extraction/parasitic_extraction.cpp
+    exporters/parasitic_extraction/parasitic_result_parser.cpp
     )
 
 set( PCBNEW_MICROWAVE_SRCS
