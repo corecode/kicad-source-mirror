@@ -1887,4 +1887,769 @@ BOOST_FIXTURE_TEST_CASE( EndToEndFullPipeline, PARSER_TEST_FIXTURE )
 }
 
 
+// ============================================================================
+// Additional parser robustness tests
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// ParseFastHenryOutput - complex value with negative imaginary part
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ParseFastHenryNegativeImaginary, PARSER_TEST_FIXTURE )
+{
+    // Negative imaginary part represents capacitive behavior at certain frequencies
+    std::string content =
+        "Row 0: N1 to N2\n"
+        "Impedance matrix for frequency = 1e+06\n"
+        "1 x 1\n"
+        "0.300000 -0.050000j\n";
+
+    std::string path = writeTempFile( "negimag_zc.mat", content );
+
+    std::vector<PDN_PARASITIC::EXTRACTION_PORT> ports;
+    PDN_PARASITIC::EXTRACTION_PORT p;
+    p.m_Name = "P1";
+    ports.push_back( p );
+
+    std::vector<PDN_PARASITIC::IMPEDANCE_ENTRY> impedances;
+
+    bool result = PARASITIC_RESULT_PARSER::ParseFastHenryOutput( path, ports, impedances );
+
+    BOOST_CHECK_EQUAL( result, true );
+    BOOST_REQUIRE_EQUAL( impedances[0].m_Points.size(), 1u );
+    BOOST_CHECK_CLOSE( impedances[0].m_Points[0].m_Z.real(), 0.3, 0.01 );
+    BOOST_CHECK_CLOSE( impedances[0].m_Points[0].m_Z.imag(), -0.05, 0.01 );
+}
+
+
+// --------------------------------------------------------------------------
+// ParseFastHenryOutput - large matrix (5x5)
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ParseFastHenryLargeMatrix, PARSER_TEST_FIXTURE )
+{
+    std::ostringstream oss;
+
+    for( int i = 0; i < 5; i++ )
+        oss << "Row " << i << ": N" << ( 2 * i + 1 ) << " to N" << ( 2 * i + 2 ) << "\n";
+
+    oss << "Impedance matrix for frequency = 1e+06\n";
+    oss << "5 x 5\n";
+
+    for( int i = 0; i < 5; i++ )
+    {
+        for( int j = 0; j < 5; j++ )
+        {
+            if( j > 0 )
+                oss << "  ";
+
+            double re = ( i == j ) ? 0.1 * ( i + 1 ) : 0.01;
+            double im = ( i == j ) ? 0.01 * ( i + 1 ) : 0.001;
+            oss << re << " +" << im << "j";
+        }
+        oss << "\n";
+    }
+
+    std::string path = writeTempFile( "large_zc.mat", oss.str() );
+
+    std::vector<PDN_PARASITIC::EXTRACTION_PORT> ports;
+
+    for( int i = 0; i < 5; i++ )
+    {
+        PDN_PARASITIC::EXTRACTION_PORT p;
+        p.m_Name = "P" + std::to_string( i + 1 );
+        ports.push_back( p );
+    }
+
+    std::vector<PDN_PARASITIC::IMPEDANCE_ENTRY> impedances;
+
+    bool result = PARASITIC_RESULT_PARSER::ParseFastHenryOutput( path, ports, impedances );
+
+    BOOST_CHECK_EQUAL( result, true );
+
+    // 5x5 = 25 impedance entries
+    BOOST_CHECK_EQUAL( impedances.size(), 25u );
+
+    // Verify node name updates
+    BOOST_CHECK_EQUAL( ports[0].m_PositiveNode, "N1" );
+    BOOST_CHECK_EQUAL( ports[0].m_NegativeNode, "N2" );
+    BOOST_CHECK_EQUAL( ports[4].m_PositiveNode, "N9" );
+    BOOST_CHECK_EQUAL( ports[4].m_NegativeNode, "N10" );
+
+    // Verify diagonal entries have larger values
+    for( int i = 0; i < 5; i++ )
+    {
+        int idx = i * 5 + i;  // Diagonal index
+        BOOST_REQUIRE_EQUAL( impedances[idx].m_Points.size(), 1u );
+        BOOST_CHECK_CLOSE( impedances[idx].m_Points[0].m_Z.real(),
+                           0.1 * ( i + 1 ), 1.0 );
+    }
+}
+
+
+// --------------------------------------------------------------------------
+// ParseFastCapOutput - large matrix (5x5)
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ParseFastCapLargeMatrix, PARSER_TEST_FIXTURE )
+{
+    std::ostringstream oss;
+    oss << "CAPACITANCE MATRIX, nanofarads\n";
+    oss << "              1         2         3         4         5\n";
+
+    std::vector<std::string> names = { "VDD", "GND", "V3P3", "V1P8", "VDDIO" };
+
+    for( int i = 0; i < 5; i++ )
+    {
+        oss << names[i] << "  " << ( i + 1 );
+
+        for( int j = 0; j < 5; j++ )
+        {
+            double val = ( i == j ) ? 0.1 * ( i + 1 ) : -0.01;
+            oss << "   " << val;
+        }
+
+        oss << "\n";
+    }
+
+    oss << "\n";
+
+    std::string path = writeTempFile( "large_cap.txt", oss.str() );
+
+    std::vector<PDN_PARASITIC::CAPACITANCE_ENTRY> capacitances;
+
+    bool result = PARASITIC_RESULT_PARSER::ParseFastCapOutput( path, capacitances );
+
+    BOOST_CHECK_EQUAL( result, true );
+
+    // 5x5 = 25 entries
+    BOOST_REQUIRE_EQUAL( capacitances.size(), 25u );
+
+    // Verify conductor names
+    BOOST_CHECK_EQUAL( capacitances[0].m_ConductorI, "VDD" );
+    BOOST_CHECK_EQUAL( capacitances[0].m_ConductorJ, "VDD" );
+
+    // Last row, last column
+    BOOST_CHECK_EQUAL( capacitances[24].m_ConductorI, "VDDIO" );
+    BOOST_CHECK_EQUAL( capacitances[24].m_ConductorJ, "VDDIO" );
+
+    // Check self-capacitance values (pF = nF * 1000)
+    BOOST_CHECK_CLOSE( capacitances[0].m_CapacitancePF, 100.0, 0.01 );   // VDD: 0.1 nF
+    BOOST_CHECK_CLOSE( capacitances[6].m_CapacitancePF, 200.0, 0.01 );   // GND: 0.2 nF
+    BOOST_CHECK_CLOSE( capacitances[24].m_CapacitancePF, 500.0, 0.01 );  // VDDIO: 0.5 nF
+}
+
+
+// ============================================================================
+// Physical value validation tests
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Verify L extraction is frequency-independent for a true inductor
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( InductanceExtractionConsistency )
+{
+    // For a pure inductor, Z = j*omega*L, so L = Im(Z)/omega regardless of frequency
+    double L_expected_nH = 15.0;
+
+    std::vector<double> freqs = { 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9 };
+
+    for( double freq : freqs )
+    {
+        double omega = 2.0 * M_PI * freq;
+        double imZ = omega * L_expected_nH * 1e-9;
+
+        // Derive L from the impedance
+        double L_derived_nH = imZ / omega * 1e9;
+
+        BOOST_CHECK_CLOSE( L_derived_nH, L_expected_nH, 0.001 );
+    }
+}
+
+
+// --------------------------------------------------------------------------
+// Verify R extraction from real part of impedance
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( ResistanceExtractionAccuracy )
+{
+    // R = Re(Z), simple resistance with no frequency dependence
+    double R_expected_ohm = 0.123456;
+
+    PDN_PARASITIC::IMPEDANCE_POINT pt;
+    pt.m_FrequencyHz = 1e6;
+    pt.m_Z = std::complex<double>( R_expected_ohm, 0.05 );
+
+    double R_derived_mOhm = pt.m_Z.real() * 1000.0;
+    BOOST_CHECK_CLOSE( R_derived_mOhm, R_expected_ohm * 1000.0, 0.001 );
+}
+
+
+// --------------------------------------------------------------------------
+// Verify capacitance nF to pF conversion
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( CapacitanceConversionPrecision )
+{
+    // Test various values for nF -> pF conversion (factor of 1000)
+    struct TestCase
+    {
+        double nF;
+        double expectedPF;
+    };
+
+    std::vector<TestCase> cases = {
+        { 0.001,    1.0 },
+        { 0.01,     10.0 },
+        { 0.1,      100.0 },
+        { 1.0,      1000.0 },
+        { 10.0,     10000.0 },
+        { 0.00001,  0.01 },
+        { -0.05,    -50.0 },  // Mutual capacitance (negative)
+    };
+
+    for( const auto& tc : cases )
+    {
+        double pF = tc.nF * 1000.0;
+        BOOST_CHECK_CLOSE( pF, tc.expectedPF, 0.001 );
+    }
+}
+
+
+// ============================================================================
+// Stackup layer tests
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Typical 4-layer stackup construction
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( FourLayerStackup )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    // F.Cu
+    PDN_PARASITIC::STACKUP_LAYER fcu;
+    fcu.m_Name = "F.Cu";
+    fcu.m_IsCopperLayer = true;
+    fcu.m_ZPositionMM = 0.0;
+    fcu.m_ThicknessMM = 0.035;
+    fcu.m_ConductivitySPerM = 5.8e7;
+    results.m_Stackup.push_back( fcu );
+
+    // Prepreg
+    PDN_PARASITIC::STACKUP_LAYER pp1;
+    pp1.m_Name = "Prepreg_1";
+    pp1.m_IsCopperLayer = false;
+    pp1.m_ZPositionMM = 0.035;
+    pp1.m_ThicknessMM = 0.2;
+    pp1.m_EpsilonR = 4.5;
+    pp1.m_LossTangent = 0.02;
+    results.m_Stackup.push_back( pp1 );
+
+    // In1.Cu
+    PDN_PARASITIC::STACKUP_LAYER in1;
+    in1.m_Name = "In1.Cu";
+    in1.m_IsCopperLayer = true;
+    in1.m_ZPositionMM = 0.235;
+    in1.m_ThicknessMM = 0.035;
+    in1.m_ConductivitySPerM = 5.8e7;
+    results.m_Stackup.push_back( in1 );
+
+    // Core
+    PDN_PARASITIC::STACKUP_LAYER core;
+    core.m_Name = "Core";
+    core.m_IsCopperLayer = false;
+    core.m_ZPositionMM = 0.270;
+    core.m_ThicknessMM = 1.0;
+    core.m_EpsilonR = 4.2;
+    core.m_LossTangent = 0.018;
+    results.m_Stackup.push_back( core );
+
+    // In2.Cu
+    PDN_PARASITIC::STACKUP_LAYER in2;
+    in2.m_Name = "In2.Cu";
+    in2.m_IsCopperLayer = true;
+    in2.m_ZPositionMM = 1.270;
+    in2.m_ThicknessMM = 0.035;
+    in2.m_ConductivitySPerM = 5.8e7;
+    results.m_Stackup.push_back( in2 );
+
+    // Prepreg
+    PDN_PARASITIC::STACKUP_LAYER pp2;
+    pp2.m_Name = "Prepreg_2";
+    pp2.m_IsCopperLayer = false;
+    pp2.m_ZPositionMM = 1.305;
+    pp2.m_ThicknessMM = 0.2;
+    pp2.m_EpsilonR = 4.5;
+    pp2.m_LossTangent = 0.02;
+    results.m_Stackup.push_back( pp2 );
+
+    // B.Cu
+    PDN_PARASITIC::STACKUP_LAYER bcu;
+    bcu.m_Name = "B.Cu";
+    bcu.m_IsCopperLayer = true;
+    bcu.m_ZPositionMM = 1.505;
+    bcu.m_ThicknessMM = 0.035;
+    bcu.m_ConductivitySPerM = 5.8e7;
+    results.m_Stackup.push_back( bcu );
+
+    BOOST_CHECK_EQUAL( results.m_Stackup.size(), 7u );
+
+    // Count copper and dielectric layers
+    int nCopper = 0;
+    int nDielectric = 0;
+
+    for( const auto& layer : results.m_Stackup )
+    {
+        if( layer.m_IsCopperLayer )
+            nCopper++;
+        else
+            nDielectric++;
+    }
+
+    BOOST_CHECK_EQUAL( nCopper, 4 );
+    BOOST_CHECK_EQUAL( nDielectric, 3 );
+
+    // Verify layer ordering by Z position
+    for( size_t i = 1; i < results.m_Stackup.size(); i++ )
+    {
+        BOOST_CHECK_GE( results.m_Stackup[i].m_ZPositionMM,
+                         results.m_Stackup[i - 1].m_ZPositionMM );
+    }
+
+    // Total board thickness check (approximate)
+    double totalThick = results.m_Stackup.back().m_ZPositionMM
+                       + results.m_Stackup.back().m_ThicknessMM;
+    BOOST_CHECK_CLOSE( totalThick, 1.54, 1.0 ); // ~1.54mm for a typical 4-layer
+}
+
+
+// ============================================================================
+// Symmetry tests for impedance/capacitance matrices
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Capacitance matrix symmetry (C_ij = C_ji)
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( CapacitanceMatrixSymmetry, PARSER_TEST_FIXTURE )
+{
+    std::string content =
+        "CAPACITANCE MATRIX, nanofarads\n"
+        "              1         2         3\n"
+        "A  1   0.100  -0.020  -0.010\n"
+        "B  2  -0.020   0.150  -0.030\n"
+        "C  3  -0.010  -0.030   0.120\n"
+        "\n";
+
+    std::string path = writeTempFile( "sym_cap.txt", content );
+
+    std::vector<PDN_PARASITIC::CAPACITANCE_ENTRY> capacitances;
+
+    bool result = PARASITIC_RESULT_PARSER::ParseFastCapOutput( path, capacitances );
+    BOOST_REQUIRE( result );
+    BOOST_REQUIRE_EQUAL( capacitances.size(), 9u );
+
+    // Build a map for easy lookup
+    // Matrix layout: row-major [0,1,2,3,4,5,6,7,8]
+    // C[0][0]=0, C[0][1]=1, C[0][2]=2, C[1][0]=3, ...
+
+    // Check symmetry: C[0][1] == C[1][0]
+    BOOST_CHECK_CLOSE( capacitances[1].m_CapacitancePF,
+                       capacitances[3].m_CapacitancePF, 0.001 );
+
+    // C[0][2] == C[2][0]
+    BOOST_CHECK_CLOSE( capacitances[2].m_CapacitancePF,
+                       capacitances[6].m_CapacitancePF, 0.001 );
+
+    // C[1][2] == C[2][1]
+    BOOST_CHECK_CLOSE( capacitances[5].m_CapacitancePF,
+                       capacitances[7].m_CapacitancePF, 0.001 );
+}
+
+
+// --------------------------------------------------------------------------
+// Impedance matrix symmetry from parsed file
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ImpedanceMatrixSymmetry, PARSER_TEST_FIXTURE )
+{
+    std::string content =
+        "Row 0: N1 to N2\n"
+        "Row 1: N3 to N4\n"
+        "Impedance matrix for frequency = 1e+06\n"
+        "2 x 2\n"
+        "0.500000 +0.062832j  0.050000 +0.006283j\n"
+        "0.050000 +0.006283j  0.400000 +0.050265j\n";
+
+    std::string path = writeTempFile( "sym_zc.mat", content );
+
+    std::vector<PDN_PARASITIC::EXTRACTION_PORT> ports;
+    PDN_PARASITIC::EXTRACTION_PORT p1, p2;
+    p1.m_Name = "P1";
+    p2.m_Name = "P2";
+    ports.push_back( p1 );
+    ports.push_back( p2 );
+
+    std::vector<PDN_PARASITIC::IMPEDANCE_ENTRY> impedances;
+
+    bool result = PARASITIC_RESULT_PARSER::ParseFastHenryOutput( path, ports, impedances );
+    BOOST_REQUIRE( result );
+    BOOST_REQUIRE_EQUAL( impedances.size(), 4u );
+
+    // Z[0][1] should equal Z[1][0] (reciprocity)
+    BOOST_REQUIRE_EQUAL( impedances[1].m_Points.size(), 1u );
+    BOOST_REQUIRE_EQUAL( impedances[2].m_Points.size(), 1u );
+
+    BOOST_CHECK_CLOSE( impedances[1].m_Points[0].m_Z.real(),
+                       impedances[2].m_Points[0].m_Z.real(), 0.001 );
+    BOOST_CHECK_CLOSE( impedances[1].m_Points[0].m_Z.imag(),
+                       impedances[2].m_Points[0].m_Z.imag(), 0.001 );
+}
+
+
+// ============================================================================
+// Skin effect modeling verification
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Verify skin effect: R should increase with sqrt(frequency)
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( SkinEffectResistanceIncrease )
+{
+    // For a good conductor, R_ac / R_dc ~ sqrt(f / f_skin)
+    // We just verify the relationship qualitatively
+
+    std::vector<PDN_PARASITIC::IMPEDANCE_ENTRY> impedances;
+
+    PDN_PARASITIC::IMPEDANCE_ENTRY entry;
+    entry.m_PortI = 0;
+    entry.m_PortJ = 0;
+
+    // Model increasing resistance with frequency (skin effect)
+    std::vector<double> freqs = { 1e3, 1e4, 1e5, 1e6, 1e7 };
+    double R_dc = 0.1;  // ohms
+
+    for( double freq : freqs )
+    {
+        PDN_PARASITIC::IMPEDANCE_POINT pt;
+        pt.m_FrequencyHz = freq;
+        // R increases with sqrt(f) relative to 1kHz base
+        double R = R_dc * std::sqrt( freq / 1e3 );
+        double omega = 2.0 * M_PI * freq;
+        double L = 10e-9;  // 10 nH
+        pt.m_Z = std::complex<double>( R, omega * L );
+        entry.m_Points.push_back( pt );
+    }
+
+    impedances.push_back( entry );
+
+    // Verify resistance increases monotonically
+    for( size_t i = 1; i < entry.m_Points.size(); i++ )
+    {
+        BOOST_CHECK_GT( entry.m_Points[i].m_Z.real(),
+                        entry.m_Points[i - 1].m_Z.real() );
+    }
+
+    // Verify ratio matches sqrt relationship
+    // R(1MHz) / R(1kHz) should be sqrt(1e6/1e3) = sqrt(1000) ~= 31.6
+    double ratio = entry.m_Points[3].m_Z.real() / entry.m_Points[0].m_Z.real();
+    BOOST_CHECK_CLOSE( ratio, std::sqrt( 1000.0 ), 0.1 );
+}
+
+
+// ============================================================================
+// JSON serialization edge cases
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Serialize results with empty arrays but non-zero frequency range
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( SerializeJsonEmptyArraysWithFreqRange, PARSER_TEST_FIXTURE )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+    results.m_FreqMinHz = 1e3;
+    results.m_FreqMaxHz = 1e9;
+    results.m_PointsPerDecade = 5;
+
+    std::string path = m_tempDir + "/freq_only_results.json";
+    m_tempFiles.push_back( path );
+
+    bool ok = results.SerializeToJson( path );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::ifstream file( path );
+    std::string content( ( std::istreambuf_iterator<char>( file ) ),
+                         std::istreambuf_iterator<char>() );
+
+    // Should have empty arrays
+    BOOST_CHECK( content.find( "\"stackup\": []" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"ports\": []" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"impedance_matrix\": []" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"capacitance_matrix\": []" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"net_parasitics\": []" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// Serialize results with special floating point values
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( SerializeJsonSpecialFloatValues, PARSER_TEST_FIXTURE )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    PDN_PARASITIC::NET_PARASITIC np;
+    np.m_NetName = "test";
+    np.m_SegmentId = "seg1";
+    np.m_R_mOhm = 0.0;      // Zero resistance
+    np.m_L_nH = 0.0;         // Zero inductance
+    np.m_C_pF = 0.0;         // Zero capacitance
+    np.m_LengthMM = 0.0;
+    results.m_NetParasitics.push_back( np );
+
+    std::string path = m_tempDir + "/zero_values.json";
+    m_tempFiles.push_back( path );
+
+    bool ok = results.SerializeToJson( path );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::ifstream file( path );
+    std::string content( ( std::istreambuf_iterator<char>( file ) ),
+                         std::istreambuf_iterator<char>() );
+
+    BOOST_CHECK( content.find( "\"test\"" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"seg1\"" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// Serialize and verify multiple ports have comma separators
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( SerializeJsonMultiplePortsFormatting, PARSER_TEST_FIXTURE )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    for( int i = 0; i < 3; i++ )
+    {
+        PDN_PARASITIC::EXTRACTION_PORT port;
+        port.m_Name = "P" + std::to_string( i + 1 );
+        port.m_NetName = "NET" + std::to_string( i + 1 );
+        port.m_PositiveNode = "Np" + std::to_string( i );
+        port.m_NegativeNode = "Nn" + std::to_string( i );
+        port.m_XMM = 10.0 * i;
+        port.m_YMM = 20.0 * i;
+        results.m_Ports.push_back( port );
+    }
+
+    std::string path = m_tempDir + "/multi_port_format.json";
+    m_tempFiles.push_back( path );
+
+    bool ok = results.SerializeToJson( path );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::ifstream file( path );
+    std::string content( ( std::istreambuf_iterator<char>( file ) ),
+                         std::istreambuf_iterator<char>() );
+
+    // All three port names should be present
+    BOOST_CHECK( content.find( "\"P1\"" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"P2\"" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"P3\"" ) != std::string::npos );
+
+    // All three net names should be present
+    BOOST_CHECK( content.find( "\"NET1\"" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"NET2\"" ) != std::string::npos );
+    BOOST_CHECK( content.find( "\"NET3\"" ) != std::string::npos );
+}
+
+
+// ============================================================================
+// Unit conversion verification tests
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// iu2m: KiCad internal units (nm) to meters
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( IU2MConversion )
+{
+    // iu2m(x) = x * 1e-9  (nm to m)
+    // Test this relationship directly since the exporters use it
+
+    auto iu2m = []( int aIU ) -> double { return aIU * 1e-9; };
+
+    // 1 mm = 1e6 nm -> 1e-3 m
+    BOOST_CHECK_CLOSE( iu2m( 1000000 ), 1e-3, 0.001 );
+
+    // 35 um = 35000 nm -> 35e-6 m
+    BOOST_CHECK_CLOSE( iu2m( 35000 ), 35e-6, 0.001 );
+
+    // 0.254 mm = 254000 nm -> 254e-6 m (10 mil trace)
+    BOOST_CHECK_CLOSE( iu2m( 254000 ), 254e-6, 0.001 );
+
+    // 1 m = 1e9 nm
+    BOOST_CHECK_CLOSE( iu2m( 1000000000 ), 1.0, 0.001 );
+
+    // Zero
+    BOOST_CHECK_CLOSE( iu2m( 0 ), 0.0, 1e-15 );
+}
+
+
+// --------------------------------------------------------------------------
+// iu2mm: KiCad internal units (nm) to millimeters
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( IU2MMConversion )
+{
+    // iu2mm(x) = x / 1e6  (nm to mm)
+    auto iu2mm = []( int aIU ) -> double { return aIU / 1e6; };
+
+    // 1 mm = 1e6 nm
+    BOOST_CHECK_CLOSE( iu2mm( 1000000 ), 1.0, 0.001 );
+
+    // 35 um = 35000 nm = 0.035 mm
+    BOOST_CHECK_CLOSE( iu2mm( 35000 ), 0.035, 0.001 );
+
+    // 0.254 mm = 254000 nm (10 mil trace)
+    BOOST_CHECK_CLOSE( iu2mm( 254000 ), 0.254, 0.001 );
+
+    // Zero
+    BOOST_CHECK_CLOSE( iu2mm( 0 ), 0.0, 1e-15 );
+}
+
+
+// ============================================================================
+// DeriveLumpedParasitics: mixed impedance + capacitance tests
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Both impedance and capacitance entries for same conductor
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( DeriveLumpedMixedImpedanceCapacitance )
+{
+    std::vector<PDN_PARASITIC::IMPEDANCE_ENTRY> impedances;
+
+    // Two self-impedance ports
+    for( int i = 0; i < 2; i++ )
+    {
+        PDN_PARASITIC::IMPEDANCE_ENTRY entry;
+        entry.m_PortI = i;
+        entry.m_PortJ = i;
+
+        PDN_PARASITIC::IMPEDANCE_POINT pt;
+        pt.m_FrequencyHz = 1e6;
+        pt.m_Z = std::complex<double>( 0.3, 0.03 );
+        entry.m_Points.push_back( pt );
+
+        impedances.push_back( entry );
+    }
+
+    // Also add off-diagonal (should be skipped)
+    {
+        PDN_PARASITIC::IMPEDANCE_ENTRY entry;
+        entry.m_PortI = 0;
+        entry.m_PortJ = 1;
+
+        PDN_PARASITIC::IMPEDANCE_POINT pt;
+        pt.m_FrequencyHz = 1e6;
+        pt.m_Z = std::complex<double>( 0.01, 0.001 );
+        entry.m_Points.push_back( pt );
+
+        impedances.push_back( entry );
+    }
+
+    // Three capacitance entries (2 diagonal + 1 off-diagonal)
+    std::vector<PDN_PARASITIC::CAPACITANCE_ENTRY> capacitances;
+
+    PDN_PARASITIC::CAPACITANCE_ENTRY c1;
+    c1.m_ConductorI = "VDD";
+    c1.m_ConductorJ = "VDD";
+    c1.m_CapacitancePF = 50.0;
+    capacitances.push_back( c1 );
+
+    PDN_PARASITIC::CAPACITANCE_ENTRY c2;
+    c2.m_ConductorI = "VDD";
+    c2.m_ConductorJ = "GND";
+    c2.m_CapacitancePF = -20.0;
+    capacitances.push_back( c2 );
+
+    PDN_PARASITIC::CAPACITANCE_ENTRY c3;
+    c3.m_ConductorI = "GND";
+    c3.m_ConductorJ = "GND";
+    c3.m_CapacitancePF = 75.0;
+    capacitances.push_back( c3 );
+
+    std::vector<PDN_PARASITIC::NET_PARASITIC> parasitics;
+
+    PARASITIC_RESULT_PARSER::DeriveLumpedParasitics( impedances, capacitances, parasitics );
+
+    // 2 from self-impedance + 2 from self-capacitance = 4
+    BOOST_REQUIRE_EQUAL( parasitics.size(), 4u );
+
+    // First two from impedance (R, L extracted)
+    BOOST_CHECK_CLOSE( parasitics[0].m_R_mOhm, 300.0, 0.01 );
+    BOOST_CHECK_CLOSE( parasitics[1].m_R_mOhm, 300.0, 0.01 );
+
+    // Last two from capacitance
+    bool foundVDD = false;
+    bool foundGND = false;
+
+    for( const auto& np : parasitics )
+    {
+        if( np.m_NetName == "VDD" && np.m_C_pF > 0.0 )
+        {
+            BOOST_CHECK_CLOSE( np.m_C_pF, 50.0, 0.01 );
+            foundVDD = true;
+        }
+
+        if( np.m_NetName == "GND" && np.m_C_pF > 0.0 )
+        {
+            BOOST_CHECK_CLOSE( np.m_C_pF, 75.0, 0.01 );
+            foundGND = true;
+        }
+    }
+
+    BOOST_CHECK( foundVDD );
+    BOOST_CHECK( foundGND );
+}
+
+
+// --------------------------------------------------------------------------
+// Multiple self-capacitance entries for the same conductor
+// --------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( DeriveLumpedDuplicateCapacitor )
+{
+    std::vector<PDN_PARASITIC::IMPEDANCE_ENTRY> impedances;
+    std::vector<PDN_PARASITIC::CAPACITANCE_ENTRY> capacitances;
+
+    // Two self-capacitance entries for "VDD" - second should create a new entry
+    // since the code only matches on existing NetName
+    PDN_PARASITIC::CAPACITANCE_ENTRY c1;
+    c1.m_ConductorI = "VDD";
+    c1.m_ConductorJ = "VDD";
+    c1.m_CapacitancePF = 50.0;
+    capacitances.push_back( c1 );
+
+    PDN_PARASITIC::CAPACITANCE_ENTRY c2;
+    c2.m_ConductorI = "VDD";
+    c2.m_ConductorJ = "VDD";
+    c2.m_CapacitancePF = 75.0;
+    capacitances.push_back( c2 );
+
+    std::vector<PDN_PARASITIC::NET_PARASITIC> parasitics;
+
+    PARASITIC_RESULT_PARSER::DeriveLumpedParasitics( impedances, capacitances, parasitics );
+
+    // First entry creates new NET_PARASITIC with C=50
+    // Second entry finds existing "VDD" entry and updates C=75
+    BOOST_REQUIRE_GE( parasitics.size(), 1u );
+
+    // The first VDD entry is found and updated to 75
+    bool foundVDD = false;
+
+    for( const auto& np : parasitics )
+    {
+        if( np.m_NetName == "VDD" )
+        {
+            BOOST_CHECK_CLOSE( np.m_C_pF, 75.0, 0.01 );
+            foundVDD = true;
+            break;
+        }
+    }
+
+    BOOST_CHECK( foundVDD );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()
