@@ -6,6 +6,8 @@ This plan describes how to add a **Power Distribution Chart** feature to KiCad's
 
 Additionally, new **ERC (Electrical Rules Check) rules** flag power-related issues (overloaded rails, missing annotations, orphan power nets), integrating power analysis into the familiar ERC workflow.
 
+The data model is designed as a **shared foundation** for a broader power/signal integrity tool suite — including a PDN impedance analyzer and FastCap/FastHenry parasitic extraction — by living in `common/` and providing JSON serialization for cross-editor data exchange.
+
 **Target codebase:** KiCad 9.0.x (master branch).
 
 ---
@@ -47,46 +49,60 @@ Additionally, new **ERC (Electrical Rules Check) rules** flag power-related issu
 ## 3. Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    SCH_EDIT_FRAME                             │
-│                                                              │
-│  Analysis Engine:                                            │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │           POWER_DISTRIBUTION_ANALYZER                  │  │
-│  │  - Walks SCH_SHEET_LIST, SCH_SYMBOL, SCH_FIELD        │  │
-│  │  - Classifies components as sources/regulators/loads   │  │
-│  │  - Builds net-based power tree via CONNECTION_GRAPH    │  │
-│  │  - Computes current budgets per rail                   │  │
-│  │  - Populates POWER_DISTRIBUTION_MODEL                  │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                           │                                   │
-│              ┌────────────┴────────────┐                     │
-│              ▼                         ▼                     │
-│  ┌─────────────────────┐  ┌──────────────────────┐          │
-│  │  CHART GENERATOR    │  │  ERC POWER CHECKS    │          │
-│  │  Writes SCH_TABLE,  │  │  New ERCE_* codes    │          │
-│  │  SCH_TEXT, SCH_LINE, │  │  in ERC_TESTER       │          │
-│  │  SCH_SHAPE onto a   │  │  Rail overload,      │          │
-│  │  dedicated sheet     │  │  missing annotations │          │
-│  └─────────────────────┘  └──────────────────────┘          │
-│              │                         │                     │
-│              ▼                         ▼                     │
-│  ┌─────────────────────┐  ┌──────────────────────┐          │
-│  │  "Power             │  │  Standard ERC        │          │
-│  │   Distribution"     │  │  markers/violations  │          │
-│  │  .kicad_sch sheet   │  │  in ERC dialog       │          │
-│  └─────────────────────┘  └──────────────────────┘          │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         common/                                      │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  POWER_DISTRIBUTION_MODEL        (shared data structures)     │  │
+│  │  POWER_DISTRIBUTION_SETTINGS     (shared configuration)       │  │
+│  │  JSON serialization              (cross-editor exchange)      │  │
+│  └──────────────────────┬────────────────────────────────────────┘  │
+└─────────────────────────┼───────────────────────────────────────────┘
+                          │
+          ┌───────────────┼──────────────────────────┐
+          │               │                          │
+          ▼               ▼                          ▼
+┌─────────────────┐ ┌────────────────────┐  ┌──────────────────────┐
+│    EESCHEMA      │ │     PCBNEW          │  │  PCBNEW (future)     │
+│                  │ │   (other sessions)  │  │                      │
+│ ANALYZER         │ │                     │  │  DC IR Drop          │
+│ walks schematic, │ │ PDN Analyzer        │  │  Copper mesh + solve │
+│ populates model  │ │ rail pair Z(f)      │  │  Voltage heatmaps    │
+│                  │ │ cap ESR/ESL model   │  │                      │
+│ CHART GENERATOR  │ │                     │  │  FastCap/FastHenry   │
+│ sheet rendering  │ │ Reads model JSON    │  │  BEM parasitic C/L   │
+│                  │ │ for boundary conds  │  │  extraction           │
+│ ERC CHECKS       │ │                     │  │                      │
+│ power rule       │ │                     │  │  Reads model JSON    │
+│ violations       │ │                     │  │  for net topology    │
+└─────────────────┘ └────────────────────┘  └──────────────────────┘
+```
+
+### Data Flow Between Tools
+
+```
+Power Dist Chart (eeschema)
+  │
+  ├──► JSON export ──► PDN Analyzer (pcbnew)
+  │    net names,          │
+  │    rail pairs,         ├──► FastCap/FastHenry export
+  │    voltages,           │    copper geometry for BEM field solve
+  │    source/load I,      │
+  │    component refs,     ◄──── FastCap/FastHenry import
+  │    pin numbers              extracted C/L replace lumped estimates
+  │
+  └──► JSON export ──► DC IR Drop (pcbnew, future)
+       same data +          copper mesh + boundary conditions
+       pad locations         from model's current values
 ```
 
 ### Module Breakdown
 
 | Module | Location | Purpose |
 |--------|----------|---------|
-| `POWER_DISTRIBUTION_MODEL` | `eeschema/power_distribution/power_distribution_model.{h,cpp}` | Data structures for power tree |
+| `POWER_DISTRIBUTION_MODEL` | `common/power_distribution/power_distribution_model.{h,cpp}` | Shared data structures + JSON serialization |
+| `POWER_DISTRIBUTION_SETTINGS` | `common/power_distribution/power_distribution_settings.{h,cpp}` | Shared configuration (field names, patterns, thresholds) |
 | `POWER_DISTRIBUTION_ANALYZER` | `eeschema/power_distribution/power_distribution_analyzer.{h,cpp}` | Schematic analysis engine |
 | `POWER_CHART_GENERATOR` | `eeschema/power_distribution/power_chart_generator.{h,cpp}` | Generates drawing items on sheet |
-| `POWER_DISTRIBUTION_SETTINGS` | `eeschema/power_distribution/power_distribution_settings.{h,cpp}` | Configurable patterns and field names |
 | ERC integration | `eeschema/erc/erc.{h,cpp}`, `erc_settings.h`, `erc_item.{h,cpp}` | New power-related ERC checks |
 | Menu integration | `eeschema/menubar.cpp`, `eeschema/tools/sch_actions.{h,cpp}` | Menu item and action |
 | Tool handler | `eeschema/tools/sch_editor_control.{h,cpp}` | Action handler for generate command |
@@ -95,9 +111,11 @@ Additionally, new **ERC (Electrical Rules Check) rules** flag power-related issu
 
 ## 4. Detailed Design
 
-### 4.1 Data Model (`power_distribution_model.h`)
+### 4.1 Data Model (`common/power_distribution/power_distribution_model.h`)
 
-Same as previous plan — structs for `POWER_SOURCE`, `POWER_REGULATOR`, `POWER_RAIL`, `POWER_LOAD`, `POWER_TREE_NODE`, and the container `POWER_DISTRIBUTION_MODEL`. No changes needed.
+The model lives in `common/` so it can be consumed by both eeschema (analyzer, chart, ERC) and pcbnew (PDN analyzer, DC IR drop, FastCap/FastHenry). It contains no schematic-specific types — component references use strings and pin numbers rather than `SCH_SYMBOL*` pointers, making the model serializable and usable across editor boundaries.
+
+Eeschema-side code holds `SCH_SYMBOL*` pointers separately in the analyzer for navigation/markers, but the model itself is editor-agnostic.
 
 ```cpp
 #ifndef POWER_DISTRIBUTION_MODEL_H
@@ -107,22 +125,40 @@ Same as previous plan — structs for `POWER_SOURCE`, `POWER_REGULATOR`, `POWER_
 #include <vector>
 #include <memory>
 
-class SCH_SYMBOL;
-class SCH_SHEET_PATH;
+namespace nlohmann { class json; }  // forward decl for serialization
+
+
+// Identifies a specific pin on a component, bridging schematic and PCB domains.
+// The pin number matches the footprint pad number, enabling PCB-side tools
+// (PDN analyzer, DC IR drop, FastCap/FastHenry) to locate exact current
+// injection/extraction points on copper geometry.
+struct PIN_REFERENCE
+{
+    wxString  m_pinNumber;   // Schematic pin number = PCB pad number
+    wxString  m_pinName;     // Human-readable: "VIN", "VOUT", "GND", etc.
+    wxString  m_netName;     // Net this pin connects to
+};
+
 
 struct POWER_SOURCE
 {
     wxString         m_name;
+    wxString         m_reference;     // "J1", "BT1" — PCB cross-reference
     wxString         m_netName;
     double           m_voltage;
     double           m_maxCurrent;    // Amps
-    SCH_SYMBOL*      m_symbol;
-    SCH_SHEET_PATH   m_sheetPath;
+
+    std::vector<PIN_REFERENCE>  m_powerPins;   // Pins carrying power out
+    std::vector<PIN_REFERENCE>  m_groundPins;  // Return/ground pins
+
+    // Eeschema-only (not serialized): symbol pointer + sheet path
+    // Held by the analyzer for ERC marker placement, not part of the model.
 };
 
 struct POWER_REGULATOR
 {
     wxString         m_name;
+    wxString         m_reference;     // "U1" — PCB cross-reference
     wxString         m_type;          // "LDO", "Buck", "Boost", etc.
     wxString         m_inputNet;
     wxString         m_outputNet;
@@ -130,13 +166,16 @@ struct POWER_REGULATOR
     double           m_outputVoltage;
     double           m_maxOutputCurrent;
     double           m_efficiency;    // 0.0-1.0
-    SCH_SYMBOL*      m_symbol;
-    SCH_SHEET_PATH   m_sheetPath;
+
+    std::vector<PIN_REFERENCE>  m_inputPins;   // VIN pins
+    std::vector<PIN_REFERENCE>  m_outputPins;  // VOUT pins
+    std::vector<PIN_REFERENCE>  m_groundPins;  // GND/exposed-pad pins
 };
 
 struct POWER_RAIL
 {
     wxString         m_netName;
+    wxString         m_returnNet;     // Paired return net (e.g. "GND" for "+3V3")
     double           m_voltage;
     double           m_availableCurrent;
     double           m_consumedCurrent;
@@ -146,10 +185,11 @@ struct POWER_RAIL
 struct POWER_LOAD
 {
     wxString         m_name;
+    wxString         m_reference;     // "U2", "R5" — PCB cross-reference
     wxString         m_netName;
     double           m_currentDraw;   // Amps
-    SCH_SYMBOL*      m_symbol;
-    SCH_SHEET_PATH   m_sheetPath;
+
+    std::vector<PIN_REFERENCE>  m_powerPins;   // VCC/VDD pins on this net
 };
 
 struct POWER_TREE_NODE
@@ -158,11 +198,10 @@ struct POWER_TREE_NODE
 
     NODE_TYPE        m_type;
     wxString         m_label;
+    wxString         m_reference;     // Component reference for PCB matching
     double           m_voltage;
     double           m_currentAvailable;
     double           m_currentConsumed;
-    SCH_SYMBOL*      m_symbol = nullptr;
-    SCH_SHEET_PATH   m_sheetPath;
 
     std::vector<std::unique_ptr<POWER_TREE_NODE>> m_children;
     POWER_TREE_NODE* m_parent = nullptr;
@@ -184,6 +223,12 @@ public:
     double GetTotalPowerConsumed() const;
     int    GetOverloadedRailCount() const;
 
+    // --- Serialization (integration point for PDN analyzer, DC IR drop, etc.) ---
+    void     ToJSON( nlohmann::json& aOut ) const;
+    bool     FromJSON( const nlohmann::json& aIn );
+    void     SaveToFile( const wxString& aPath ) const;
+    bool     LoadFromFile( const wxString& aPath );
+
 private:
     std::unique_ptr<POWER_TREE_NODE>  m_rootNode;
     std::vector<POWER_SOURCE>         m_sources;
@@ -197,9 +242,135 @@ private:
 #endif
 ```
 
-### 4.2 Analyzer (`power_distribution_analyzer.h/.cpp`)
+#### JSON Export Format
 
-Unchanged from previous plan. Walks the schematic, classifies components, builds power tree, computes budgets. Uses `CONNECTION_GRAPH` for net tracing. See previous plan sections 4.2.1-4.2.4 for full detail.
+The JSON format is the **integration contract** between tools. The PDN analyzer
+and FastCap/FastHenry exporter in pcbnew consume this to identify rail pairs,
+boundary conditions, and component-to-pad mapping without re-analyzing the
+schematic.
+
+```json
+{
+  "version": 1,
+  "total_power_input_w": 2.5,
+  "total_power_consumed_w": 1.8,
+  "rails": [
+    {
+      "net": "+3V3",
+      "return_net": "GND",
+      "voltage": 3.3,
+      "available_current_a": 0.3,
+      "consumed_current_a": 0.195,
+      "utilization_pct": 65.0,
+      "sources": [
+        {
+          "reference": "U1",
+          "name": "LM1117-3.3",
+          "type": "LDO",
+          "input_net": "+5V",
+          "output_voltage": 3.3,
+          "max_output_current_a": 0.3,
+          "efficiency": 1.0,
+          "input_pins":  [{"pad": "1", "name": "VIN",  "net": "+5V"}],
+          "output_pins": [{"pad": "3", "name": "VOUT", "net": "+3V3"}],
+          "ground_pins": [{"pad": "2", "name": "GND",  "net": "GND"}]
+        }
+      ],
+      "loads": [
+        {
+          "reference": "U2",
+          "name": "STM32F405",
+          "current_a": 0.05,
+          "pins": [
+            {"pad": "12", "name": "VDD1", "net": "+3V3"},
+            {"pad": "48", "name": "VDD2", "net": "+3V3"}
+          ]
+        },
+        {
+          "reference": "U3",
+          "name": "W25Q128",
+          "current_a": 0.025,
+          "pins": [{"pad": "8", "name": "VCC", "net": "+3V3"}]
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Downstream consumers:**
+
+| Consumer | What it reads | What it does with it |
+|----------|--------------|---------------------|
+| **PDN Analyzer** | `rails[].net` + `return_net` | Identifies power/return plane pairs for impedance sweep |
+| **PDN Analyzer** | `loads[].current_a` + `pins[].pad` | Sets current sink locations and magnitudes on the impedance model |
+| **PDN Analyzer** | `sources[].output_pins[].pad` | Sets VRM source location for decoupling analysis |
+| **DC IR Drop** | `loads[].pins[].pad` | Current extraction points on copper mesh |
+| **DC IR Drop** | `sources[].output_pins[].pad` | Current injection points on copper mesh |
+| **DC IR Drop** | `rails[].voltage` | Expected voltage for drop violation checking |
+| **FastCap/FastHenry** | `rails[].net` + `return_net` | Identifies conductor pairs for capacitance/inductance extraction |
+
+### 4.2 Analyzer (`eeschema/power_distribution/power_distribution_analyzer.h/.cpp`)
+
+Walks the schematic, classifies components, builds power tree, computes budgets. Uses `CONNECTION_GRAPH` for net tracing. The analyzer holds eeschema-specific data (SCH_SYMBOL pointers, SCH_SHEET_PATHs) for ERC marker placement, while populating the editor-agnostic model.
+
+**Key additions for cross-tool integration:**
+
+#### 4.2.1 Component Reference and Pin Capture
+
+When classifying a symbol as a source, regulator, or load, the analyzer now also captures:
+- `m_reference` — the component's reference designator string (e.g. "U1"), which matches the footprint reference in pcbnew
+- `PIN_REFERENCE` entries — for each power-relevant pin, the pin number (= PCB pad number), pin name, and connected net
+
+This data is already available during the schematic walk (from `SCH_SYMBOL::GetRef()` and `SCH_PIN::GetNumber()`/`GetName()`/`GetNet()`), so this is not additional analysis work — just additional capture.
+
+#### 4.2.2 Return Net Identification
+
+New method: `IdentifyReturnNets()` — called after the power tree is built.
+
+For each `POWER_RAIL`, determines the paired return net (typically GND). Strategy:
+1. For rails fed by a regulator: the regulator's ground pin net is the return net
+2. For rails fed by a source (connector, battery): the source's ground pin net is the return net
+3. Fallback: look for a net named "GND" or matching a configurable return-net pattern
+
+This is critical for the PDN analyzer, which needs power/return plane pairs.
+
+```cpp
+class POWER_DISTRIBUTION_ANALYZER
+{
+public:
+    POWER_DISTRIBUTION_ANALYZER( SCHEMATIC* aSchematic,
+                                  const POWER_DISTRIBUTION_SETTINGS& aSettings );
+
+    bool Analyze();
+
+    POWER_DISTRIBUTION_MODEL& GetModel() { return m_model; }
+
+    // Eeschema-specific: map from component reference to SCH_SYMBOL* + sheet path
+    // Used by ERC marker placement — not part of the serializable model.
+    struct SYMBOL_LOCATION
+    {
+        SCH_SYMBOL*    m_symbol;
+        SCH_SHEET_PATH m_sheetPath;
+    };
+
+    const SYMBOL_LOCATION* GetSymbolLocation( const wxString& aReference ) const;
+
+private:
+    void classifyComponents();
+    void buildPowerTree();
+    void computeBudgets();
+    void identifyReturnNets();     // NEW: pairs each rail with its return net
+    void captureComponentPins();   // NEW: populates PIN_REFERENCE vectors
+
+    SCHEMATIC*                      m_schematic;
+    POWER_DISTRIBUTION_SETTINGS     m_settings;
+    POWER_DISTRIBUTION_MODEL        m_model;
+
+    // Eeschema-only lookup for marker placement
+    std::map<wxString, SYMBOL_LOCATION>  m_symbolLocations;
+};
+```
 
 ### 4.3 Chart Generator (`power_chart_generator.h/.cpp`) — NEW
 
@@ -384,14 +555,15 @@ ERC_ITEM ERC_ITEM::powerOrphanRail( ERCE_POWER_ORPHAN_RAIL,
 | `ERCE_POWER_UNKNOWN_LOAD_CURRENT` | Warning | Budget can't be computed |
 | `ERCE_POWER_ORPHAN_RAIL` | Warning | May be intentional (off-board supply) |
 
-### 4.5 Settings (`power_distribution_settings.h/.cpp`)
+### 4.5 Settings (`common/power_distribution/power_distribution_settings.h/.cpp`)
 
-Same as previous plan. Stored in `.kicad_pro` under `"power_distribution"` key. Contains:
+Stored in `.kicad_pro` under `"power_distribution"` key. Lives in `common/` so pcbnew-side tools can read the same configuration (e.g. the PDN analyzer needs to know the field name mappings to cross-reference). Contains:
 - Field name mappings (`Power_Type`, `Output_Voltage`, `Max_Current`, `Current_Draw`, `Efficiency`)
 - Source patterns (`Connector*`, `Battery*`, `USB*`, etc.)
 - Regulator patterns (`Regulator_Linear*`, `Regulator_Switching*`, etc.)
 - Warning/critical thresholds (80%, 95%)
 - Chart sheet name (default: `"Power Distribution"`)
+- Return net patterns (default: `"GND"`, `"AGND"`, `"DGND"`, `"GND_*"`) — used by `IdentifyReturnNets()`
 
 ### 4.6 Annotation Workflow
 
@@ -412,20 +584,27 @@ This creates a natural workflow: **Annotate → ERC → Fix → Generate Chart**
 
 ## 5. Implementation Steps
 
-### Phase 1: Data Model, Settings, and Analyzer
+### Phase 1: Shared Data Model and Settings (in `common/`)
 
 **Files to create:**
-- `eeschema/power_distribution/power_distribution_model.h`
-- `eeschema/power_distribution/power_distribution_model.cpp`
+- `common/power_distribution/power_distribution_model.h`
+- `common/power_distribution/power_distribution_model.cpp` — includes JSON serialization
+- `common/power_distribution/power_distribution_settings.h`
+- `common/power_distribution/power_distribution_settings.cpp`
+
+**Files to modify:**
+- `common/CMakeLists.txt` — Add new source files to `common` library
+
+### Phase 2: Schematic Analyzer (in `eeschema/`)
+
+**Files to create:**
 - `eeschema/power_distribution/power_distribution_analyzer.h`
-- `eeschema/power_distribution/power_distribution_analyzer.cpp`
-- `eeschema/power_distribution/power_distribution_settings.h`
-- `eeschema/power_distribution/power_distribution_settings.cpp`
+- `eeschema/power_distribution/power_distribution_analyzer.cpp` — includes `identifyReturnNets()`, `captureComponentPins()`
 
 **Files to modify:**
 - `eeschema/CMakeLists.txt`
 
-### Phase 2: Chart Generator
+### Phase 3: Chart Generator
 
 **Files to create:**
 - `eeschema/power_distribution/power_chart_generator.h`
@@ -434,7 +613,7 @@ This creates a natural workflow: **Annotate → ERC → Fix → Generate Chart**
 **Files to modify:**
 - `eeschema/CMakeLists.txt`
 
-### Phase 3: ERC Integration
+### Phase 4: ERC Integration
 
 **Files to modify:**
 - `eeschema/erc/erc_settings.h` — Add `ERCE_POWER_*` enum values
@@ -444,21 +623,22 @@ This creates a natural workflow: **Annotate → ERC → Fix → Generate Chart**
 - `eeschema/erc/erc.cpp` — Implement `TestPowerDistribution()`, hook into `RunTests()`
 - `eeschema/erc/erc_settings.cpp` — Set default severities
 
-### Phase 4: Menu and Action Integration
+### Phase 5: Menu and Action Integration
 
 **Files to modify:**
 - `eeschema/tools/sch_actions.h` — Add `generatePowerDistChart` action
 - `eeschema/tools/sch_actions.cpp` — Define the action
 - `eeschema/tools/sch_editor_control.h` — Add handler declaration
-- `eeschema/tools/sch_editor_control.cpp` — Implement handler
+- `eeschema/tools/sch_editor_control.cpp` — Implement handler, including JSON export option
 - `eeschema/menubar.cpp` — Add to Inspect menu
 
-### Phase 5: Polish and Testing
+### Phase 6: Polish and Testing
 
 - Test with demo schematics
 - Handle edge cases (empty designs, circular dependencies, multi-source rails)
 - Ensure chart sheet is properly saved/loaded
-- Add unit tests
+- Verify JSON export round-trips correctly (write → read → compare)
+- Add unit tests for model, analyzer, and serialization
 
 ---
 
@@ -467,21 +647,24 @@ This creates a natural workflow: **Annotate → ERC → Fix → Generate Chart**
 ### New Files (8)
 
 ```
+common/power_distribution/
+├── power_distribution_model.h          ← shared between eeschema + pcbnew
+├── power_distribution_model.cpp        ← includes JSON ToJSON/FromJSON
+├── power_distribution_settings.h       ← shared configuration
+└── power_distribution_settings.cpp
+
 eeschema/power_distribution/
-├── power_distribution_model.h
-├── power_distribution_model.cpp
-├── power_distribution_analyzer.h
+├── power_distribution_analyzer.h       ← schematic-specific (walks SCH_SYMBOL)
 ├── power_distribution_analyzer.cpp
-├── power_distribution_settings.h
-├── power_distribution_settings.cpp
-├── power_chart_generator.h
+├── power_chart_generator.h             ← schematic-specific (writes to SCH_SCREEN)
 └── power_chart_generator.cpp
 ```
 
-### Modified Files (10)
+### Modified Files (11)
 
 ```
-eeschema/CMakeLists.txt              — Add new source files
+common/CMakeLists.txt                — Add common/power_distribution/ source files
+eeschema/CMakeLists.txt              — Add eeschema/power_distribution/ source files
 eeschema/erc/erc_settings.h          — Add ERCE_POWER_* enum values
 eeschema/erc/erc_item.h              — Add static ERC_ITEM declarations
 eeschema/erc/erc_item.cpp            — Register power ERC items
@@ -496,7 +679,50 @@ eeschema/menubar.cpp                 — Add Inspect menu entry
 
 ---
 
-## 7. Key Design Decisions
+## 7. Relationship to Other Power/Signal Integrity Tools
+
+This feature is the first piece of a broader power and signal integrity suite being developed across multiple sessions:
+
+### The Suite
+
+| Tool | Domain | Abstraction Level | Status |
+|------|--------|--------------------|--------|
+| **Power Distribution Chart** (this plan) | Eeschema (schematic) | Budgetary — current summation, no geometry | This session |
+| **PDN Analyzer** | Pcbnew (layout) | Frequency-domain — Z(f) impedance of power/return planes with decoupling caps (ESR/ESL parasitics) | Other session |
+| **FastCap/FastHenry Export/Import** | Pcbnew (layout) | Field-solve — BEM quasistatic extraction of parasitic C and L from copper geometry | Other session |
+| **DC IR Drop** (future) | Pcbnew (layout) | Resistive mesh — voltage drop and current density heatmaps | Not yet started |
+
+### How This Plan Enables the Others
+
+The `POWER_DISTRIBUTION_MODEL` and its JSON export serve as the **entry point** for all downstream tools:
+
+1. **PDN Analyzer** reads the JSON to identify:
+   - Rail pairs (`net` + `return_net`) → which planes to analyze
+   - Load current sinks (`loads[].current_a` + `pins[].pad`) → boundary conditions for impedance target
+   - VRM source locations (`sources[].output_pins[].pad`) → regulator model placement
+   - This eliminates manual per-net configuration (unlike Altium's PDN Analyzer which requires it)
+
+2. **FastCap/FastHenry** reads the JSON to identify:
+   - Which conductor pairs to extract C/L for (`net` + `return_net`)
+   - Which component pads are electrically relevant (avoiding extraction of unused geometry)
+   - Extracted parasitics flow back into the PDN analyzer, replacing lumped estimates
+
+3. **DC IR Drop** (future) reads the JSON to set:
+   - Current source magnitudes at regulator output pads
+   - Current sink magnitudes at load pads
+   - Pass/fail voltage thresholds per rail
+
+### Design Decisions for Cross-Tool Compatibility
+
+- **Model in `common/`**: Both editors can link to the same data structures. No IPC or format conversion needed within a single KiCad process.
+- **JSON serialization**: For cross-session and cross-process exchange. The PDN analyzer and FastCap sessions can operate on a saved JSON without the schematic open.
+- **`PIN_REFERENCE` with pad numbers**: The pin-number-to-pad-number equivalence in KiCad is what bridges schematic and layout. Capturing this in the model means pcbnew tools can locate exact copper features.
+- **`m_returnNet` on rails**: The PDN analyzer's fundamental unit is a power/return plane pair. Discovering this from the schematic (via regulator ground pins) is more reliable than guessing from net names.
+- **Editor-agnostic model structs**: No `SCH_SYMBOL*` or `FOOTPRINT*` in the model. The analyzer holds symbol pointers in a side map for ERC markers, but the model itself is pure data.
+
+---
+
+## 8. Key Design Decisions
 
 ### Q: Why a sub-sheet and not items on the root sheet?
 A: The chart can be large. A dedicated sub-sheet keeps it organized and avoids cluttering the user's design. The sheet appears in the hierarchy navigator and can be navigated to like any other sheet.
@@ -515,7 +741,7 @@ A: The handler calls `RecalculateConnections()` before running the analyzer, ens
 
 ---
 
-## 8. Round-Trip Safety
+## 9. Round-Trip Safety
 
 This feature is **fully round-trip safe**:
 - The analyzer **only reads** existing schematic data
@@ -524,10 +750,12 @@ This feature is **fully round-trip safe**:
 - The chart can be deleted by simply removing the sub-sheet — no orphaned data
 - No changes to the `.kicad_sch` S-expression format
 - Settings stored in `.kicad_pro` under a new `"power_distribution"` key — ignored by older KiCad versions
+- JSON export is a separate file (`.kicad_power_dist.json`) — optional, not required for the chart or ERC to function
+- The JSON file can be regenerated at any time from the schematic — it is derived data, not a source of truth
 
 ---
 
-## 9. ERC Error Messages (Examples)
+## 10. ERC Error Messages (Examples)
 
 **ERCE_POWER_RAIL_OVERLOAD:**
 > Power rail '+3V3' overloaded: 350mA consumed / 300mA available (117%)
