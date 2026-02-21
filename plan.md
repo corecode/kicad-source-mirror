@@ -6,7 +6,7 @@ This plan describes how to add a **Power Distribution Chart** feature to KiCad's
 
 Additionally, new **ERC (Electrical Rules Check) rules** flag power-related issues (overloaded rails, missing annotations, orphan power nets), integrating power analysis into the familiar ERC workflow.
 
-The data model is designed as a **shared foundation** for a broader power/signal integrity tool suite — including a PDN impedance analyzer and FastCap/FastHenry parasitic extraction — by living in `common/` and providing JSON serialization for cross-editor data exchange.
+The data model is designed as the **shared foundation** that ties together the existing PDN impedance analyzer (side pane in pcbnew) and FastCap/FastHenry parasitic extraction (also pcbnew, on other branches) — living in `common/` with in-process sharing via the project object and optional JSON export.
 
 **Target codebase:** KiCad 9.0.x (master branch).
 
@@ -48,54 +48,78 @@ The data model is designed as a **shared foundation** for a broader power/signal
 
 ## 3. Architecture
 
+### System Overview
+
+Three tools form a power integrity suite across the two editors. The PDN analyzer
+and FastCap/FastHenry integration already exist on other branches; this plan adds
+the schematic-level analysis and the shared data model that ties them together.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         common/                                      │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │  POWER_DISTRIBUTION_MODEL        (shared data structures)     │  │
 │  │  POWER_DISTRIBUTION_SETTINGS     (shared configuration)       │  │
-│  │  JSON serialization              (cross-editor exchange)      │  │
+│  │  JSON serialization              (file-based exchange)        │  │
 │  └──────────────────────┬────────────────────────────────────────┘  │
 └─────────────────────────┼───────────────────────────────────────────┘
                           │
-          ┌───────────────┼──────────────────────────┐
-          │               │                          │
-          ▼               ▼                          ▼
-┌─────────────────┐ ┌────────────────────┐  ┌──────────────────────┐
-│    EESCHEMA      │ │     PCBNEW          │  │  PCBNEW (future)     │
-│                  │ │   (other sessions)  │  │                      │
-│ ANALYZER         │ │                     │  │  DC IR Drop          │
-│ walks schematic, │ │ PDN Analyzer        │  │  Copper mesh + solve │
-│ populates model  │ │ rail pair Z(f)      │  │  Voltage heatmaps    │
-│                  │ │ cap ESR/ESL model   │  │                      │
-│ CHART GENERATOR  │ │                     │  │  FastCap/FastHenry   │
-│ sheet rendering  │ │ Reads model JSON    │  │  BEM parasitic C/L   │
-│                  │ │ for boundary conds  │  │  extraction           │
-│ ERC CHECKS       │ │                     │  │                      │
-│ power rule       │ │                     │  │  Reads model JSON    │
-│ violations       │ │                     │  │  for net topology    │
-└─────────────────┘ └────────────────────┘  └──────────────────────┘
+          ┌───────────────┴──────────────────────────┐
+          │                                          │
+          ▼                                          ▼
+┌──────────────────────┐               ┌──────────────────────────────┐
+│    EESCHEMA            │               │          PCBNEW                │
+│                        │               │                                │
+│ ANALYZER               │               │  PDN Analyzer (exists)         │
+│  walks schematic,      │  in-process   │   discovers rails via          │
+│  classifies components,│──────────────▶│   power_in/power_out pins      │
+│  populates model       │   or JSON     │   + caps on those nets         │
+│                        │               │   shows Z(f) in side pane      │
+│ CHART GENERATOR        │               │                                │
+│  power tree on sheet   │               │  FastCap/FastHenry (exists)    │
+│                        │               │   BEM parasitic C/L extraction │
+│ ERC CHECKS             │               │   from copper geometry         │
+│  power rule violations │               │                                │
+└──────────────────────┘               └──────────────────────────────┘
 ```
 
 ### Data Flow Between Tools
 
 ```
-PDN Analyzer (pcbnew)                     Power Dist Chart (eeschema)
-  │                                          │
-  │ discovers rails independently            │ analyzes schematic annotations
-  │ via power_in/power_out pins              │ (Power_Type, Max_Current, etc.)
-  │ + decoupling caps on nets                │
-  │                                          │
-  │◄──── optional JSON enrichment ───────────┤
-  │      current budgets, return net,        │
-  │      VRM params, component roles         │
-  │                                          │
-  ├──► FastCap/FastHenry export              └──► JSON export ──► DC IR Drop
-  │    copper geometry for BEM solve              current values    (future)
-  │                                               per pad
-  ◄──── FastCap/FastHenry import
-       extracted C/L replace lumped estimates
+   EESCHEMA                                         PCBNEW
+┌──────────────────┐                    ┌───────────────────────────────┐
+│                  │                    │                               │
+│  User annotates  │                    │  PDN Analyzer side pane       │
+│  Power_Type,     │                    │  ┌─────────────────────────┐  │
+│  Max_Current,    │    in-process:     │  │ Z(f) impedance plot     │  │
+│  Current_Draw    │    project holds   │  │                         │  │
+│  on symbols      │    model object    │  │ discovers rails via     │  │
+│       │          │────────────────────│──│ power_in/power_out pins │  │
+│       ▼          │        or          │  │ + decoupling caps       │  │
+│  Analyze +       │    file-based:     │  │                         │  │
+│  Generate Chart  │    .json export    │  │ enriched with:          │  │
+│       │          │────────────────────│──│ • load currents         │  │
+│       ▼          │                    │  │ • VRM params            │  │
+│  Power tree      │                    │  │ • return net pairs      │  │
+│  on sheet        │                    │  └─────────────────────────┘  │
+│  + ERC markers   │                    │             │                 │
+│                  │                    │             ▼                 │
+│                  │                    │  FastCap/FastHenry            │
+│                  │                    │  • uses net + return_net      │
+│                  │                    │    for conductor pair IDs     │
+│                  │                    │  • extracted C/L feed back    │
+│                  │                    │    into PDN analyzer model    │
+└──────────────────┘                    └───────────────────────────────┘
 ```
+
+### Two Data Exchange Paths
+
+| Path | When | Mechanism |
+|------|------|-----------|
+| **In-process** | Both editors open on same project (normal KiCad use) | `POWER_DISTRIBUTION_MODEL` object held in project state; pcbnew reads it directly from memory via `common/` types |
+| **File-based** | CI/automation, or user exports explicitly | `.kicad_power_dist.json` written next to `.kicad_pro`; PDN analyzer loads on demand |
+
+The in-process path is the default — when the user generates the chart in eeschema, the model is stored in the project. When they switch to pcbnew and open the PDN analyzer side pane, it finds the model already populated. The JSON file path exists for automation and for cases where the schematic and layout are analyzed separately.
 
 ### Module Breakdown
 
@@ -300,20 +324,18 @@ schematic.
 }
 ```
 
-**Downstream consumers:**
+**Consumers (in-process or via JSON):**
 
-Note: The PDN analyzer discovers rails independently by walking power_in/power_out pins and finding decoupling capacitors on those nets. It does *not* depend on this JSON for rail identification. The JSON provides **enrichment data** — current budgets, regulator classification, efficiency — that the PDN analyzer cannot derive from pin types alone.
+The PDN analyzer and FastCap/FastHenry already exist on other branches and work standalone. They discover rails independently by walking `power_in`/`power_out` pins and finding decoupling capacitors on those nets. This model provides **enrichment** — data they cannot derive from pin types alone. See Section 7 for detailed integration design.
 
 | Consumer | What it reads | What it does with it |
 |----------|--------------|---------------------|
-| **PDN Analyzer** | `rails[].return_net` | Confirms return plane pairing (PDN finds rails itself via power pins; this resolves ambiguous cases like split grounds) |
-| **PDN Analyzer** | `loads[].current_a` + `pins[].pad` | Sets current sink magnitudes for target impedance calculation (PDN knows *which* pads are loads; this tells it *how much* current) |
-| **PDN Analyzer** | `sources[].max_output_current_a`, `efficiency` | VRM model parameters — max deliverable current and efficiency affect impedance target |
-| **PDN Analyzer** | `sources[].output_pins[].pad` | VRM source pad location for decoupling analysis placement |
-| **DC IR Drop** | `loads[].current_a` + `pins[].pad` | Current extraction point magnitudes on copper mesh |
-| **DC IR Drop** | `sources[].output_pins[].pad` | Current injection points on copper mesh |
-| **DC IR Drop** | `rails[].voltage` | Expected voltage for drop violation checking |
-| **FastCap/FastHenry** | `rails[].net` + `return_net` | Identifies conductor pairs for capacitance/inductance extraction |
+| **PDN Analyzer** | `rails[].return_net` | Pre-selects return plane pairing (resolves AGND/DGND/GND ambiguity without guessing from net names) |
+| **PDN Analyzer** | `loads[].current_a` + `pins[].pad` | Sets current sink magnitudes for target impedance: `Z_target = V_ripple / I_transient` |
+| **PDN Analyzer** | `sources[].max_output_current_a`, `efficiency` | VRM impedance model parameters in the side pane |
+| **PDN Analyzer** | `sources[].output_pins[].pad` | VRM source pad location for decoupling analysis |
+| **FastCap/FastHenry** | `rails[].net` + `return_net` | Conductor pair presets for extraction (avoids extracting every combination) |
+| **DC IR Drop** (future) | `loads[]/sources[]` current + pad | Boundary conditions for resistive mesh solve |
 
 ### 4.2 Analyzer (`eeschema/power_distribution/power_distribution_analyzer.h/.cpp`)
 
@@ -634,15 +656,24 @@ This creates a natural workflow: **Annotate → ERC → Fix → Generate Chart**
 - `eeschema/tools/sch_actions.h` — Add `generatePowerDistChart` action
 - `eeschema/tools/sch_actions.cpp` — Define the action
 - `eeschema/tools/sch_editor_control.h` — Add handler declaration
-- `eeschema/tools/sch_editor_control.cpp` — Implement handler, including JSON export option
+- `eeschema/tools/sch_editor_control.cpp` — Implement handler, store model in project, optional JSON export
 - `eeschema/menubar.cpp` — Add to Inspect menu
 
-### Phase 6: Polish and Testing
+### Phase 6: Project-Level Model Storage (Integration Glue)
+
+**Files to modify:**
+- `common/project/project.h` — Add `POWER_DISTRIBUTION_MODEL` pointer, getter/setter
+- `common/project/project.cpp` — Implement getter/setter, cleanup on project close
+
+This is the in-process integration point. After generating the chart, the handler stores the model in the project. When the user switches to pcbnew, the PDN analyzer side pane finds it there.
+
+### Phase 7: Polish and Testing
 
 - Test with demo schematics
 - Handle edge cases (empty designs, circular dependencies, multi-source rails)
 - Ensure chart sheet is properly saved/loaded
 - Verify JSON export round-trips correctly (write → read → compare)
+- Test in-process model handoff: generate chart in eeschema, switch to pcbnew, verify PDN analyzer sees the model
 - Add unit tests for model, analyzer, and serialization
 
 ---
@@ -665,10 +696,12 @@ eeschema/power_distribution/
 └── power_chart_generator.cpp
 ```
 
-### Modified Files (11)
+### Modified Files (13)
 
 ```
 common/CMakeLists.txt                — Add common/power_distribution/ source files
+common/project/project.h             — Add POWER_DISTRIBUTION_MODEL storage (integration glue)
+common/project/project.cpp           — Implement model getter/setter
 eeschema/CMakeLists.txt              — Add eeschema/power_distribution/ source files
 eeschema/erc/erc_settings.h          — Add ERCE_POWER_* enum values
 eeschema/erc/erc_item.h              — Add static ERC_ITEM declarations
@@ -678,55 +711,166 @@ eeschema/erc/erc.cpp                 — Implement power ERC checks, hook into R
 eeschema/erc/erc_settings.cpp        — Set default severities for power checks
 eeschema/tools/sch_actions.h         — Add generatePowerDistChart action
 eeschema/tools/sch_actions.cpp       — Define the action
-eeschema/tools/sch_editor_control.cpp — Implement action handler
+eeschema/tools/sch_editor_control.cpp — Implement action handler, store model in project
 eeschema/menubar.cpp                 — Add Inspect menu entry
 ```
 
 ---
 
-## 7. Relationship to Other Power/Signal Integrity Tools
+## 7. Integration with PDN Analyzer and FastCap/FastHenry
 
-This feature is the first piece of a broader power and signal integrity suite being developed across multiple sessions:
+The PDN analyzer and FastCap/FastHenry integration already exist on other branches. This section describes the concrete code needed to tie everything together when the branches are merged.
 
-### The Suite
+### 7.1 What Already Exists (Other Branches)
 
-| Tool | Domain | Abstraction Level | Status |
-|------|--------|--------------------|--------|
-| **Power Distribution Chart** (this plan) | Eeschema (schematic) | Budgetary — current summation, no geometry | This session |
-| **PDN Analyzer** | Pcbnew (layout) | Frequency-domain — Z(f) impedance of power/return planes with decoupling caps (ESR/ESL parasitics) | Other session |
-| **FastCap/FastHenry Export/Import** | Pcbnew (layout) | Field-solve — BEM quasistatic extraction of parasitic C and L from copper geometry | Other session |
-| **DC IR Drop** (future) | Pcbnew (layout) | Resistive mesh — voltage drop and current density heatmaps | Not yet started |
+| Tool | What it does | UI | Rail discovery |
+|------|-------------|-----|----------------|
+| **PDN Analyzer** | Frequency-domain impedance Z(f) of power/return plane pairs with decoupling cap ESR/ESL models | Side pane in pcbnew showing impedance plot | Independent — walks `power_in`/`power_out` pins, finds decoupling caps on those nets |
+| **FastCap/FastHenry** | BEM quasistatic extraction of parasitic capacitance and inductance from copper geometry | Export/import in pcbnew | Operates on nets specified by user or by PDN analyzer |
 
-### How This Plan Relates to the Others
+Both work standalone today. The integration adds **enrichment**, not dependency.
 
-The PDN analyzer is **not dependent** on this tool for basic operation — it discovers rails independently by walking `power_in`/`power_out` pins on the schematic/netlist and finding decoupling capacitors on those nets. It can function without the power distribution chart ever being generated.
+### 7.2 What the Power Distribution Model Adds to Each
 
-The `POWER_DISTRIBUTION_MODEL` JSON provides **enrichment data** that the PDN analyzer cannot derive from pin electrical types alone:
+The PDN analyzer discovers rails on its own but cannot determine **how much current** each load draws, **which component is the VRM** vs a load, or **what the regulator's limits are**. The power distribution model fills these gaps.
 
-1. **PDN Analyzer** optionally reads the JSON for:
-   - **Current budgets** (`loads[].current_a`) → needed for target impedance calculation (`Z_target = V_ripple / I_transient`). The PDN analyzer knows *which* pads draw current but not *how much* without user annotation or this data.
-   - **Return net confirmation** (`return_net`) → resolves ambiguous cases (split grounds like AGND/DGND, or designs with multiple return planes). The PDN analyzer can guess from net names, but the schematic analyzer's ground-pin tracing is more authoritative.
-   - **VRM parameters** (`max_output_current_a`, `efficiency`) → needed for the VRM impedance model at the source end of the PDN. Without this, the PDN analyzer must use generic defaults or ask the user.
-   - **Component classification** (source vs regulator vs load) → the PDN analyzer sees all components equally; this tells it which are VRM sources vs current sinks.
+#### For the PDN Analyzer
 
-2. **FastCap/FastHenry** reads the JSON to identify:
-   - Which conductor pairs to extract C/L for (`net` + `return_net`)
-   - Which component pads are electrically relevant (avoiding extraction of unused geometry)
-   - Extracted parasitics flow back into the PDN analyzer, replacing lumped estimates
+| What the PDN analyzer knows alone | What it gains from the model |
+|-----------------------------------|------------------------------|
+| Which nets are power rails (via pin types) | Which net is the paired return (via regulator ground pin tracing, resolving AGND/DGND/GND ambiguity) |
+| Which pads are on power nets | How much current each load draws (for target impedance: `Z_target = V_ripple / I_transient`) |
+| Which components are decoupling caps (via capacitor detection) | Which component is the VRM source (for VRM impedance model placement) |
+| — | VRM max output current + efficiency (for VRM model parameters) |
+| — | Regulator type (LDO vs buck vs boost — affects VRM output impedance characteristics) |
 
-3. **DC IR Drop** (future) reads the JSON to set:
-   - Current source magnitudes at regulator output pads
-   - Current sink magnitudes at load pads
-   - Pass/fail voltage thresholds per rail
+**Concrete integration point:** When the PDN analyzer side pane opens for a rail, it checks the project for a `POWER_DISTRIBUTION_MODEL`. If present, it:
+1. Pre-selects the return net from `POWER_RAIL::m_returnNet` instead of guessing from net names
+2. Sets load current sinks from `POWER_LOAD::m_currentDraw` values at the corresponding pad locations
+3. Configures VRM source model from `POWER_REGULATOR::m_maxOutputCurrent` and `m_efficiency`
+4. Displays rail utilization from the budget in the side pane header
 
-### Design Decisions for Cross-Tool Compatibility
+If no model is present, the PDN analyzer works exactly as it does today — the user manually sets these parameters.
 
-- **Model in `common/`**: Both editors can link to the same data structures. No IPC or format conversion needed within a single KiCad process.
-- **JSON serialization**: For cross-session and cross-process exchange. Optional enrichment — downstream tools work without it, but produce better results with it.
-- **`PIN_REFERENCE` with pad numbers**: The pin-number-to-pad-number equivalence in KiCad is what bridges schematic and layout. Capturing this in the model means pcbnew tools can locate exact copper features.
-- **`m_returnNet` on rails**: Discovered from regulator/source ground pins in the schematic. More authoritative than the PDN analyzer's net-name heuristics for split-ground designs.
-- **Editor-agnostic model structs**: No `SCH_SYMBOL*` or `FOOTPRINT*` in the model. The analyzer holds symbol pointers in a side map for ERC markers, but the model itself is pure data.
-- **PDN analyzer is standalone**: It finds rails via power_in/power_out pins + capacitor detection. The JSON is consumed when available but not required. This avoids a hard dependency between eeschema and pcbnew analysis workflows.
+#### For FastCap/FastHenry
+
+| What it knows alone | What it gains from the model |
+|---------------------|------------------------------|
+| All copper geometry on specified nets | Which conductor pairs matter (net + return_net) — avoids extracting every possible combination |
+| — | Which pads are current injection/extraction points (scopes the extraction region) |
+
+### 7.3 In-Process Integration (Primary Path)
+
+When both editors are open on the same project (normal KiCad workflow), the model is shared via the project object — no JSON file needed.
+
+```cpp
+// In common/project/project.h — add model storage to the project
+class PROJECT
+{
+    // ... existing members ...
+
+    // Power distribution model — populated by eeschema analyzer,
+    // consumed by pcbnew PDN analyzer and FastCap/FastHenry.
+    // Null until the user generates the chart or runs power ERC.
+    POWER_DISTRIBUTION_MODEL* GetPowerDistModel() const;
+    void SetPowerDistModel( std::unique_ptr<POWER_DISTRIBUTION_MODEL> aModel );
+};
+```
+
+**Eeschema side** (this plan, in the action handler):
+```cpp
+// After analysis completes:
+m_frame->Prj().SetPowerDistModel( std::move( analyzer.TakeModel() ) );
+```
+
+**Pcbnew side** (integration changes to the PDN analyzer branch):
+```cpp
+// When the PDN analyzer side pane opens or refreshes:
+const POWER_DISTRIBUTION_MODEL* model = m_frame->Prj().GetPowerDistModel();
+if( model )
+{
+    // Look up the rail being analyzed
+    for( const POWER_RAIL& rail : model->GetRails() )
+    {
+        if( rail.m_netName == currentRailNet )
+        {
+            setReturnNet( rail.m_returnNet );
+            setTargetCurrent( rail.m_consumedCurrent );
+            // ... set VRM params from matching source/regulator ...
+            break;
+        }
+    }
+}
+// else: PDN analyzer works standalone as before
+```
+
+### 7.4 File-Based Integration (Secondary Path)
+
+For CI/automation, or when the user wants to export data explicitly.
+
+- **Export:** Inspect → Generate Power Distribution Chart offers "Also export JSON" checkbox (or always writes automatically alongside the chart). Writes `<project>.kicad_power_dist.json` next to the `.kicad_pro`.
+- **Import:** PDN analyzer side pane has a "Load Power Budget..." button that reads the JSON file and populates the model into the project.
+
+This path is also useful when someone wants to share power budget data without sharing the full schematic.
+
+### 7.5 End-to-End User Workflow
+
+```
+1. EESCHEMA: Annotate symbols
+   └─ Add Power_Type, Max_Current, Current_Draw, Efficiency fields
+   └─ Use Symbol Fields Table for bulk editing
+
+2. EESCHEMA: Run ERC
+   └─ Power ERC checks flag missing annotations
+   └─ Fix warnings, re-run
+
+3. EESCHEMA: Inspect → Generate Power Distribution Chart
+   └─ Analyzer runs, model is populated, chart sheet is created
+   └─ Model is stored in project (available to pcbnew immediately)
+   └─ Optional: JSON export for archival/CI
+
+4. PCBNEW: Open PDN Analyzer side pane, select a rail
+   └─ PDN analyzer discovers the rail independently (power pins + caps)
+   └─ Finds POWER_DISTRIBUTION_MODEL in project → auto-fills:
+      • Return net (from regulator ground pin tracing)
+      • Load current sinks (from Current_Draw annotations)
+      • VRM model (from regulator Max_Current + Efficiency)
+   └─ User sees Z(f) impedance plot with realistic current targets
+   └─ Without the model: same plot, but with generic/manual parameters
+
+5. PCBNEW: Run FastCap/FastHenry extraction on the rail
+   └─ Uses net + return_net pair from model (or user selection)
+   └─ Extracted parasitics feed back into PDN analyzer model
+   └─ Updated Z(f) plot reflects field-solved C/L
+
+6. Iterate: change decoupling cap values → re-run PDN analysis
+   └─ Change regulator → re-generate chart in eeschema → model updates
+```
+
+### 7.6 Integration Code Changes Needed (Other Branches)
+
+These are the specific changes needed in the PDN analyzer and FastCap/FastHenry branches to consume the model. Listed here so the branches can be coordinated.
+
+**In `common/project/project.h`** (or equivalent project-level storage):
+- Add `POWER_DISTRIBUTION_MODEL` pointer and getter/setter (see 7.3)
+
+**In the PDN analyzer branch** (pcbnew):
+- When opening the side pane for a rail, check `Prj().GetPowerDistModel()`
+- If model has a matching rail: pre-fill return net, load currents, VRM params
+- Add "Load Power Budget..." button for file-based import fallback
+- Display rail utilization percentage in the side pane header when model is available
+
+**In the FastCap/FastHenry branch** (pcbnew):
+- When selecting nets for extraction, offer model's rail pairs as presets
+- If model available, scope extraction to electrically relevant pads
+
+### 7.7 Design Decisions
+
+- **PDN analyzer is standalone**: It finds rails via `power_in`/`power_out` pins + capacitor detection. The model is consumed when available but not required. No hard dependency between eeschema and pcbnew analysis workflows.
+- **Model in `common/`**: Both editors link to the same types. In-process sharing via the project object avoids serialization overhead.
+- **JSON as secondary path**: For automation and explicit export. Not required for normal interactive use.
+- **`m_returnNet` from ground pin tracing**: More authoritative than net-name heuristics. The PDN analyzer can discover rails but cannot reliably pair them with return nets in split-ground designs without this data.
+- **Enrichment, not control**: The model provides data to improve analysis quality. It never overrides the PDN analyzer's own rail discovery — if the model says a net is a rail but the PDN analyzer doesn't see power pins on it, the PDN analyzer's view prevails.
 
 ---
 
