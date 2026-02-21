@@ -167,10 +167,18 @@ public:
     static wxString ParseCaseSize( const wxString& aFootprint );
 
     /**
-     * Look up parasitic ESR/ESL for a given metric case size.
-     * @return parasitic entry if found, or std::nullopt for unknown sizes.
+     * Estimate parasitic ESR/ESL for a given metric case size and capacitance.
+     *
+     * ESL is looked up from a table indexed by case size.  ESR is computed via
+     * a power-law heuristic: ESR = k(case) * C^(-0.43), derived from Murata
+     * MLCC SPICE model data (Class II ceramics).
+     *
+     * @param aCaseSize metric case size string (e.g. "1005", "1608")
+     * @param aCapacitance capacitance in Farads
+     * @return parasitic entry if the case size is known, or std::nullopt.
      */
-    static std::optional<PARASITIC_ENTRY> GetParasitics( const wxString& aCaseSize );
+    static std::optional<PARASITIC_ENTRY> GetParasitics( const wxString& aCaseSize,
+                                                         double          aCapacitance );
 
 private:
     void addWarning( const wxString& aNetworkKey, const wxString& aWarning );

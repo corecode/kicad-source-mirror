@@ -43,28 +43,58 @@
 #include <set>
 
 
-static const std::map<wxString, PARASITIC_ENTRY> s_parasiticTable =
-{
-    { wxS( "0402" ), { 0.100,  70e-12 } },
-    { wxS( "0603" ), { 0.050, 120e-12 } },
-    { wxS( "1005" ), { 0.030, 200e-12 } },
-    { wxS( "1608" ), { 0.020, 400e-12 } },
-    { wxS( "2012" ), { 0.015, 600e-12 } },
-    { wxS( "3216" ), { 0.010, 900e-12 } },
-    { wxS( "3225" ), { 0.008,   1e-9  } },
-    { wxS( "4532" ), { 0.005, 1.2e-9  } },
+// Default ESL by metric case size [Henries].
+// Source: Murata MLCC SPICE model database (23,603 parts), median values.
+// ESL is primarily determined by package geometry and is nearly independent
+// of capacitance value or dielectric type.
+static const std::map<wxString, double> s_eslByCase = {
+    { wxS( "0204" ), 116e-12 }, // 008004 EIA
+    { wxS( "0402" ), 177e-12 }, // 01005
+    { wxS( "0603" ), 219e-12 }, // 0201
+    { wxS( "1005" ), 270e-12 }, // 0402
+    { wxS( "1608" ), 380e-12 }, // 0603
+    { wxS( "2012" ), 373e-12 }, // 0805
+    { wxS( "2020" ), 373e-12 }, // 0808 (use 0805 value)
+    { wxS( "3216" ), 542e-12 }, // 1206
+    { wxS( "3225" ), 423e-12 }, // 1210
+    { wxS( "4520" ), 841e-12 }, // 1808
+    { wxS( "4532" ), 621e-12 }, // 1812
+    { wxS( "5750" ), 1.22e-9 }, // 2220
 };
 
-static const std::map<wxString, wxString> s_eiaToMetric =
-{
-    { wxS( "01005" ), wxS( "0402" ) },
-    { wxS( "0201" ),  wxS( "0603" ) },
-    { wxS( "0402" ),  wxS( "1005" ) },
-    { wxS( "0603" ),  wxS( "1608" ) },
-    { wxS( "0805" ),  wxS( "2012" ) },
-    { wxS( "1206" ),  wxS( "3216" ) },
-    { wxS( "1210" ),  wxS( "3225" ) },
-    { wxS( "1812" ),  wxS( "4532" ) },
+// ESR heuristic for Class II MLCCs: ESR = k * C^alpha
+// where C is capacitance in Farads and ESR is in Ohms.
+// Derived from log-log regression on Murata SPICE model data for X5R/X7R/X8R.
+// The exponent alpha is remarkably consistent across case sizes (median -0.43).
+// k varies slightly by case size due to terminal geometry.
+//
+// This model is conservatively safe for PDN analysis: it tends to underestimate
+// ESR at high capacitances (10 uF+), which produces pessimistically high-Q
+// resonances — the user sees worst-case impedance peaks.
+static constexpr double ESR_ALPHA = -0.429;
+
+static const std::map<wxString, double> s_esrKByCase = {
+    { wxS( "0204" ), 3.35e-5 }, // 008004 EIA
+    { wxS( "0402" ), 3.87e-5 }, // 01005
+    { wxS( "0603" ), 3.15e-5 }, // 0201
+    { wxS( "1005" ), 3.15e-5 }, // 0402
+    { wxS( "1608" ), 2.93e-5 }, // 0603
+    { wxS( "2012" ), 2.93e-5 }, // 0805
+    { wxS( "2020" ), 2.93e-5 }, // 0808 (use 0805 value)
+    { wxS( "3216" ), 3.43e-5 }, // 1206
+    { wxS( "3225" ), 2.39e-5 }, // 1210
+    { wxS( "4520" ), 2.28e-5 }, // 1808
+    { wxS( "4532" ), 2.28e-5 }, // 1812
+    { wxS( "5750" ), 3.42e-5 }, // 2220
+};
+
+static const std::map<wxString, wxString> s_eiaToMetric = {
+    { wxS( "008004" ), wxS( "0204" ) }, { wxS( "01005" ), wxS( "0402" ) },
+    { wxS( "0201" ), wxS( "0603" ) },   { wxS( "0402" ), wxS( "1005" ) },
+    { wxS( "0603" ), wxS( "1608" ) },   { wxS( "0805" ), wxS( "2012" ) },
+    { wxS( "0808" ), wxS( "2020" ) },   { wxS( "1206" ), wxS( "3216" ) },
+    { wxS( "1210" ), wxS( "3225" ) },   { wxS( "1808" ), wxS( "4520" ) },
+    { wxS( "1812" ), wxS( "4532" ) },   { wxS( "2220" ), wxS( "5750" ) },
 };
 
 
@@ -123,7 +153,7 @@ wxString PDN_ANALYZER::ParseCaseSize( const wxString& aFootprint )
     {
         wxString digits = digitGroup.GetMatch( remaining, 1 );
 
-        bool inMetric = s_parasiticTable.count( digits ) > 0;
+        bool inMetric = s_eslByCase.count( digits ) > 0;
         bool inEia = s_eiaToMetric.count( digits ) > 0;
 
         if( inMetric && !inEia && bestMetric.IsEmpty() )
@@ -151,14 +181,22 @@ wxString PDN_ANALYZER::ParseCaseSize( const wxString& aFootprint )
 }
 
 
-std::optional<PARASITIC_ENTRY> PDN_ANALYZER::GetParasitics( const wxString& aCaseSize )
+std::optional<PARASITIC_ENTRY> PDN_ANALYZER::GetParasitics( const wxString& aCaseSize,
+                                                            double          aCapacitance )
 {
-    auto it = s_parasiticTable.find( aCaseSize );
+    auto eslIt = s_eslByCase.find( aCaseSize );
 
-    if( it != s_parasiticTable.end() )
-        return it->second;
+    if( eslIt == s_eslByCase.end() )
+        return std::nullopt;
 
-    return std::nullopt;
+    auto   kIt = s_esrKByCase.find( aCaseSize );
+    double k = ( kIt != s_esrKByCase.end() ) ? kIt->second : 3.0e-5; // fallback k
+
+    PARASITIC_ENTRY entry;
+    entry.esl = eslIt->second;
+    entry.esr = k * std::pow( aCapacitance, ESR_ALPHA );
+
+    return entry;
 }
 
 
@@ -326,7 +364,7 @@ void PDN_ANALYZER::FindPDNNetworks()
             continue;
         }
 
-        std::optional<PARASITIC_ENTRY> parasitics = GetParasitics( caseSize );
+        std::optional<PARASITIC_ENTRY> parasitics = GetParasitics( caseSize, capacitance );
 
         if( !parasitics )
         {
@@ -452,15 +490,12 @@ wxString PDN_ANALYZER::BuildSpiceNetlist( const PDN_NETWORK& aNetwork,
     netlist += wxString::Format( wxS( "* PDN Impedance Analysis: %s / %s\n\n" ),
                                  aNetwork.supplyRail, aNetwork.refRail );
 
-    // Generate subcircuits for all known case sizes
-    for( const auto& [cs, parasitic] : s_parasiticTable )
-    {
-        netlist += wxString::Format( wxS( ".subckt CAP_%s p n c=100n\n" ), cs );
-        netlist += wxS( "C1 p 1 {c}\n" );
-        netlist += wxString::Format( wxS( "R1 1 2 %g\n" ), parasitic.esr );
-        netlist += wxString::Format( wxS( "L1 2 n %g\n" ), parasitic.esl );
-        netlist += wxS( ".ends\n\n" );
-    }
+    // Generic parameterized subcircuit — ESR and ESL are per-instance
+    netlist += wxS( ".subckt CAP p n c=100n esr=0.01 esl=400p\n" );
+    netlist += wxS( "C1 p 1 {c}\n" );
+    netlist += wxS( "R1 1 2 {esr}\n" );
+    netlist += wxS( "L1 2 n {esl}\n" );
+    netlist += wxS( ".ends\n\n" );
 
     netlist += wxS( "I1 local gnd AC 1\n" );
 
@@ -474,8 +509,8 @@ wxString PDN_ANALYZER::BuildSpiceNetlist( const PDN_NETWORK& aNetwork,
     {
         for( const PDN_CAPACITOR* cap : localIt->second )
         {
-            netlist += wxString::Format( wxS( "X%d local gnd CAP_%s c=%g\n" ), idx, cap->caseSize,
-                                         cap->capacitance );
+            netlist += wxString::Format( wxS( "X%d local gnd CAP c=%g esr=%g esl=%g\n" ), idx,
+                                         cap->capacitance, cap->esr, cap->esl );
             idx++;
         }
     }
@@ -496,8 +531,8 @@ wxString PDN_ANALYZER::BuildSpiceNetlist( const PDN_NETWORK& aNetwork,
 
         for( const PDN_CAPACITOR* cap : caps )
         {
-            netlist += wxString::Format( wxS( "X%d %s gnd CAP_%s c=%g\n" ), idx, nodeR,
-                                         cap->caseSize, cap->capacitance );
+            netlist += wxString::Format( wxS( "X%d %s gnd CAP c=%g esr=%g esl=%g\n" ), idx, nodeR,
+                                         cap->capacitance, cap->esr, cap->esl );
             idx++;
         }
 

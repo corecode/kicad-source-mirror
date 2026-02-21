@@ -87,24 +87,40 @@ BOOST_AUTO_TEST_CASE( ParseCaseSizeUnknown )
 
 BOOST_AUTO_TEST_CASE( ParasiticsLookup )
 {
-    // Known case sizes should return valid parasitics
-    auto p1005 = PDN_ANALYZER::GetParasitics( wxS( "1005" ) );
+    // Known case sizes should return valid parasitics.
+    // ESR is computed from: k(case) * C^(-0.429)
+    // ESL is a fixed per-case-size median from Murata SPICE data.
+
+    // 1005, 100nF: ESR = 3.15e-5 * (100e-9)^(-0.429)
+    auto p1005 = PDN_ANALYZER::GetParasitics( wxS( "1005" ), 100e-9 );
     BOOST_REQUIRE( p1005.has_value() );
-    BOOST_CHECK_CLOSE( p1005->esr, 0.030, 0.1 );
-    BOOST_CHECK_CLOSE( p1005->esl, 200e-12, 0.1 );
+    BOOST_CHECK_CLOSE( p1005->esr, 3.15e-5 * std::pow( 100e-9, -0.429 ), 0.1 );
+    BOOST_CHECK_CLOSE( p1005->esl, 270e-12, 0.1 );
 
-    auto p1608 = PDN_ANALYZER::GetParasitics( wxS( "1608" ) );
+    // 1608, 100nF: ESR = 2.93e-5 * (100e-9)^(-0.429)
+    auto p1608 = PDN_ANALYZER::GetParasitics( wxS( "1608" ), 100e-9 );
     BOOST_REQUIRE( p1608.has_value() );
-    BOOST_CHECK_CLOSE( p1608->esr, 0.020, 0.1 );
-    BOOST_CHECK_CLOSE( p1608->esl, 400e-12, 0.1 );
+    BOOST_CHECK_CLOSE( p1608->esr, 2.93e-5 * std::pow( 100e-9, -0.429 ), 0.1 );
+    BOOST_CHECK_CLOSE( p1608->esl, 380e-12, 0.1 );
 
-    auto p3216 = PDN_ANALYZER::GetParasitics( wxS( "3216" ) );
+    // 3216, 10uF: ESR = 3.43e-5 * (10e-6)^(-0.429)
+    auto p3216 = PDN_ANALYZER::GetParasitics( wxS( "3216" ), 10e-6 );
     BOOST_REQUIRE( p3216.has_value() );
-    BOOST_CHECK_CLOSE( p3216->esr, 0.010, 0.1 );
-    BOOST_CHECK_CLOSE( p3216->esl, 900e-12, 0.1 );
+    BOOST_CHECK_CLOSE( p3216->esr, 3.43e-5 * std::pow( 10e-6, -0.429 ), 0.1 );
+    BOOST_CHECK_CLOSE( p3216->esl, 542e-12, 0.1 );
+
+    // ESR should decrease with increasing capacitance (power law, negative exponent)
+    auto p1608_small = PDN_ANALYZER::GetParasitics( wxS( "1608" ), 1e-9 );
+    auto p1608_large = PDN_ANALYZER::GetParasitics( wxS( "1608" ), 10e-6 );
+    BOOST_REQUIRE( p1608_small.has_value() );
+    BOOST_REQUIRE( p1608_large.has_value() );
+    BOOST_CHECK_GT( p1608_small->esr, p1608_large->esr );
+
+    // ESL should be the same regardless of capacitance
+    BOOST_CHECK_CLOSE( p1608_small->esl, p1608_large->esl, 0.1 );
 
     // Unknown case size should return nullopt
-    BOOST_CHECK( !PDN_ANALYZER::GetParasitics( wxS( "9999" ) ).has_value() );
+    BOOST_CHECK( !PDN_ANALYZER::GetParasitics( wxS( "9999" ), 100e-9 ).has_value() );
 }
 
 
@@ -134,15 +150,11 @@ BOOST_AUTO_TEST_CASE( BuildNetlistSingleCap )
 
     wxString netlist = analyzer.BuildSpiceNetlist( network, obsSheet );
 
-    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP_1608" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP " ) ) );
     BOOST_CHECK( netlist.Contains( wxS( "I1 local gnd AC 1" ) ) );
-    BOOST_CHECK( netlist.Contains( wxS( "X1 local gnd CAP_1608" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "X1 local gnd CAP" ) ) );
     BOOST_CHECK( netlist.Contains( wxS( ".ac dec" ) ) );
     BOOST_CHECK( netlist.Contains( wxS( ".end" ) ) );
-
-    // All known case sizes should have subcircuits
-    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP_1005" ) ) );
-    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP_0402" ) ) );
 }
 
 
@@ -179,10 +191,9 @@ BOOST_AUTO_TEST_CASE( BuildNetlistMultipleCaps )
 
     wxString netlist = analyzer.BuildSpiceNetlist( network, obsSheet );
 
-    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP_1005" ) ) );
-    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP_1608" ) ) );
-    BOOST_CHECK( netlist.Contains( wxS( "X1 local gnd CAP_1005" ) ) );
-    BOOST_CHECK( netlist.Contains( wxS( "X2 local gnd CAP_1608" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP " ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "X1 local gnd CAP" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "X2 local gnd CAP" ) ) );
 }
 
 
@@ -330,9 +341,9 @@ BOOST_AUTO_TEST_CASE( BuildNetlistClusteredReversed )
     wxString netlist = analyzer.BuildSpiceNetlist( network, pathB );
 
     BOOST_CHECK( netlist.Contains( wxS( "I1 local gnd AC 1" ) ) );
-    BOOST_CHECK( netlist.Contains( wxS( "X1 local gnd CAP_3216" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "X1 local gnd CAP" ) ) );
     BOOST_CHECK( netlist.Contains( wxS( "L_s1" ) ) );
-    BOOST_CHECK( netlist.Contains( wxS( "X2 rs1b gnd CAP_1005" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "X2 rs1b gnd CAP" ) ) );
 }
 
 
