@@ -115,8 +115,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: KiCad\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-02-12 00:15+0300\n"
-"PO-Revision-Date: 2026-02-01 07:01+0000\n"
+"POT-Creation-Date: 2026-02-16 02:11+0300\n"
+"PO-Revision-Date: 2026-02-14 21:09+0000\n"
 "Last-Translator: Marco Ciampa <ciampix@posteo.net>\n"
 "Language-Team: Italian <https://hosted.weblate.org/projects/kicad/v9/it/>\n"
 "Language: it\n"
@@ -7342,6 +7342,8 @@ msgid ""
 "Cannot merge: you have unstaged changes. Please commit or stash them before "
 "pulling."
 msgstr ""
+"Impossibile fare il merge: sono presenti modifiche non ancora salvate. Si "
+"prega di eseguirne il commit o di archiviarle prima di estrarle."
 
 #: common/git/git_pull_handler.cpp:399
 msgid "Could not merge commits"
@@ -17466,9 +17468,9 @@ msgid "Pin %s is connected to both %s and %s"
 msgstr "Il pin %s è connesso sia a %s che a %s"
 
 #: eeschema/erc/erc.cpp:1300
-#, fuzzy, c-format
+#, c-format
 msgid "Pin %s on symbol '%s' is connected to different nets: %s and %s"
-msgstr "Il pin %s è connesso sia a %s che a %s"
+msgstr "Il pin %s sul simbolo '%s' è connesso a net diverse: %s e %s"
 
 #: eeschema/erc/erc.cpp:1524
 #, c-format
@@ -17631,9 +17633,8 @@ msgstr ""
 "Pin di potenza d'ingresso non pilotato da nessun pin di potenza d'uscita"
 
 #: eeschema/erc/erc_item.cpp:65
-#, fuzzy
 msgid "Duplicate pins with different nets"
-msgstr "Duplica la delimitazione zona su uno strato diverso"
+msgstr "Duplica pin con net diverse"
 
 #: eeschema/erc/erc_item.cpp:69 eeschema/erc/erc_item.cpp:73
 msgid "Conflict problem between pins"
@@ -19013,9 +19014,9 @@ msgid "Show Field Name"
 msgstr "Mostra nome campo"
 
 #: eeschema/sch_io/altium/sch_io_altium.cpp:937
-#, fuzzy, c-format
+#, c-format
 msgid "Error parsing Altium schematic: %s"
-msgstr "Errore nel caricamento dello schema \"%s\"."
+msgstr "Errore analizzando lo schema Altium: %s"
 
 #: eeschema/sch_io/altium/sch_io_altium.cpp:983
 #, c-format
@@ -19120,9 +19121,9 @@ msgid "File not found %s."
 msgstr "File non trovato %s."
 
 #: eeschema/sch_io/altium/sch_io_altium.cpp:4976
-#, fuzzy, c-format
+#, c-format
 msgid "Error parsing Altium library: %s"
-msgstr "Errore durante l'analisi della libreria SPICE '%s': %s"
+msgstr "Errore analizzando la libreria Altium: %s"
 
 #: eeschema/sch_io/altium/sch_io_altium.cpp:4999
 msgid "Expected Altium Schematic Library file version 5.0"
@@ -42535,7 +42536,7 @@ msgstr "(coll %s e %s)"
 #: pcbnew/drc/drc_test_provider_copper_clearance.cpp:625
 #: pcbnew/drc/drc_test_provider_copper_clearance.cpp:932
 #: pcbnew/drc/drc_test_provider_copper_clearance.cpp:954
-#: pcbnew/drc/drc_test_provider_copper_clearance.cpp:1273
+#: pcbnew/drc/drc_test_provider_copper_clearance.cpp:1281
 #: pcbnew/drc/drc_test_provider_courtyard_clearance.cpp:245
 #: pcbnew/drc/drc_test_provider_courtyard_clearance.cpp:277
 #: pcbnew/drc/drc_test_provider_edge_clearance.cpp:116
@@ -42556,7 +42557,7 @@ msgstr "(%s clearance %s; reale %s)"
 msgid "(%s clearance %s; actual < 0)"
 msgstr "(%s clearance %s; reale < 0)"
 
-#: pcbnew/drc/drc_test_provider_copper_clearance.cpp:1265
+#: pcbnew/drc/drc_test_provider_copper_clearance.cpp:1273
 #, fuzzy
 msgid "(intersecting zones must have distinct priorities)"
 msgstr "L'arco deve avere 3 punti distinti"
@@ -51394,14 +51395,12 @@ msgstr ""
 "selezionate."
 
 #: pcbnew/tools/pcb_actions.cpp:2422
-#, fuzzy
 msgid "Cancel Current Item"
-msgstr "Annulla strumento corrente"
+msgstr "Elimina elemento corrente"
 
 #: pcbnew/tools/pcb_actions.cpp:2423
-#, fuzzy
 msgid "Skip current item and route next selected item."
-msgstr "Crea linee outset dagli elementi selezionati"
+msgstr "Salta l'elemento corrente e passa all'elemento successivo selezionato."
 
 #: pcbnew/tools/pcb_actions.cpp:2429
 msgid ""

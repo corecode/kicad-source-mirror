@@ -40,8 +40,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: KiCad_zh_CN_Master_v0.0.32\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-02-12 00:15+0300\n"
-"PO-Revision-Date: 2026-02-06 21:01+0000\n"
+"POT-Creation-Date: 2026-02-16 02:11+0300\n"
+"PO-Revision-Date: 2026-02-12 10:06+0000\n"
 "Last-Translator: CloverGit <w991593239@163.com>\n"
 "Language-Team: Chinese (Simplified Han script) <https://hosted.weblate.org/"
 "projects/kicad/v9/zh_Hans/>\n"
@@ -7574,8 +7574,8 @@ msgid ""
 "'%s' does not appear to be a valid EasyEDA (JLCEDA) Pro project or library "
 "file. Cannot find project.json or device.json."
 msgstr ""
-"文件 '%s' 似乎不是有效的 EasyEDA (立创 EDA) 专业版工程文件或者库文件。无法在"
-"其中找到 project.json 或者 device.json。"
+"文件 '%s' 似乎不是有效的 EasyEDA (JLCEDA) 专业版工程文件或者库文件。无法在其"
+"中找到 project.json 或者 device.json。"
 
 #: common/io/easyedapro/easyedapro_import_utils.cpp:220
 #, c-format
@@ -10283,14 +10283,14 @@ msgstr "PADS 网表文件"
 
 #: common/wildcards_and_files_ext.cpp:333
 msgid "EasyEDA (JLCEDA) Std backup archive"
-msgstr "EasyEDA (嘉立创 EDA) 标准版备份打包"
+msgstr "EasyEDA (JLCEDA) 标准版备份打包"
 
 #: common/wildcards_and_files_ext.cpp:339
 #: eeschema/sch_io/easyedapro/sch_io_easyedapro.h:46
 #: eeschema/sch_io/easyedapro/sch_io_easyedapro.h:51
 #: pcbnew/pcb_io/easyedapro/pcb_io_easyedapro.h:51
 msgid "EasyEDA (JLCEDA) Pro files"
-msgstr "EasyEDA (嘉立创 EDA) 专业版文件"
+msgstr "EasyEDA (JLCEDA) 专业版文件"
 
 #: common/wildcards_and_files_ext.cpp:345
 #: pcbnew/pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h:302
@@ -13290,7 +13290,7 @@ msgstr "新建符号"
 #: pcbnew/dialogs/dialog_footprint_properties.cpp:406
 #: pcbnew/dialogs/dialog_footprint_properties_fp_editor.cpp:458
 msgid "Fields must have a name."
-msgstr "字段必须要有名称。"
+msgstr "字段必须要有一个名称。"
 
 #: eeschema/dialogs/dialog_lib_symbol_properties.cpp:421
 msgid "Derived symbol must have a parent selected"
@@ -18543,9 +18543,9 @@ msgid "Show Field Name"
 msgstr "显示字段名称"
 
 #: eeschema/sch_io/altium/sch_io_altium.cpp:937
-#, fuzzy, c-format
+#, c-format
 msgid "Error parsing Altium schematic: %s"
-msgstr "加载原理图 '%s' 时出错。"
+msgstr "解析 Altium 原理图时出错: %s"
 
 #: eeschema/sch_io/altium/sch_io_altium.cpp:983
 #, c-format
@@ -18647,9 +18647,9 @@ msgid "File not found %s."
 msgstr "找不到文件 %s。"
 
 #: eeschema/sch_io/altium/sch_io_altium.cpp:4976
-#, fuzzy, c-format
+#, c-format
 msgid "Error parsing Altium library: %s"
-msgstr "枚举符号库 '%s' 时出错: %s"
+msgstr "解析 Altium 库时出错: %s"
 
 #: eeschema/sch_io/altium/sch_io_altium.cpp:4999
 msgid "Expected Altium Schematic Library file version 5.0"
@@ -18993,7 +18993,7 @@ msgstr "加载原理图 '%s' 时出错, 错误: %s"
 #: eeschema/sch_io/easyeda/sch_io_easyeda.h:50
 #: pcbnew/pcb_io/easyeda/pcb_io_easyeda_plugin.h:37
 msgid "EasyEDA (JLCEDA) Std files"
-msgstr "EasyEDA (嘉立创 EDA) 标准版文件"
+msgstr "EasyEDA (JLCEDA) 标准版文件"
 
 #: eeschema/sch_io/easyedapro/sch_easyedapro_parser.cpp:84
 #: pcbnew/pcb_io/easyedapro/pcb_io_easyedapro_parser.cpp:75
@@ -21354,9 +21354,9 @@ msgid "Format"
 msgstr "格式"
 
 #: eeschema/sim/spice_library_parser.cpp:115
-#, fuzzy, c-format
+#, c-format
 msgid "Error parsing SPICE library '%s': %s"
-msgstr "枚举符号库 '%s' 时出错: %s"
+msgstr "解析 SPICE 库 '%s' 出错: %s"
 
 #: eeschema/sim/spice_model_parser.cpp:102
 #: eeschema/sim/spice_model_parser.cpp:217
@@ -25849,7 +25849,7 @@ msgstr "排除电路板主体"
 
 #: kicad/cli/command_pcb_export_3d.cpp:126
 msgid "Exclude 3D models for components"
-msgstr "排除部件的 3D 模型"
+msgstr "排除元件的 3D 模型"
 
 #: kicad/cli/command_pcb_export_3d.cpp:130
 msgid ""
@@ -27086,19 +27086,19 @@ msgstr "导入 EAGLE CAD XML 原理图和电路板"
 
 #: kicad/menubar.cpp:129
 msgid "EasyEDA (JLCEDA) Std Backup..."
-msgstr "EasyEDA (嘉立创 EDA) 标准版备份..."
+msgstr "EasyEDA (JLCEDA) 标准版备份..."
 
 #: kicad/menubar.cpp:130
 msgid "Import EasyEDA (JLCEDA) Standard schematic and board"
-msgstr "导入 EasyEDA (嘉立创 EDA) 标准版原理图和电路板"
+msgstr "导入 EasyEDA (JLCEDA) 标准版原理图和电路板"
 
 #: kicad/menubar.cpp:134
 msgid "EasyEDA (JLCEDA) Pro Project..."
-msgstr "EasyEDA (嘉立创 EDA) 专业版工程..."
+msgstr "EasyEDA (JLCEDA) 专业版工程..."
 
 #: kicad/menubar.cpp:135
 msgid "Import EasyEDA (JLCEDA) Professional schematic and board"
-msgstr "导入 (嘉立创 EDA) 专业版原理图和电路板"
+msgstr "导入 (JLCEDA) 专业版原理图和电路板"
 
 #: kicad/menubar.cpp:141
 msgid "&Archive Project..."
@@ -41152,7 +41152,7 @@ msgstr "(网络 %s 和 %s)"
 #: pcbnew/drc/drc_test_provider_copper_clearance.cpp:625
 #: pcbnew/drc/drc_test_provider_copper_clearance.cpp:932
 #: pcbnew/drc/drc_test_provider_copper_clearance.cpp:954
-#: pcbnew/drc/drc_test_provider_copper_clearance.cpp:1273
+#: pcbnew/drc/drc_test_provider_copper_clearance.cpp:1281
 #: pcbnew/drc/drc_test_provider_courtyard_clearance.cpp:245
 #: pcbnew/drc/drc_test_provider_courtyard_clearance.cpp:277
 #: pcbnew/drc/drc_test_provider_edge_clearance.cpp:116
@@ -41173,7 +41173,7 @@ msgstr "(%s 间距 %s; 实际 %s)"
 msgid "(%s clearance %s; actual < 0)"
 msgstr "(%s 间距 %s; 实际 < 0)"
 
-#: pcbnew/drc/drc_test_provider_copper_clearance.cpp:1265
+#: pcbnew/drc/drc_test_provider_copper_clearance.cpp:1273
 msgid "(intersecting zones must have distinct priorities)"
 msgstr "(相交的填充区必须具有不同的优先级)"
 
@@ -41498,7 +41498,7 @@ msgstr "%s 个 '栅格定向角度' 不一致。"
 #: pcbnew/drc/drc_test_provider_library_parity.cpp:641
 #, c-format
 msgid "%s hatch smoothing level differs."
-msgstr "%s 个 '栅格平滑等级' 差异。"
+msgstr "%s 个 '栅格平滑等级' 不一致。"
 
 #: pcbnew/drc/drc_test_provider_library_parity.cpp:643
 #, c-format
@@ -45142,7 +45142,7 @@ msgstr "在工程 '%2$s 中未发现封装 '%1$s'"
 #: pcbnew/pcb_io/easyedapro/pcb_io_easyedapro.h:40
 #: pcbnew/pcb_io/easyedapro/pcb_io_easyedapro.h:45
 msgid "EasyEDA (JLCEDA) Pro project"
-msgstr "EasyEDA (嘉立创 EDA) 专业版工程"
+msgstr "EasyEDA (JLCEDA) 专业版工程"
 
 #: pcbnew/pcb_io/fabmaster/import_fabmaster.cpp:268
 #, c-format
@@ -49379,7 +49379,7 @@ msgstr "在最顶部项目和最底部项目之间分布选定项目, 以使项�
 
 #: pcbnew/tools/pcb_actions.cpp:1986
 msgid "Create a corner"
-msgstr "建立拐角"
+msgstr "创建拐角"
 
 #: pcbnew/tools/pcb_actions.cpp:1993
 msgid "Remove corner"
