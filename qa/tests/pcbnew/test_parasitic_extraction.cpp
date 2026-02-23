@@ -3871,4 +3871,260 @@ BOOST_FIXTURE_TEST_CASE( SpiceSubcktExporter_FromSolverResults, EXPORTER_TEST_FI
 }
 
 
+// ============================================================================
+// Explicit PORT_SPEC tests
+// ============================================================================
+
+
+// --------------------------------------------------------------------------
+// ExplicitPorts: net codes derived from PORT_SPEC entries
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ExplicitPorts_NetsFromPortSpecs, EXPORTER_TEST_FIXTURE )
+{
+    PDN_PARASITIC::EXTRACTION_CONFIG cfg;
+    cfg.m_OutputDir = m_tempDir;
+    cfg.m_FreqMinHz = 1e3;
+    cfg.m_FreqMaxHz = 1e9;
+    cfg.m_PointsPerDecade = 5;
+    cfg.m_PlaneSegX = 4;
+    cfg.m_PlaneSegY = 4;
+
+    // Find the VDD and GND net codes from the board
+    NETINFO_ITEM* vddNet = m_board->FindNet( wxT( "VDD" ) );
+    NETINFO_ITEM* gndNet = m_board->FindNet( wxT( "GND" ) );
+
+    BOOST_REQUIRE( vddNet );
+    BOOST_REQUIRE( gndNet );
+
+    // Create explicit port specs (simulating user pad selection)
+    PDN_PARASITIC::PORT_SPEC signalSpec;
+    signalSpec.m_Name = "C1_VDD";
+    signalSpec.m_NetName = "VDD";
+    signalSpec.m_NetCode = vddNet->GetNetCode();
+    signalSpec.m_XMM = 29.5;
+    signalSpec.m_YMM = 15.0;
+    signalSpec.m_LayerId = F_Cu;
+    signalSpec.m_IsGround = false;
+
+    PDN_PARASITIC::PORT_SPEC groundSpec;
+    groundSpec.m_Name = "C1_GND";
+    groundSpec.m_NetName = "GND";
+    groundSpec.m_NetCode = gndNet->GetNetCode();
+    groundSpec.m_XMM = 30.5;
+    groundSpec.m_YMM = 15.0;
+    groundSpec.m_LayerId = F_Cu;
+    groundSpec.m_IsGround = true;
+
+    cfg.m_PortSpecs.push_back( signalSpec );
+    cfg.m_PortSpecs.push_back( groundSpec );
+
+    // Export with PORT_SPEC-driven net resolution
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+    std::string        outPath = m_tempDir + "/explicit_ports_test.inp";
+    BOOST_REQUIRE( exporter.Export( outPath ) );
+
+    std::string content = readFile( outPath );
+
+    // Verify: the output should contain geometry (nodes and segments exist)
+    BOOST_CHECK( content.find( ".units mm" ) != std::string::npos );
+    BOOST_CHECK( content.find( ".end" ) != std::string::npos );
+
+    // Ports should exist with the names from PORT_SPEC
+    auto ports = exporter.GetPorts();
+    BOOST_REQUIRE_GE( ports.size(), 1u );
+    BOOST_CHECK_EQUAL( ports[0].m_Name, "C1_VDD" );
+    BOOST_CHECK_EQUAL( ports[0].m_NetName, "VDD" );
+
+    // .external should reference the port
+    BOOST_CHECK( content.find( ".external" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// ExplicitPorts: ground pairing picks nearest ground pad
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ExplicitPorts_GroundPairing, EXPORTER_TEST_FIXTURE )
+{
+    PDN_PARASITIC::EXTRACTION_CONFIG cfg;
+    cfg.m_OutputDir = m_tempDir;
+    cfg.m_FreqMinHz = 1e3;
+    cfg.m_FreqMaxHz = 1e9;
+    cfg.m_PointsPerDecade = 5;
+    cfg.m_PlaneSegX = 4;
+    cfg.m_PlaneSegY = 4;
+
+    NETINFO_ITEM* vddNet = m_board->FindNet( wxT( "VDD" ) );
+    NETINFO_ITEM* gndNet = m_board->FindNet( wxT( "GND" ) );
+
+    BOOST_REQUIRE( vddNet );
+    BOOST_REQUIRE( gndNet );
+
+    // Signal pad at one end of the trace
+    PDN_PARASITIC::PORT_SPEC signalSpec;
+    signalSpec.m_Name = "C1_VDD";
+    signalSpec.m_NetName = "VDD";
+    signalSpec.m_NetCode = vddNet->GetNetCode();
+    signalSpec.m_XMM = 29.5;
+    signalSpec.m_YMM = 15.0;
+    signalSpec.m_LayerId = F_Cu;
+    signalSpec.m_IsGround = false;
+
+    // Two ground pads at different distances
+    PDN_PARASITIC::PORT_SPEC gndNear;
+    gndNear.m_Name = "C1_GND";
+    gndNear.m_NetName = "GND";
+    gndNear.m_NetCode = gndNet->GetNetCode();
+    gndNear.m_XMM = 30.5; // 1mm from signal pad
+    gndNear.m_YMM = 15.0;
+    gndNear.m_LayerId = F_Cu;
+    gndNear.m_IsGround = true;
+
+    PDN_PARASITIC::PORT_SPEC gndFar;
+    gndFar.m_Name = "REMOTE_GND";
+    gndFar.m_NetName = "GND";
+    gndFar.m_NetCode = gndNet->GetNetCode();
+    gndFar.m_XMM = 10.0; // 19.5mm from signal pad
+    gndFar.m_YMM = 15.0;
+    gndFar.m_LayerId = F_Cu;
+    gndFar.m_IsGround = true;
+
+    cfg.m_PortSpecs.push_back( signalSpec );
+    cfg.m_PortSpecs.push_back( gndNear );
+    cfg.m_PortSpecs.push_back( gndFar );
+
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+    std::string        outPath = m_tempDir + "/ground_pairing_test.inp";
+    BOOST_REQUIRE( exporter.Export( outPath ) );
+
+    auto ports = exporter.GetPorts();
+    BOOST_REQUIRE_EQUAL( ports.size(), 1u );
+
+    // The port's negative node should reference the nearer ground pad's position
+    // (30.5, 15.0) rather than the far one (10.0, 15.0).
+    // The plane node name encodes the position, so we can check for the near coords.
+    std::string content = readFile( outPath );
+
+    // The near ground pad is at (30.5, 15.0), which would generate a plane node
+    // name containing "30500" (30.5 * 1000)
+    BOOST_CHECK( ports[0].m_NegativeNode.find( "30500" ) != std::string::npos
+                 || content.find( "30500" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// ExplicitPorts: component grouping merges multi-pad same-net ports
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ExplicitPorts_ComponentGrouping, EXPORTER_TEST_FIXTURE )
+{
+    PDN_PARASITIC::EXTRACTION_CONFIG cfg;
+    cfg.m_OutputDir = m_tempDir;
+    cfg.m_FreqMinHz = 1e3;
+    cfg.m_FreqMaxHz = 1e9;
+    cfg.m_PointsPerDecade = 5;
+    cfg.m_PlaneSegX = 4;
+    cfg.m_PlaneSegY = 4;
+    cfg.m_GroupPadsByComponent = true;
+
+    NETINFO_ITEM* vddNet = m_board->FindNet( wxT( "VDD" ) );
+    NETINFO_ITEM* gndNet = m_board->FindNet( wxT( "GND" ) );
+
+    BOOST_REQUIRE( vddNet );
+    BOOST_REQUIRE( gndNet );
+
+    // Two signal pads with same component prefix + net (simulating multi-pad IC)
+    PDN_PARASITIC::PORT_SPEC sig1;
+    sig1.m_Name = "U1_VDD";
+    sig1.m_NetName = "VDD";
+    sig1.m_NetCode = vddNet->GetNetCode();
+    sig1.m_XMM = 29.5;
+    sig1.m_YMM = 15.0;
+    sig1.m_LayerId = F_Cu;
+    sig1.m_IsGround = false;
+
+    PDN_PARASITIC::PORT_SPEC sig2;
+    sig2.m_Name = "U1_VDD";
+    sig2.m_NetName = "VDD";
+    sig2.m_NetCode = vddNet->GetNetCode();
+    sig2.m_XMM = 20.0; // Near the via
+    sig2.m_YMM = 15.0;
+    sig2.m_LayerId = F_Cu;
+    sig2.m_IsGround = false;
+
+    PDN_PARASITIC::PORT_SPEC gndSpec;
+    gndSpec.m_Name = "U1_GND";
+    gndSpec.m_NetName = "GND";
+    gndSpec.m_NetCode = gndNet->GetNetCode();
+    gndSpec.m_XMM = 30.5;
+    gndSpec.m_YMM = 15.0;
+    gndSpec.m_LayerId = F_Cu;
+    gndSpec.m_IsGround = true;
+
+    cfg.m_PortSpecs.push_back( sig1 );
+    cfg.m_PortSpecs.push_back( sig2 );
+    cfg.m_PortSpecs.push_back( gndSpec );
+
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+    std::string        outPath = m_tempDir + "/grouping_test.inp";
+    BOOST_REQUIRE( exporter.Export( outPath ) );
+
+    // With grouping, two pads on the same component+net should produce only 1 port
+    auto ports = exporter.GetPorts();
+    BOOST_CHECK_EQUAL( ports.size(), 1u );
+
+    // The second pad should be merged via .equiv
+    std::string content = readFile( outPath );
+    BOOST_CHECK( content.find( ".equiv" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// ExplicitPorts: FastCap also derives nets from PORT_SPEC
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ExplicitPorts_FastCapNetDerivation, EXPORTER_TEST_FIXTURE )
+{
+    PDN_PARASITIC::EXTRACTION_CONFIG cfg;
+    cfg.m_OutputDir = m_tempDir;
+    cfg.m_PanelTargetSizeMM = 0.5;
+    cfg.m_ViaFacets = 8;
+    cfg.m_PlaneSegX = 4;
+    cfg.m_PlaneSegY = 4;
+
+    NETINFO_ITEM* vddNet = m_board->FindNet( wxT( "VDD" ) );
+    NETINFO_ITEM* gndNet = m_board->FindNet( wxT( "GND" ) );
+
+    BOOST_REQUIRE( vddNet );
+    BOOST_REQUIRE( gndNet );
+
+    PDN_PARASITIC::PORT_SPEC signalSpec;
+    signalSpec.m_Name = "C1_VDD";
+    signalSpec.m_NetName = "VDD";
+    signalSpec.m_NetCode = vddNet->GetNetCode();
+    signalSpec.m_XMM = 29.5;
+    signalSpec.m_YMM = 15.0;
+    signalSpec.m_LayerId = F_Cu;
+    signalSpec.m_IsGround = false;
+
+    PDN_PARASITIC::PORT_SPEC groundSpec;
+    groundSpec.m_Name = "C1_GND";
+    groundSpec.m_NetName = "GND";
+    groundSpec.m_NetCode = gndNet->GetNetCode();
+    groundSpec.m_XMM = 30.5;
+    groundSpec.m_YMM = 15.0;
+    groundSpec.m_LayerId = F_Cu;
+    groundSpec.m_IsGround = true;
+
+    cfg.m_PortSpecs.push_back( signalSpec );
+    cfg.m_PortSpecs.push_back( groundSpec );
+
+    // m_NetNames is empty, so without PORT_SPEC it would extract all nets.
+    // With PORT_SPEC, it should only extract VDD and GND.
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+    bool             ok = exporter.Export( m_tempDir, "explicit_fastcap_test.lst" );
+    BOOST_REQUIRE( ok );
+
+    // Verify output files exist
+    BOOST_CHECK( std::filesystem::exists( m_tempDir + "/explicit_fastcap_test.lst" ) );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

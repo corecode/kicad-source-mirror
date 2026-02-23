@@ -63,7 +63,13 @@ bool FASTCAP_EXPORTER::Export( const std::string& aOutputDir,
     // Resolve nets
     m_netCodes.clear();
 
-    if( m_config.m_NetNames.empty() )
+    if( !m_config.m_PortSpecs.empty() )
+    {
+        // Derive nets from explicit pad selection
+        for( const PDN_PARASITIC::PORT_SPEC& spec : m_config.m_PortSpecs )
+            m_netCodes.insert( spec.m_NetCode );
+    }
+    else if( m_config.m_NetNames.empty() )
     {
         for( const PCB_TRACK* track : m_board->Tracks() )
             m_netCodes.insert( track->GetNetCode() );

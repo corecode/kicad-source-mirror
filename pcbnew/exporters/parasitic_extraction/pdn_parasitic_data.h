@@ -130,6 +130,18 @@ struct EXTRACTION_RESULTS
 };
 
 /// Configuration for the extraction run
+/// Explicit port specification from user pad selection
+struct PORT_SPEC
+{
+    std::string m_Name;        ///< Port name (e.g. "Q1_VBUS")
+    std::string m_NetName;     ///< Net this pad is on
+    int         m_NetCode = 0; ///< Net code for geometry filtering
+    double      m_XMM = 0.0;   ///< Pad position in mm
+    double      m_YMM = 0.0;
+    int         m_LayerId = 0;      ///< Copper layer the pad is on
+    bool        m_IsGround = false; ///< True if this is a ground reference pad
+};
+
 struct EXTRACTION_CONFIG
 {
     std::vector<std::string> m_NetNames;        ///< Nets to extract (empty = all power nets)
@@ -153,6 +165,7 @@ struct EXTRACTION_CONFIG
 
     /// Port generation
     bool m_GroupPadsByComponent = true; ///< Merge multi-pad ports per footprint+net
+    std::vector<PORT_SPEC> m_PortSpecs; ///< Explicit pads for ports (overrides m_NetNames)
 
     /// Output
     std::string m_OutputDir;                    ///< Working directory for intermediate files

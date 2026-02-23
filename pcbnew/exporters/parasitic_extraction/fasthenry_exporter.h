@@ -125,6 +125,9 @@ private:
     /// Find pads that serve as ports (VRM connections, decap connections, IC power pins)
     void identifyPorts();
 
+    /// Create ports from explicit PORT_SPEC entries (user-selected pads)
+    void identifyExplicitPorts();
+
     /// Connect power vias to ground planes at layer crossings to form return paths
     void identifyReturnPaths();
 

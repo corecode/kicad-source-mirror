@@ -67,7 +67,13 @@ bool FASTHENRY_EXPORTER::Export( const std::string& aOutputPath )
     // Resolve which nets to extract
     m_netCodes.clear();
 
-    if( m_config.m_NetNames.empty() )
+    if( !m_config.m_PortSpecs.empty() )
+    {
+        // Derive nets from explicit pad selection
+        for( const PDN_PARASITIC::PORT_SPEC& spec : m_config.m_PortSpecs )
+            m_netCodes.insert( spec.m_NetCode );
+    }
+    else if( m_config.m_NetNames.empty() )
     {
         // Default: extract all nets (caller should filter to power/ground)
         for( const PCB_TRACK* track : m_board->Tracks() )
@@ -647,6 +653,13 @@ void FASTHENRY_EXPORTER::identifyPorts()
 {
     m_ports.clear();
 
+    // If the user specified explicit pad selections, use those instead of auto-discovery
+    if( !m_config.m_PortSpecs.empty() )
+    {
+        identifyExplicitPorts();
+        return;
+    }
+
     // Strategy: create ports between power net pads and their nearest ground reference.
     // For PDN analysis, ports are typically at IC power pins and VRM output pins.
     //
@@ -806,6 +819,169 @@ void FASTHENRY_EXPORTER::identifyPorts()
 
             m_ports.push_back( port );
         }
+    }
+}
+
+
+void FASTHENRY_EXPORTER::identifyExplicitPorts()
+{
+    m_ports.clear();
+
+    // Split specs into signal and ground pads
+    std::vector<const PDN_PARASITIC::PORT_SPEC*> signalSpecs;
+    std::vector<const PDN_PARASITIC::PORT_SPEC*> groundSpecs;
+
+    for( const auto& spec : m_config.m_PortSpecs )
+    {
+        if( spec.m_IsGround )
+            groundSpecs.push_back( &spec );
+        else
+            signalSpecs.push_back( &spec );
+    }
+
+    if( signalSpecs.empty() || groundSpecs.empty() )
+        return;
+
+    // Find a ground plane zone (for creating named reference nodes on the plane mesh)
+    const ZONE* groundZone = nullptr;
+    int         groundZoneLayer = -1;
+
+    std::set<int> groundNetCodes;
+
+    for( const auto* gs : groundSpecs )
+        groundNetCodes.insert( gs->m_NetCode );
+
+    for( const ZONE* zone : m_board->Zones() )
+    {
+        if( !zone->GetIsRuleArea() && groundNetCodes.count( zone->GetNetCode() ) )
+        {
+            groundZone = zone;
+            LSET layers = zone->GetLayerSet();
+
+            for( PCB_LAYER_ID id : layers.CuStack() )
+            {
+                groundZoneLayer = id;
+                break;
+            }
+
+            break;
+        }
+    }
+
+    // Track which (name prefix, netCode) already have a port for component grouping
+    std::map<std::pair<std::string, int>, std::string> componentPortNodes;
+
+    for( const auto* spec : signalSpecs )
+    {
+        // Find the nearest conductor node to this pad's position
+        int layerId = spec->m_LayerId;
+
+        std::string posNode;
+        double      bestDistSq = std::numeric_limits<double>::max();
+
+        for( const auto& [key, nodeName] : m_nodeMap )
+        {
+            auto [nx, ny, nl] = key;
+
+            if( nl != layerId )
+                continue;
+
+            double dx = spec->m_XMM - iu2mm( nx );
+            double dy = spec->m_YMM - iu2mm( ny );
+            double distSq = dx * dx + dy * dy;
+
+            if( distSq < bestDistSq )
+            {
+                bestDistSq = distSq;
+                posNode = nodeName;
+            }
+        }
+
+        if( posNode.empty() )
+            continue;
+
+        // Component grouping: merge pads with same name prefix and net
+        if( m_config.m_GroupPadsByComponent )
+        {
+            // Extract footprint reference prefix from the port name (e.g. "U1" from "U1_VDD")
+            std::string namePrefix = spec->m_Name;
+            size_t      sep = namePrefix.find( '_' );
+
+            if( sep != std::string::npos )
+                namePrefix = namePrefix.substr( 0, sep );
+
+            auto groupKey = std::make_pair( namePrefix, spec->m_NetCode );
+            auto it = componentPortNodes.find( groupKey );
+
+            if( it != componentPortNodes.end() )
+            {
+                if( posNode != it->second )
+                    m_equivPairs.push_back( { posNode, it->second } );
+
+                continue;
+            }
+
+            componentPortNodes[groupKey] = posNode;
+        }
+
+        // Find nearest ground pad for the negative reference
+        const PDN_PARASITIC::PORT_SPEC* nearestGnd = groundSpecs[0];
+        double                          bestGndDistSq = std::numeric_limits<double>::max();
+
+        for( const auto* gs : groundSpecs )
+        {
+            double dx = spec->m_XMM - gs->m_XMM;
+            double dy = spec->m_YMM - gs->m_YMM;
+            double distSq = dx * dx + dy * dy;
+
+            if( distSq < bestGndDistSq )
+            {
+                bestGndDistSq = distSq;
+                nearestGnd = gs;
+            }
+        }
+
+        // Create the negative node from the ground reference
+        std::string negNode;
+
+        if( groundZone && groundZoneLayer >= 0 )
+        {
+            negNode = makePlaneNodeName( groundZone, nearestGnd->m_XMM, nearestGnd->m_YMM );
+            m_groundPlanePortNodes.push_back( { negNode, nearestGnd->m_XMM, nearestGnd->m_YMM,
+                                                getLayerZMM( groundZoneLayer ) } );
+        }
+        else
+        {
+            // No ground plane — find nearest conductor node on the ground net
+            bestDistSq = std::numeric_limits<double>::max();
+
+            for( const auto& [key, nodeName] : m_nodeMap )
+            {
+                auto [nx, ny, nl] = key;
+                double dx = nearestGnd->m_XMM - iu2mm( nx );
+                double dy = nearestGnd->m_YMM - iu2mm( ny );
+                double distSq = dx * dx + dy * dy;
+
+                if( distSq < bestDistSq )
+                {
+                    bestDistSq = distSq;
+                    negNode = nodeName;
+                }
+            }
+        }
+
+        if( negNode.empty() )
+            continue;
+
+        PDN_PARASITIC::EXTRACTION_PORT port;
+        port.m_Name = spec->m_Name;
+        port.m_PositiveNode = posNode;
+        port.m_NegativeNode = negNode;
+        port.m_NetName = spec->m_NetName;
+        port.m_XMM = spec->m_XMM;
+        port.m_YMM = spec->m_YMM;
+
+        m_ports.push_back( port );
     }
 }
 
