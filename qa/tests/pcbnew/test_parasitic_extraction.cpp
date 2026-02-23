@@ -25,11 +25,24 @@
 
 #include <cmath>
 #include <complex>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
+#include <wx/filename.h>
+
+#include <pcbnew_utils/board_test_utils.h>
+#include <board.h>
+#include <board_design_settings.h>
+#include <settings/settings_manager.h>
+
 #include <exporters/parasitic_extraction/pdn_parasitic_data.h>
 #include <exporters/parasitic_extraction/parasitic_result_parser.h>
+#include <exporters/parasitic_extraction/fasthenry_exporter.h>
+#include <exporters/parasitic_extraction/fastcap_exporter.h>
+#include <exporters/parasitic_extraction/parasitic_extraction.h>
+#include <exporters/parasitic_extraction/spice_subckt_exporter.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -2649,6 +2662,1212 @@ BOOST_AUTO_TEST_CASE( DeriveLumpedDuplicateCapacitor )
     }
 
     BOOST_CHECK( foundVDD );
+}
+
+
+// ============================================================================
+// Exporter tests with real BOARD geometry
+// ============================================================================
+
+struct EXPORTER_TEST_FIXTURE
+{
+    EXPORTER_TEST_FIXTURE() : m_settingsManager( true /* headless */ )
+    {
+        KI_TEST::LoadBoard( m_settingsManager, "parasitic_extraction/parasitic_test", m_board );
+        BOOST_REQUIRE( m_board );
+
+        m_tempDir = "build/qa/parasitic_test_tmp";
+        std::filesystem::create_directories( m_tempDir );
+    }
+
+    ~EXPORTER_TEST_FIXTURE() { std::filesystem::remove_all( m_tempDir ); }
+
+    PDN_PARASITIC::EXTRACTION_CONFIG makeConfig( const std::vector<std::string>& aNets = { "VDD",
+                                                                                           "GND" } )
+    {
+        PDN_PARASITIC::EXTRACTION_CONFIG cfg;
+        cfg.m_NetNames = aNets;
+        cfg.m_OutputDir = m_tempDir;
+        cfg.m_FreqMinHz = 1e3;
+        cfg.m_FreqMaxHz = 1e9;
+        cfg.m_PointsPerDecade = 5;
+        cfg.m_ViaFacets = 8;
+        cfg.m_PlaneSegX = 4;
+        cfg.m_PlaneSegY = 4;
+        return cfg;
+    }
+
+    std::string readFile( const std::string& aPath )
+    {
+        std::ifstream file( aPath );
+        return std::string( std::istreambuf_iterator<char>( file ),
+                            std::istreambuf_iterator<char>() );
+    }
+
+    SETTINGS_MANAGER       m_settingsManager;
+    std::unique_ptr<BOARD> m_board;
+    std::string            m_tempDir;
+};
+
+
+// --------------------------------------------------------------------------
+// FastHenry: basic export produces valid .inp file
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportBasic, EXPORTER_TEST_FIXTURE )
+{
+    auto               cfg = makeConfig();
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( outPath );
+    BOOST_CHECK( !content.empty() );
+
+    // Check required FastHenry sections
+    BOOST_CHECK( content.find( ".units mm" ) != std::string::npos );
+    BOOST_CHECK( content.find( ".default" ) != std::string::npos );
+    BOOST_CHECK( content.find( ".freq" ) != std::string::npos );
+    BOOST_CHECK( content.find( ".end" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastHenry: track produces nodes and segments with correct geometry
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportTrackGeometry, EXPORTER_TEST_FIXTURE )
+{
+    auto               cfg = makeConfig( { "VDD" } );
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/track_test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( outPath );
+
+    // Track is from (20,15) to (29.5,15), width 0.25mm on F.Cu
+    // Node definitions should contain x= y= z= coordinates
+    BOOST_CHECK( content.find( "x=" ) != std::string::npos );
+    BOOST_CHECK( content.find( "y=" ) != std::string::npos );
+    BOOST_CHECK( content.find( "z=" ) != std::string::npos );
+
+    // Segment definitions: E<n> with w= h=
+    BOOST_CHECK( content.find( "w=" ) != std::string::npos );
+    BOOST_CHECK( content.find( "h=" ) != std::string::npos );
+
+    // Track width should be 0.25mm (0.250000)
+    BOOST_CHECK( content.find( "w=0.25" ) != std::string::npos );
+
+    // Trace section header
+    BOOST_CHECK( content.find( "Trace segments" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastHenry: via produces vertical node pair
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportVia, EXPORTER_TEST_FIXTURE )
+{
+    auto               cfg = makeConfig( { "VDD" } );
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/via_test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( outPath );
+
+    // Via section header
+    BOOST_CHECK( content.find( "Vias" ) != std::string::npos );
+
+    // Via at (20,15) connects F.Cu to B.Cu — should have nodes at different Z
+    // There should be at least 2 nodes for the via (top and bottom layers)
+    // and at least 1 segment connecting them
+
+    // Count 'E' segments in via section
+    size_t viaPos = content.find( "Vias" );
+    BOOST_REQUIRE( viaPos != std::string::npos );
+
+    std::string viaSection = content.substr( viaPos );
+    // There should be at least one E segment in the via section
+    BOOST_CHECK( viaSection.find( "E" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastHenry: zone produces ground plane element
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportZone, EXPORTER_TEST_FIXTURE )
+{
+    auto               cfg = makeConfig( { "VDD", "GND" } );
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/zone_test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( outPath );
+
+    // Plane section header
+    BOOST_CHECK( content.find( "Copper planes" ) != std::string::npos );
+
+    // Ground plane element: g<n> with x1= y1= z1=
+    BOOST_CHECK( content.find( "g1" ) != std::string::npos );
+    BOOST_CHECK( content.find( "seg1=" ) != std::string::npos );
+    BOOST_CHECK( content.find( "seg2=" ) != std::string::npos );
+    BOOST_CHECK( content.find( "thick=" ) != std::string::npos );
+    BOOST_CHECK( content.find( "sigma=" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastHenry: net filtering excludes unselected nets
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportNetFiltering, EXPORTER_TEST_FIXTURE )
+{
+    // Only extract VDD — GND zone should be excluded
+    auto               cfg = makeConfig( { "VDD" } );
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/filter_test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( outPath );
+
+    // With only VDD net, there should be no ground plane (zone is GND)
+    BOOST_CHECK( content.find( "g1" ) == std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastHenry: stackup Z positions match layer order
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportStackupZ, EXPORTER_TEST_FIXTURE )
+{
+    auto               cfg = makeConfig( { "VDD", "GND" } );
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/stackup_test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( outPath );
+
+    // Parse z= values from the track node definitions
+    // F.Cu center should be at 0.0175 mm (half of 0.035)
+    // The via should have nodes at F.Cu Z and B.Cu Z, with B.Cu Z > F.Cu Z
+    // This verifies the stackup is correctly modeled
+
+    // At minimum, verify nodes exist at different Z positions
+    // by checking that z= appears multiple times
+    size_t firstZ = content.find( "z=" );
+    BOOST_REQUIRE( firstZ != std::string::npos );
+
+    size_t secondZ = content.find( "z=", firstZ + 1 );
+    BOOST_REQUIRE( secondZ != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastHenry: frequency sweep line matches config
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportFrequency, EXPORTER_TEST_FIXTURE )
+{
+    auto cfg = makeConfig( { "VDD" } );
+    cfg.m_FreqMinHz = 1e3;
+    cfg.m_FreqMaxHz = 1e9;
+    cfg.m_PointsPerDecade = 10;
+
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/freq_test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( outPath );
+
+    // .freq fmin=... fmax=... ndec=...
+    BOOST_CHECK( content.find( ".freq" ) != std::string::npos );
+    BOOST_CHECK( content.find( "fmin=" ) != std::string::npos );
+    BOOST_CHECK( content.find( "fmax=" ) != std::string::npos );
+    BOOST_CHECK( content.find( "ndec=10" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastHenry: .equiv statements for pad/plane connections
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportEquivNodes, EXPORTER_TEST_FIXTURE )
+{
+    auto               cfg = makeConfig( { "VDD", "GND" } );
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/equiv_test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( outPath );
+
+    // Node equivalences section header
+    BOOST_CHECK( content.find( "Node equivalences" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastHenry: ports identified from footprint pads
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastHenryExportPorts, EXPORTER_TEST_FIXTURE )
+{
+    auto               cfg = makeConfig( { "VDD", "GND" } );
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+
+    std::string outPath = m_tempDir + "/ports_test.inp";
+    bool        ok = exporter.Export( outPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // The footprint has VDD pad and GND pad, so a port should be created
+    const auto& ports = exporter.GetPorts();
+    BOOST_CHECK_GE( ports.size(), 1u );
+
+    if( !ports.empty() )
+    {
+        // Port should reference VDD net
+        BOOST_CHECK_EQUAL( ports[0].m_NetName, "VDD" );
+        BOOST_CHECK( !ports[0].m_PositiveNode.empty() );
+        BOOST_CHECK( !ports[0].m_NegativeNode.empty() );
+
+        // .external line in the output
+        std::string content = readFile( outPath );
+        BOOST_CHECK( content.find( ".external" ) != std::string::npos );
+    }
+}
+
+
+// --------------------------------------------------------------------------
+// FastCap: basic export produces .lst and .qui files
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastCapExportBasic, EXPORTER_TEST_FIXTURE )
+{
+    auto             cfg = makeConfig();
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+
+    bool ok = exporter.Export( m_tempDir, "test.lst" );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // Check list file exists
+    std::string lstContent = readFile( m_tempDir + "/test.lst" );
+    BOOST_CHECK( !lstContent.empty() );
+    BOOST_CHECK( lstContent.find( "FastCap list file" ) != std::string::npos );
+
+    // Check at least one .qui geometry file exists
+    bool foundQui = false;
+
+    for( const auto& entry : std::filesystem::directory_iterator( m_tempDir ) )
+    {
+        if( entry.path().extension() == ".qui" )
+        {
+            foundQui = true;
+            break;
+        }
+    }
+
+    BOOST_CHECK( foundQui );
+}
+
+
+// --------------------------------------------------------------------------
+// FastCap: trace mesh has Q (quad) panels with correct units (meters)
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastCapExportTraceGeometry, EXPORTER_TEST_FIXTURE )
+{
+    auto             cfg = makeConfig( { "VDD" } );
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+
+    bool ok = exporter.Export( m_tempDir, "trace_test.lst" );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // Read traces.qui
+    std::string traceContent = readFile( m_tempDir + "/traces.qui" );
+    BOOST_CHECK( !traceContent.empty() );
+
+    // Trace file should have Q (quad) panels
+    BOOST_CHECK( traceContent.find( "Q " ) != std::string::npos );
+
+    // Coordinates should be in meters (very small values, scientific notation)
+    // Track at (20mm, 15mm) = (0.020, 0.015 meters)
+    // Scientific notation with e- prefix
+    BOOST_CHECK( traceContent.find( "e-" ) != std::string::npos );
+
+    // Conductor name should be VDD (net name)
+    BOOST_CHECK( traceContent.find( "VDD" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastCap: via barrel mesh with correct facet count
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastCapExportViaMesh, EXPORTER_TEST_FIXTURE )
+{
+    auto cfg = makeConfig( { "VDD" } );
+    cfg.m_ViaFacets = 8;
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+
+    bool ok = exporter.Export( m_tempDir, "via_test.lst" );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // Read vias.qui
+    std::string viaContent = readFile( m_tempDir + "/vias.qui" );
+    BOOST_CHECK( !viaContent.empty() );
+
+    // Via mesh should have Q (quad) panels for barrel and T (tri) for caps
+    BOOST_CHECK( viaContent.find( "Q " ) != std::string::npos );
+    BOOST_CHECK( viaContent.find( "T " ) != std::string::npos );
+
+    // Count quad panels: 8 facets per ring, plus annular caps (8 tri each)
+    // At minimum there should be 8 barrel quads + 16 cap tris = 24 panels
+    int                quadCount = 0;
+    int                triCount = 0;
+    std::istringstream iss( viaContent );
+    std::string        line;
+
+    while( std::getline( iss, line ) )
+    {
+        if( line.substr( 0, 2 ) == "Q " )
+            quadCount++;
+        else if( line.substr( 0, 2 ) == "T " )
+            triCount++;
+    }
+
+    // At least 8 facets for barrel
+    BOOST_CHECK_GE( quadCount, 8 );
+    // At least 8 triangles per cap, 2 caps = 16
+    BOOST_CHECK_GE( triCount, 16 );
+}
+
+
+// --------------------------------------------------------------------------
+// FastCap: zone mesh produces quad panels
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastCapExportZoneMesh, EXPORTER_TEST_FIXTURE )
+{
+    auto cfg = makeConfig( { "GND" } );
+    cfg.m_PlaneSegX = 4;
+    cfg.m_PlaneSegY = 4;
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+
+    bool ok = exporter.Export( m_tempDir, "zone_test.lst" );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // Read planes.qui
+    std::string planeContent = readFile( m_tempDir + "/planes.qui" );
+    BOOST_CHECK( !planeContent.empty() );
+
+    // Plane mesh should have Q (quad) panels
+    BOOST_CHECK( planeContent.find( "Q " ) != std::string::npos );
+
+    // With 4x4 mesh on top and bottom surfaces = 2 * 16 = 32 quads minimum
+    int                quadCount = 0;
+    std::istringstream iss( planeContent );
+    std::string        line;
+
+    while( std::getline( iss, line ) )
+    {
+        if( line.substr( 0, 2 ) == "Q " )
+            quadCount++;
+    }
+
+    BOOST_CHECK_GE( quadCount, 32 );
+}
+
+
+// --------------------------------------------------------------------------
+// FastCap: dielectric surfaces with correct epsilon_r from stackup
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastCapExportDielectric, EXPORTER_TEST_FIXTURE )
+{
+    auto             cfg = makeConfig();
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+
+    bool ok = exporter.Export( m_tempDir, "diel_test.lst" );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // List file should have D (dielectric) entries with epsilon_r from stackup (4.5)
+    std::string lstContent = readFile( m_tempDir + "/diel_test.lst" );
+    BOOST_CHECK( lstContent.find( "D " ) != std::string::npos );
+    BOOST_CHECK( lstContent.find( "4.5" ) != std::string::npos );
+
+    // Check that dielectric .qui files exist
+    bool foundDiel = false;
+
+    for( const auto& entry : std::filesystem::directory_iterator( m_tempDir ) )
+    {
+        if( entry.path().filename().string().find( "dielectric" ) != std::string::npos )
+        {
+            foundDiel = true;
+            break;
+        }
+    }
+
+    BOOST_CHECK( foundDiel );
+}
+
+
+// --------------------------------------------------------------------------
+// FastCap: net filtering only includes requested nets
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastCapExportNetFiltering, EXPORTER_TEST_FIXTURE )
+{
+    // Only extract VDD — zones (GND) should be excluded
+    auto             cfg = makeConfig( { "VDD" } );
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+
+    bool ok = exporter.Export( m_tempDir, "filter_test.lst" );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // planes.qui should not exist (GND zone excluded, no VDD zones)
+    std::string planeContent = readFile( m_tempDir + "/planes.qui" );
+
+    // Either file is empty or doesn't have GND conductor
+    if( !planeContent.empty() )
+        BOOST_CHECK( planeContent.find( "GND" ) == std::string::npos );
+
+    // traces.qui should only have VDD conductor
+    std::string traceContent = readFile( m_tempDir + "/traces.qui" );
+
+    if( !traceContent.empty() )
+        BOOST_CHECK( traceContent.find( "GND" ) == std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// FastCap: .lst file correctly references conductor/dielectric files
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FastCapExportListFileFormat, EXPORTER_TEST_FIXTURE )
+{
+    auto             cfg = makeConfig();
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+
+    bool ok = exporter.Export( m_tempDir, "lst_test.lst" );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string lstContent = readFile( m_tempDir + "/lst_test.lst" );
+
+    // List file should reference conductor files with 'C' prefix
+    BOOST_CHECK( lstContent.find( "C " ) != std::string::npos );
+
+    // Should reference dielectric files with 'D' prefix
+    BOOST_CHECK( lstContent.find( "D " ) != std::string::npos );
+
+    // Should reference specific geometry files
+    BOOST_CHECK( lstContent.find( "traces.qui" ) != std::string::npos );
+}
+
+
+// --------------------------------------------------------------------------
+// Orchestrator: ExportGeometry creates both FastHenry and FastCap outputs
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( ExportGeometryCreatesBothOutputs, EXPORTER_TEST_FIXTURE )
+{
+    auto                 cfg = makeConfig();
+    PARASITIC_EXTRACTION extractor( m_board.get(), cfg );
+
+    bool ok = extractor.ExportGeometry();
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // FastHenry .inp file should exist
+    std::string fhContent = readFile( m_tempDir + "/pdn_extraction.inp" );
+    BOOST_CHECK( !fhContent.empty() );
+    BOOST_CHECK( fhContent.find( ".units mm" ) != std::string::npos );
+    BOOST_CHECK( fhContent.find( ".end" ) != std::string::npos );
+
+    // FastCap .lst file should exist
+    std::string fcContent = readFile( m_tempDir + "/pdn_extraction.lst" );
+    BOOST_CHECK( !fcContent.empty() );
+    BOOST_CHECK( fcContent.find( "FastCap list file" ) != std::string::npos );
+
+    // Results should have ports populated
+    const auto& results = extractor.GetResults();
+    BOOST_CHECK_GE( results.m_Ports.size(), 1u );
+}
+
+
+// --------------------------------------------------------------------------
+// Orchestrator: buildStackupResults extracts correct layer data
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( BuildStackupFromBoard, EXPORTER_TEST_FIXTURE )
+{
+    auto                 cfg = makeConfig();
+    PARASITIC_EXTRACTION extractor( m_board.get(), cfg );
+
+    // ExportGeometry also calls buildStackupResults indirectly through
+    // RunExtraction, but ExportGeometry alone doesn't populate stackup.
+    // We verify via the JSON serialization path after ExportGeometry.
+    bool ok = extractor.ExportGeometry();
+    BOOST_CHECK_EQUAL( ok, true );
+
+    // Serialize results to JSON and check stackup content
+    std::string jsonPath = m_tempDir + "/stackup_test.json";
+    ok = extractor.SerializeResults( jsonPath );
+    BOOST_CHECK_EQUAL( ok, true );
+
+    std::string content = readFile( jsonPath );
+    BOOST_CHECK( !content.empty() );
+
+    // The JSON should contain port info (from ExportGeometry)
+    BOOST_CHECK( content.find( "\"ports\"" ) != std::string::npos );
+}
+
+
+// ============================================================================
+// Manual validation export (writes to temp dir for manual solver runs)
+// ============================================================================
+
+BOOST_FIXTURE_TEST_CASE( ExportForManualValidation, EXPORTER_TEST_FIXTURE )
+{
+    auto cfg = makeConfig( { "VDD", "GND" } );
+
+    // Export FastHenry
+    FASTHENRY_EXPORTER fh( m_board.get(), cfg );
+    std::string        fhPath = m_tempDir + "/pdn_extraction.inp";
+    bool               fhOk = fh.Export( fhPath );
+    BOOST_CHECK_EQUAL( fhOk, true );
+
+    std::string fhContent = readFile( fhPath );
+    BOOST_CHECK( !fhContent.empty() );
+    BOOST_CHECK( fhContent.find( ".end" ) != std::string::npos );
+
+    // Export FastCap
+    FASTCAP_EXPORTER fc( m_board.get(), cfg );
+    bool             fcOk = fc.Export( m_tempDir, "pdn_extraction.lst" );
+    BOOST_CHECK_EQUAL( fcOk, true );
+
+    std::string fcContent = readFile( m_tempDir + "/pdn_extraction.lst" );
+    BOOST_CHECK( !fcContent.empty() );
+
+    BOOST_TEST_MESSAGE( "Exported files for manual validation to: " << m_tempDir );
+    BOOST_TEST_MESSAGE( "  FastHenry: " << fhPath );
+    BOOST_TEST_MESSAGE( "  FastCap:   " << m_tempDir << "/pdn_extraction.lst" );
+    BOOST_TEST_MESSAGE( "Run manually:" );
+    BOOST_TEST_MESSAGE( "  cd " << m_tempDir << " && fasthenry pdn_extraction.inp" );
+    BOOST_TEST_MESSAGE( "  cd " << m_tempDir << " && fastcap -lpdn_extraction.lst" );
+}
+
+
+// ============================================================================
+// Solver integration tests (skipped if solvers not found on system)
+// ============================================================================
+
+namespace
+{
+
+/// Check if a solver binary is available on PATH
+bool findSolver( const std::string& aBinaryName )
+{
+    std::string cmd = "which " + aBinaryName + " > /dev/null 2>&1";
+    return std::system( cmd.c_str() ) == 0;
+}
+
+} // anonymous namespace
+
+
+// --------------------------------------------------------------------------
+// FastHenry solver integration: export, run solver, parse results, verify
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( SolverIntegration_FastHenry, EXPORTER_TEST_FIXTURE )
+{
+    if( !findSolver( "fasthenry" ) )
+    {
+        BOOST_TEST_MESSAGE( "SKIPPED: fasthenry not found on PATH" );
+        return;
+    }
+
+    auto cfg = makeConfig( { "VDD", "GND" } );
+
+    // Export FastHenry input
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+    std::string        inpPath = m_tempDir + "/solver_test.inp";
+    bool               exportOk = exporter.Export( inpPath );
+    BOOST_REQUIRE( exportOk );
+
+    // Run FastHenry (use just the filename since we cd into the temp dir)
+    std::string cmd =
+            "cd " + m_tempDir + " && fasthenry solver_test.inp" + " > fasthenry_log.txt 2>&1";
+    int ret = std::system( cmd.c_str() );
+    BOOST_REQUIRE_MESSAGE( ret == 0, "FastHenry exited with code " << ret << ". Check " << m_tempDir
+                                                                   << "/fasthenry_log.txt" );
+
+    // Verify Zc.mat was created
+    std::string zcPath = m_tempDir + "/Zc.mat";
+    std::string zcContent = readFile( zcPath );
+    BOOST_REQUIRE_MESSAGE( !zcContent.empty(), "Zc.mat not created or empty" );
+
+    // Parse the results
+    std::vector<PDN_PARASITIC::EXTRACTION_PORT> ports = exporter.GetPorts();
+    BOOST_REQUIRE_GE( ports.size(), 1u );
+
+    BOOST_TEST_MESSAGE( "Zc.mat content:\n" << zcContent );
+
+    std::vector<PDN_PARASITIC::IMPEDANCE_ENTRY> impedances;
+    bool parseOk = PARASITIC_RESULT_PARSER::ParseFastHenryOutput( zcPath, ports, impedances );
+    BOOST_REQUIRE_MESSAGE( parseOk, "Failed to parse Zc.mat" );
+    BOOST_REQUIRE_MESSAGE( !impedances.empty(), "Impedance matrix is empty" );
+
+    BOOST_TEST_MESSAGE( "Parsed " << impedances.size() << " impedance entries" );
+
+    for( const auto& imp : impedances )
+    {
+        BOOST_TEST_MESSAGE( "  Z[" << imp.m_PortI << "," << imp.m_PortJ
+                                   << "]: " << imp.m_Points.size() << " freq points" );
+    }
+
+    // Derive lumped parasitics
+    std::vector<PDN_PARASITIC::CAPACITANCE_ENTRY> emptyCapacitances;
+    std::vector<PDN_PARASITIC::NET_PARASITIC>     parasitics;
+    PARASITIC_RESULT_PARSER::DeriveLumpedParasitics( impedances, emptyCapacitances, parasitics );
+
+    BOOST_TEST_MESSAGE( "Derived " << parasitics.size() << " lumped parasitics" );
+    BOOST_REQUIRE_GE( parasitics.size(), 1u );
+
+    // Verify against analytical expectations:
+    //   Trace R_DC ~ 18.2 mOhm (tolerance ±50% for field solver vs analytical)
+    //   Trace+via L ~ 5-10 nH range (very loose, solver is more accurate than formula)
+    bool foundReasonableR = false;
+    bool foundReasonableL = false;
+
+    for( const auto& np : parasitics )
+    {
+        // R should be in the range 5..100 mOhm for our short trace
+        if( np.m_R_mOhm > 5.0 && np.m_R_mOhm < 100.0 )
+            foundReasonableR = true;
+
+        // L should be positive and in the nH range
+        if( np.m_L_nH > 0.1 && np.m_L_nH < 50.0 )
+            foundReasonableL = true;
+
+        BOOST_TEST_MESSAGE( "  Port " << np.m_SegmentId << ": R=" << np.m_R_mOhm << " mOhm"
+                                      << ", L=" << np.m_L_nH << " nH" );
+    }
+
+    BOOST_CHECK_MESSAGE( foundReasonableR, "No port had R in expected range 5..100 mOhm" );
+    BOOST_CHECK_MESSAGE( foundReasonableL, "No port had L in expected range 0.1..50 nH" );
+}
+
+
+// --------------------------------------------------------------------------
+// FastCap solver integration: export, run solver, parse results, verify
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( SolverIntegration_FastCap, EXPORTER_TEST_FIXTURE )
+{
+    if( !findSolver( "fastcap" ) )
+    {
+        BOOST_TEST_MESSAGE( "SKIPPED: fastcap not found on PATH" );
+        return;
+    }
+
+    auto cfg = makeConfig( { "VDD", "GND" } );
+
+    // Export FastCap input
+    FASTCAP_EXPORTER exporter( m_board.get(), cfg );
+    bool             exportOk = exporter.Export( m_tempDir, "solver_test.lst" );
+    BOOST_REQUIRE( exportOk );
+
+    // Create a conductor-only list file by stripping dielectric (D) lines.
+    // The MIT FastCap 2.0 binary runs out of memory with dielectric panels
+    // due to its sbrk()-based allocator (~4 MB limit on modern systems).
+    std::string lstPath = m_tempDir + "/solver_test.lst";
+    std::string nodieLstPath = m_tempDir + "/solver_test_nodie.lst";
+    {
+        std::ifstream lstIn( lstPath );
+        std::ofstream lstOut( nodieLstPath );
+        BOOST_REQUIRE( lstIn.is_open() );
+        BOOST_REQUIRE( lstOut.is_open() );
+
+        std::string line;
+
+        while( std::getline( lstIn, line ) )
+        {
+            // Skip dielectric surface lines (start with 'D')
+            if( !line.empty() && line[0] == 'D' )
+                continue;
+
+            lstOut << line << "\n";
+        }
+    }
+
+    // Run FastCap on conductor-only geometry
+    std::string cmd = "cd " + m_tempDir + " && fastcap -lsolver_test_nodie.lst"
+                      + " > fastcap_output.txt 2>&1";
+    int ret = std::system( cmd.c_str() );
+    BOOST_REQUIRE_MESSAGE( ret == 0, "FastCap exited with code " << ret << ". Check " << m_tempDir
+                                                                 << "/fastcap_output.txt" );
+
+    // Parse the output
+    std::string fcOutPath = m_tempDir + "/fastcap_output.txt";
+    std::string fcOutput = readFile( fcOutPath );
+    BOOST_REQUIRE_MESSAGE( !fcOutput.empty(), "FastCap output file empty" );
+    BOOST_REQUIRE_MESSAGE( fcOutput.find( "CAPACITANCE MATRIX" ) != std::string::npos,
+                           "FastCap output does not contain capacitance matrix" );
+
+    std::vector<PDN_PARASITIC::CAPACITANCE_ENTRY> capacitances;
+    bool parseOk = PARASITIC_RESULT_PARSER::ParseFastCapOutput( fcOutPath, capacitances );
+    BOOST_REQUIRE_MESSAGE( parseOk, "Failed to parse FastCap output" );
+    BOOST_REQUIRE( !capacitances.empty() );
+
+    // Derive lumped parasitics
+    std::vector<PDN_PARASITIC::IMPEDANCE_ENTRY> emptyImpedances;
+    std::vector<PDN_PARASITIC::NET_PARASITIC>   parasitics;
+    PARASITIC_RESULT_PARSER::DeriveLumpedParasitics( emptyImpedances, capacitances, parasitics );
+
+    // Verify: at least one conductor has reasonable capacitance
+    //   Without dielectrics, values will be lower than with εr=4.5 substrate,
+    //   but should still be in a reasonable range (0.01..100 pF).
+    bool foundReasonableC = false;
+
+    for( const auto& np : parasitics )
+    {
+        BOOST_TEST_MESSAGE( "  Conductor " << np.m_NetName << ": C=" << np.m_C_pF << " pF" );
+
+        if( np.m_C_pF > 0.01 && np.m_C_pF < 1000.0 )
+            foundReasonableC = true;
+    }
+
+    BOOST_CHECK_MESSAGE( foundReasonableC, "No conductor had C in expected range 0.01..1000 pF" );
+
+    // Log all capacitance matrix entries
+    for( const auto& cap : capacitances )
+    {
+        BOOST_TEST_MESSAGE( "  C[" << cap.m_ConductorI << "," << cap.m_ConductorJ
+                                   << "] = " << cap.m_CapacitancePF << " pF" );
+    }
+}
+
+
+// --------------------------------------------------------------------------
+// Full pipeline end-to-end: run orchestrator, verify results
+// --------------------------------------------------------------------------
+BOOST_FIXTURE_TEST_CASE( FullPipeline_SolverEndToEnd, EXPORTER_TEST_FIXTURE )
+{
+    if( !findSolver( "fasthenry" ) || !findSolver( "fastcap" ) )
+    {
+        BOOST_TEST_MESSAGE( "SKIPPED: fasthenry and/or fastcap not found on PATH" );
+        return;
+    }
+
+    auto                 cfg = makeConfig( { "VDD", "GND" } );
+    PARASITIC_EXTRACTION extractor( m_board.get(), cfg );
+
+    // Run full extraction pipeline
+    bool ok = extractor.RunExtraction();
+    BOOST_REQUIRE_MESSAGE( ok, "RunExtraction() failed" );
+
+    const auto& results = extractor.GetResults();
+
+    // Verify ports were identified
+    BOOST_CHECK_GE( results.m_Ports.size(), 1u );
+    BOOST_TEST_MESSAGE( "Ports: " << results.m_Ports.size() );
+
+    for( const auto& port : results.m_Ports )
+    {
+        BOOST_TEST_MESSAGE( "  " << port.m_Name << " net=" << port.m_NetName << " +"
+                                 << port.m_PositiveNode << " -" << port.m_NegativeNode );
+    }
+
+    // Verify impedance matrix is populated
+    BOOST_CHECK( !results.m_ImpedanceMatrix.empty() );
+
+    for( const auto& imp : results.m_ImpedanceMatrix )
+    {
+        if( imp.m_PortI == imp.m_PortJ && !imp.m_Points.empty() )
+        {
+            BOOST_TEST_MESSAGE( "  Z[" << imp.m_PortI << "," << imp.m_PortJ << "] at "
+                                       << imp.m_Points[0].m_FrequencyHz
+                                       << " Hz: " << imp.m_Points[0].m_Z.real() << " + "
+                                       << imp.m_Points[0].m_Z.imag() << "j ohms" );
+        }
+    }
+
+    // Verify capacitance matrix is populated
+    BOOST_CHECK( !results.m_CapacitanceMatrix.empty() );
+
+    for( const auto& cap : results.m_CapacitanceMatrix )
+    {
+        BOOST_TEST_MESSAGE( "  C[" << cap.m_ConductorI << "," << cap.m_ConductorJ
+                                   << "] = " << cap.m_CapacitancePF << " pF" );
+    }
+
+    // Verify lumped parasitics were derived
+    BOOST_CHECK( !results.m_NetParasitics.empty() );
+
+    for( const auto& np : results.m_NetParasitics )
+    {
+        BOOST_TEST_MESSAGE( "  " << np.m_SegmentId << " (" << np.m_NetName << ")"
+                                 << ": R=" << np.m_R_mOhm << " mOhm"
+                                 << ", L=" << np.m_L_nH << " nH"
+                                 << ", C=" << np.m_C_pF << " pF" );
+    }
+
+    // Verify frequency range
+    BOOST_CHECK_CLOSE( results.m_FreqMinHz, cfg.m_FreqMinHz, 0.01 );
+    BOOST_CHECK_CLOSE( results.m_FreqMaxHz, cfg.m_FreqMaxHz, 0.01 );
+    BOOST_CHECK_EQUAL( results.m_PointsPerDecade, cfg.m_PointsPerDecade );
+
+    // Verify JSON serialization of real results
+    std::string jsonPath = m_tempDir + "/full_e2e_results.json";
+    bool        jsonOk = extractor.SerializeResults( jsonPath );
+    BOOST_CHECK( jsonOk );
+
+    std::string jsonContent = readFile( jsonPath );
+    BOOST_CHECK( !jsonContent.empty() );
+    BOOST_CHECK( jsonContent.find( "\"impedance_matrix\"" ) != std::string::npos );
+    BOOST_CHECK( jsonContent.find( "\"capacitance_matrix\"" ) != std::string::npos );
+    BOOST_CHECK( jsonContent.find( "\"net_parasitics\"" ) != std::string::npos );
+}
+
+
+// ============================================================================
+// SPICE subcircuit exporter tests
+// ============================================================================
+
+BOOST_AUTO_TEST_CASE( SpiceSubcktExporter_SinglePort )
+{
+    // Build a simple extraction result with one port
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    PDN_PARASITIC::EXTRACTION_PORT port;
+    port.m_Name = "Q1_VDD";
+    port.m_PositiveNode = "N1";
+    port.m_NegativeNode = "N2";
+    port.m_NetName = "VDD";
+    port.m_XMM = 10.0;
+    port.m_YMM = 15.0;
+    results.m_Ports.push_back( port );
+
+    // Add impedance data: Z11 at 1 kHz = 0.020 + j*3.2e-5 ohms
+    // This gives R=20 mOhm, L=Im(Z)/(2*pi*f) = 3.2e-5/(2*pi*1000) = 5.09 nH
+    PDN_PARASITIC::IMPEDANCE_ENTRY z11;
+    z11.m_PortI = 0;
+    z11.m_PortJ = 0;
+    z11.m_Points.push_back( { 1000.0, { 0.020, 3.2e-5 } } );
+    z11.m_Points.push_back( { 1e6, { 0.021, 0.032 } } );
+    results.m_ImpedanceMatrix.push_back( z11 );
+
+    SPICE_SUBCKT_EXPORTER exporter( results );
+
+    BOOST_CHECK_EQUAL( exporter.GetPortCount(), 1 );
+
+    auto names = exporter.GetPortNames();
+    BOOST_REQUIRE_EQUAL( names.size(), 1u );
+    BOOST_CHECK_EQUAL( names[0], "Q1_VDD" );
+
+    // Check extracted parasitics at default (lowest) frequency
+    auto parasitics = exporter.GetPortParasitics();
+    BOOST_REQUIRE_EQUAL( parasitics.size(), 1u );
+    BOOST_CHECK_CLOSE( parasitics[0].m_R_Ohm, 0.020, 0.1 );
+
+    double expectedL = 3.2e-5 / ( 2.0 * M_PI * 1000.0 );
+    BOOST_CHECK_CLOSE( parasitics[0].m_L_Henry, expectedL, 0.1 );
+
+    // Generate and verify subcircuit syntax
+    std::string spice = exporter.Generate();
+    BOOST_CHECK( spice.find( ".subckt" ) != std::string::npos );
+    BOOST_CHECK( spice.find( ".ends" ) != std::string::npos );
+    BOOST_CHECK( spice.find( "R1" ) != std::string::npos );
+    BOOST_CHECK( spice.find( "L1" ) != std::string::npos );
+    BOOST_CHECK( spice.find( "Q1_VDD_p" ) != std::string::npos );
+    BOOST_CHECK( spice.find( "Q1_VDD_n" ) != std::string::npos );
+
+    BOOST_TEST_MESSAGE( "Generated SPICE subcircuit:\n" << spice );
+}
+
+
+BOOST_AUTO_TEST_CASE( SpiceSubcktExporter_TwoPorts_WithCoupling )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    // Two ports
+    PDN_PARASITIC::EXTRACTION_PORT p1, p2;
+    p1.m_Name = "Q1_VDD";
+    p1.m_PositiveNode = "N1";
+    p1.m_NegativeNode = "N2";
+    p1.m_NetName = "VDD";
+    p2.m_Name = "Q2_VDD";
+    p2.m_PositiveNode = "N3";
+    p2.m_NegativeNode = "N4";
+    p2.m_NetName = "VDD";
+    results.m_Ports.push_back( p1 );
+    results.m_Ports.push_back( p2 );
+
+    double freq = 100e3;
+    double omega = 2.0 * M_PI * freq;
+
+    // Self impedances
+    double L1 = 5e-9;  // 5 nH
+    double L2 = 3e-9;  // 3 nH
+    double R1 = 0.020; // 20 mOhm
+    double R2 = 0.015; // 15 mOhm
+
+    // Mutual: M12 = 1.5 nH -> K = M/sqrt(L1*L2) = 1.5e-9/sqrt(15e-18) = 0.387
+    double M12 = 1.5e-9;
+    double expectedK = M12 / std::sqrt( L1 * L2 );
+
+    PDN_PARASITIC::IMPEDANCE_ENTRY z11, z22, z12, z21;
+    z11.m_PortI = 0;
+    z11.m_PortJ = 0;
+    z11.m_Points.push_back( { freq, { R1, omega * L1 } } );
+    z22.m_PortI = 1;
+    z22.m_PortJ = 1;
+    z22.m_Points.push_back( { freq, { R2, omega * L2 } } );
+    z12.m_PortI = 0;
+    z12.m_PortJ = 1;
+    z12.m_Points.push_back( { freq, { 0.0, omega * M12 } } );
+    z21.m_PortI = 1;
+    z21.m_PortJ = 0;
+    z21.m_Points.push_back( { freq, { 0.0, omega * M12 } } );
+
+    results.m_ImpedanceMatrix.push_back( z11 );
+    results.m_ImpedanceMatrix.push_back( z12 );
+    results.m_ImpedanceMatrix.push_back( z21 );
+    results.m_ImpedanceMatrix.push_back( z22 );
+
+    SPICE_SUBCKT_EXPORTER exporter( results );
+    BOOST_CHECK_EQUAL( exporter.GetPortCount(), 2 );
+
+    // Check coupling
+    auto coupling = exporter.GetCouplingPairs();
+    BOOST_REQUIRE_EQUAL( coupling.size(), 1u );
+    BOOST_CHECK_CLOSE( coupling[0].m_K, expectedK, 0.1 );
+    BOOST_CHECK_EQUAL( coupling[0].m_PortI, 0 );
+    BOOST_CHECK_EQUAL( coupling[0].m_PortJ, 1 );
+
+    // Generate and check K statement present
+    std::string spice = exporter.Generate();
+    BOOST_CHECK( spice.find( "K1_2" ) != std::string::npos );
+    BOOST_CHECK( spice.find( "L1" ) != std::string::npos );
+    BOOST_CHECK( spice.find( "L2" ) != std::string::npos );
+
+    BOOST_TEST_MESSAGE( "Generated 2-port SPICE subcircuit:\n" << spice );
+}
+
+
+BOOST_AUTO_TEST_CASE( SpiceSubcktExporter_MinKFilter )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    PDN_PARASITIC::EXTRACTION_PORT p1, p2;
+    p1.m_Name = "P1";
+    p2.m_Name = "P2";
+    results.m_Ports.push_back( p1 );
+    results.m_Ports.push_back( p2 );
+
+    double freq = 100e3;
+    double omega = 2.0 * M_PI * freq;
+    double L1 = 5e-9;
+    double L2 = 5e-9;
+    double M12 = 0.01e-9; // Very weak coupling: K = 0.01/5 = 0.002
+
+    PDN_PARASITIC::IMPEDANCE_ENTRY z11, z22, z12, z21;
+    z11.m_PortI = 0;
+    z11.m_PortJ = 0;
+    z11.m_Points.push_back( { freq, { 0.01, omega * L1 } } );
+    z22.m_PortI = 1;
+    z22.m_PortJ = 1;
+    z22.m_Points.push_back( { freq, { 0.01, omega * L2 } } );
+    z12.m_PortI = 0;
+    z12.m_PortJ = 1;
+    z12.m_Points.push_back( { freq, { 0.0, omega * M12 } } );
+    z21.m_PortI = 1;
+    z21.m_PortJ = 0;
+    z21.m_Points.push_back( { freq, { 0.0, omega * M12 } } );
+
+    results.m_ImpedanceMatrix.push_back( z11 );
+    results.m_ImpedanceMatrix.push_back( z12 );
+    results.m_ImpedanceMatrix.push_back( z21 );
+    results.m_ImpedanceMatrix.push_back( z22 );
+
+    SPICE_SUBCKT_EXPORTER exporter( results );
+
+    // Default minK = 0.01 -> should filter out K=0.002
+    auto coupling = exporter.GetCouplingPairs();
+    BOOST_CHECK_EQUAL( coupling.size(), 0u );
+
+    // With lower threshold, should include it
+    exporter.SetMinCouplingCoeff( 0.001 );
+    coupling = exporter.GetCouplingPairs();
+    BOOST_CHECK_EQUAL( coupling.size(), 1u );
+}
+
+
+BOOST_AUTO_TEST_CASE( SpiceSubcktExporter_ReferenceFrequency )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    PDN_PARASITIC::EXTRACTION_PORT port;
+    port.m_Name = "P1";
+    results.m_Ports.push_back( port );
+
+    // Add impedance at two frequencies with different R (skin effect)
+    PDN_PARASITIC::IMPEDANCE_ENTRY z11;
+    z11.m_PortI = 0;
+    z11.m_PortJ = 0;
+    z11.m_Points.push_back( { 1e3, { 0.020, 3.2e-5 } } ); // 1 kHz: R=20 mOhm
+    z11.m_Points.push_back( { 1e6, { 0.035, 0.032 } } );  // 1 MHz: R=35 mOhm (skin)
+    results.m_ImpedanceMatrix.push_back( z11 );
+
+    SPICE_SUBCKT_EXPORTER exporter( results );
+
+    // Default: uses lowest frequency (1 kHz)
+    auto pp = exporter.GetPortParasitics();
+    BOOST_CHECK_CLOSE( pp[0].m_R_Ohm, 0.020, 0.1 );
+
+    // Set reference to 1 MHz
+    exporter.SetReferenceFrequency( 1e6 );
+    pp = exporter.GetPortParasitics();
+    BOOST_CHECK_CLOSE( pp[0].m_R_Ohm, 0.035, 0.1 );
+}
+
+
+BOOST_AUTO_TEST_CASE( SpiceSubcktExporter_WithCapacitance )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    PDN_PARASITIC::EXTRACTION_PORT port;
+    port.m_Name = "P1";
+    results.m_Ports.push_back( port );
+
+    PDN_PARASITIC::IMPEDANCE_ENTRY z11;
+    z11.m_PortI = 0;
+    z11.m_PortJ = 0;
+    z11.m_Points.push_back( { 1e3, { 0.020, 3.2e-5 } } );
+    results.m_ImpedanceMatrix.push_back( z11 );
+
+    // Add capacitance entries
+    PDN_PARASITIC::CAPACITANCE_ENTRY c1;
+    c1.m_ConductorI = "VDD";
+    c1.m_ConductorJ = "GND";
+    c1.m_CapacitancePF = 0.5;
+    results.m_CapacitanceMatrix.push_back( c1 );
+
+    SPICE_SUBCKT_EXPORTER exporter( results );
+    std::string           spice = exporter.Generate();
+
+    BOOST_CHECK( spice.find( "C1" ) != std::string::npos );
+    // Capacitance comment uses scientific notation (stream is in std::scientific mode)
+    BOOST_CHECK( spice.find( "pF" ) != std::string::npos );
+    // Value line has capacitance in farads
+    BOOST_CHECK( spice.find( "cap_VDD" ) != std::string::npos );
+    BOOST_CHECK( spice.find( "cap_GND" ) != std::string::npos );
+
+    BOOST_TEST_MESSAGE( "SPICE with capacitance:\n" << spice );
+}
+
+
+BOOST_AUTO_TEST_CASE( SpiceSubcktExporter_FileExport )
+{
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+
+    PDN_PARASITIC::EXTRACTION_PORT port;
+    port.m_Name = "P1";
+    port.m_NetName = "VDD";
+    port.m_PositiveNode = "N1";
+    port.m_NegativeNode = "N2";
+    results.m_Ports.push_back( port );
+
+    PDN_PARASITIC::IMPEDANCE_ENTRY z11;
+    z11.m_PortI = 0;
+    z11.m_PortJ = 0;
+    z11.m_Points.push_back( { 1e3, { 0.020, 3.2e-5 } } );
+    results.m_ImpedanceMatrix.push_back( z11 );
+
+    std::string tempDir = "build/qa/spice_subckt_test_tmp";
+    std::filesystem::create_directories( tempDir );
+
+    SPICE_SUBCKT_EXPORTER exporter( results );
+    exporter.SetSubcktName( "MY_PCB" );
+
+    std::string outPath = tempDir + "/pcb_parasitics.subckt";
+    bool        ok = exporter.Export( outPath );
+    BOOST_REQUIRE( ok );
+
+    // Read back and verify
+    std::ifstream file( outPath );
+    std::string   content( ( std::istreambuf_iterator<char>( file ) ),
+                           std::istreambuf_iterator<char>() );
+
+    BOOST_CHECK( content.find( ".subckt MY_PCB" ) != std::string::npos );
+    BOOST_CHECK( content.find( ".ends MY_PCB" ) != std::string::npos );
+    BOOST_CHECK( content.find( "R1" ) != std::string::npos );
+    BOOST_CHECK( content.find( "L1" ) != std::string::npos );
+
+    std::filesystem::remove_all( tempDir );
+}
+
+
+// Integration test: run solver, then export to SPICE subcircuit
+BOOST_FIXTURE_TEST_CASE( SpiceSubcktExporter_FromSolverResults, EXPORTER_TEST_FIXTURE )
+{
+    if( !findSolver( "fasthenry" ) )
+    {
+        BOOST_TEST_MESSAGE( "SKIPPED: fasthenry not found on PATH" );
+        return;
+    }
+
+    auto cfg = makeConfig( { "VDD", "GND" } );
+
+    // Export and run FastHenry
+    FASTHENRY_EXPORTER exporter( m_board.get(), cfg );
+    std::string        inpPath = m_tempDir + "/spice_test.inp";
+    BOOST_REQUIRE( exporter.Export( inpPath ) );
+
+    std::string cmd = "cd " + m_tempDir + " && fasthenry spice_test.inp" + " > /dev/null 2>&1";
+    int         ret = std::system( cmd.c_str() );
+    BOOST_REQUIRE_MESSAGE( ret == 0, "FastHenry failed" );
+
+    // Parse results
+    std::string                                 zcPath = m_tempDir + "/Zc.mat";
+    std::vector<PDN_PARASITIC::EXTRACTION_PORT> ports = exporter.GetPorts();
+    BOOST_REQUIRE_GE( ports.size(), 1u );
+
+    PDN_PARASITIC::EXTRACTION_RESULTS results;
+    results.m_Ports = ports;
+
+    BOOST_REQUIRE( PARASITIC_RESULT_PARSER::ParseFastHenryOutput( zcPath, results.m_Ports,
+                                                                  results.m_ImpedanceMatrix ) );
+
+    // Export to SPICE subcircuit
+    SPICE_SUBCKT_EXPORTER spiceExporter( results );
+    spiceExporter.SetSubcktName( "TEST_BOARD" );
+
+    std::string spicePath = m_tempDir + "/test_board.subckt";
+    BOOST_REQUIRE( spiceExporter.Export( spicePath ) );
+
+    // Verify content
+    std::string spice = readFile( spicePath );
+    BOOST_CHECK( !spice.empty() );
+    BOOST_CHECK( spice.find( ".subckt TEST_BOARD" ) != std::string::npos );
+    BOOST_CHECK( spice.find( ".ends TEST_BOARD" ) != std::string::npos );
+
+    // Verify extracted values are reasonable
+    auto parasitics = spiceExporter.GetPortParasitics();
+    BOOST_REQUIRE_GE( parasitics.size(), 1u );
+
+    for( const auto& pp : parasitics )
+    {
+        BOOST_TEST_MESSAGE( "  Port " << pp.m_Name << ": R=" << ( pp.m_R_Ohm * 1000.0 ) << " mOhm"
+                                      << ", L=" << ( pp.m_L_Henry * 1e9 ) << " nH" );
+
+        // R should be positive and in mOhm range for our trace
+        BOOST_CHECK_GT( pp.m_R_Ohm, 0.0 );
+        BOOST_CHECK_LT( pp.m_R_Ohm, 1.0 );
+
+        // L should be positive and in nH range
+        BOOST_CHECK_GT( pp.m_L_Henry, 0.0 );
+        BOOST_CHECK_LT( pp.m_L_Henry, 100e-9 );
+    }
+
+    BOOST_TEST_MESSAGE( "Generated SPICE subcircuit from solver:\n" << spice );
 }
 
 

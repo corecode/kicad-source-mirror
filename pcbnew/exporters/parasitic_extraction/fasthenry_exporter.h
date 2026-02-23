@@ -77,6 +77,9 @@ private:
     /// Convert KiCad internal units (nm) to millimeters
     static double iu2mm( int aIU ) { return aIU / 1e6; }
 
+    /// Pre-register node names for all traces and vias (populates m_nodeMap)
+    void registerNodes();
+
     /// Write the file header and units
     void writeHeader( std::ofstream& aFile );
 
@@ -91,6 +94,9 @@ private:
 
     /// Write vias as vertical segments
     void writeVias( std::ofstream& aFile );
+
+    /// Write node definitions for pads not already defined by traces/vias
+    void writePadNodes( std::ofstream& aFile );
 
     /// Write .equiv statements to connect co-located nodes
     void writeEquivNodes( std::ofstream& aFile );
@@ -119,6 +125,9 @@ private:
     /// Find pads that serve as ports (VRM connections, decap connections, IC power pins)
     void identifyPorts();
 
+    /// Connect power vias to ground planes at layer crossings to form return paths
+    void identifyReturnPaths();
+
     BOARD*                                  m_board;
     PDN_PARASITIC::EXTRACTION_CONFIG        m_config;
 
@@ -143,8 +152,22 @@ private:
     /// Map from (x_iu, y_iu, layer) to node name for de-duplication
     std::map<std::tuple<int, int, int>, std::string> m_nodeMap;
 
+    /// Set of node names that have had their coordinate definition emitted
+    std::set<std::string> m_definedNodes;
+
     /// Pairs of nodes that need .equiv (co-located nodes from different elements)
     std::vector<std::pair<std::string, std::string>> m_equivPairs;
+
+    /// Ground plane nodes for port references: { name, x_mm, y_mm, z_mm }
+    struct PLANE_PORT_NODE
+    {
+        std::string m_Name;
+        double      m_XMM;
+        double      m_YMM;
+        double      m_ZMM;
+    };
+
+    std::vector<PLANE_PORT_NODE> m_groundPlanePortNodes;
 
     /// Port definitions
     std::vector<PDN_PARASITIC::EXTRACTION_PORT> m_ports;

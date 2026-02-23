@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 
@@ -86,8 +87,16 @@ bool FASTHENRY_EXPORTER::Export( const std::string& aOutputPath )
     if( m_netCodes.empty() )
         return false;
 
+    // Pre-register node names for all traces and vias (populates m_nodeMap)
+    // so that identifyPorts() can find nearest conductor nodes.
+    registerNodes();
+
     // Identify port locations from pads
     identifyPorts();
+
+    // Create return paths: connect power vias to ground planes via .equiv
+    // at layer crossings to form complete current loops for FastHenry
+    identifyReturnPaths();
 
     std::ofstream file( aOutputPath );
 
@@ -101,6 +110,7 @@ bool FASTHENRY_EXPORTER::Export( const std::string& aOutputPath )
     writePlanes( file );
     writeTraces( file );
     writeVias( file );
+    writePadNodes( file );
     writeEquivNodes( file );
     writeExternals( file );
     writeFrequency( file );
@@ -241,10 +251,53 @@ std::string FASTHENRY_EXPORTER::makePlaneNodeName( const ZONE* aZone,
                                                     double aXMM, double aYMM )
 {
     std::ostringstream ss;
-    ss << "gp" << m_planeCounter << "_"
-       << static_cast<int>( aXMM * 1000 ) << "_"
+    ss << "ngp" << m_planeCounter << "_" << static_cast<int>( aXMM * 1000 ) << "_"
        << static_cast<int>( aYMM * 1000 );
     return ss.str();
+}
+
+
+void FASTHENRY_EXPORTER::registerNodes()
+{
+    // Pre-create node names for all trace endpoints and via positions.
+    // This populates m_nodeMap so identifyPorts() can find nearest conductor nodes.
+
+    for( const PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->Type() == PCB_VIA_T )
+            continue;
+
+        if( !isNetIncluded( track->GetNetCode() ) )
+            continue;
+
+        makeTrackNodeName( track, true );
+        makeTrackNodeName( track, false );
+    }
+
+    for( const PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->Type() != PCB_VIA_T )
+            continue;
+
+        const PCB_VIA* via = static_cast<const PCB_VIA*>( track );
+
+        if( !isNetIncluded( via->GetNetCode() ) )
+            continue;
+
+        PCB_LAYER_ID topLayer, botLayer;
+        via->LayerPair( &topLayer, &botLayer );
+
+        double zTop = getLayerZMM( topLayer );
+        double zBot = getLayerZMM( botLayer );
+        double zMin = std::min( zTop, zBot );
+        double zMax = std::max( zTop, zBot );
+
+        for( auto& [layerId, zPos] : m_layerZMM )
+        {
+            if( zPos >= zMin - 1e-6 && zPos <= zMax + 1e-6 )
+                makeViaNodeName( via, layerId );
+        }
+    }
 }
 
 
@@ -307,20 +360,19 @@ void FASTHENRY_EXPORTER::writePlanes( std::ofstream& aFile )
         // Determine the layer for z-position
         LSET layers = zone->GetLayerSet();
 
-        for( int layerId = F_Cu; layerId <= B_Cu; layerId++ )
+        for( PCB_LAYER_ID layerId : layers.CuStack() )
         {
-            if( !layers.test( layerId ) )
-                continue;
-
             double zMM = getLayerZMM( layerId );
             double thickMM = getCopperThicknessMM( layerId );
             double sigmaFH = COPPER_CONDUCTIVITY * SIGMA_SCALE_MM;
 
+            // FastHenry g element: point 2 must be the right-angle corner
+            // between edges (p2→p1) and (p2→p3)
             double x1 = iu2mm( bbox.GetX() );
             double y1 = iu2mm( bbox.GetY() );
             double x2 = x1 + widthMM;
             double y2 = y1;
-            double x3 = x1 + widthMM;
+            double x3 = x2;
             double y3 = y1 + heightMM;
 
             m_planeCounter++;
@@ -371,6 +423,20 @@ void FASTHENRY_EXPORTER::writePlanes( std::ofstream& aFile )
                 }
             }
 
+            // Add port reference nodes on this ground plane
+            // (identified during identifyPorts for .external definitions)
+            for( const auto& pn : m_groundPlanePortNodes )
+            {
+                double px = pn.m_XMM;
+                double py = pn.m_YMM;
+
+                if( px >= x1 && px <= x1 + widthMM && py >= y1 && py <= y1 + heightMM )
+                {
+                    aFile << "+ " << pn.m_Name << " (" << px << "," << py << "," << zMM << ")"
+                          << std::endl;
+                }
+            }
+
             aFile << std::endl;
         }
     }
@@ -411,9 +477,12 @@ void FASTHENRY_EXPORTER::writeTraces( std::ofstream& aFile )
         std::string nStart = makeTrackNodeName( track, true );
         std::string nEnd = makeTrackNodeName( track, false );
 
-        // Write node definitions
-        aFile << nStart << " x=" << x1 << " y=" << y1 << " z=" << zMM << std::endl;
-        aFile << nEnd << " x=" << x2 << " y=" << y2 << " z=" << zMM << std::endl;
+        // Write node definitions (only if not already defined)
+        if( m_definedNodes.insert( nStart ).second )
+            aFile << nStart << " x=" << x1 << " y=" << y1 << " z=" << zMM << std::endl;
+
+        if( m_definedNodes.insert( nEnd ).second )
+            aFile << nEnd << " x=" << x2 << " y=" << y2 << " z=" << zMM << std::endl;
 
         // Write segment
         m_segCounter++;
@@ -455,12 +524,18 @@ void FASTHENRY_EXPORTER::writeVias( std::ofstream& aFile )
         // (approximation: copper barrel thickness is small relative to drill)
         double viaSizeMM = drillMM;
 
-        // Get all copper layers this via connects
+        // Get all copper layers this via connects (between topLayer and botLayer
+        // by z-position, since PCB_LAYER_ID values don't follow physical order)
+        double zTop = getLayerZMM( topLayer );
+        double zBot = getLayerZMM( botLayer );
+        double zMin = std::min( zTop, zBot );
+        double zMax = std::max( zTop, zBot );
+
         std::vector<int> connectedLayers;
 
         for( auto& [layerId, zPos] : m_layerZMM )
         {
-            if( layerId >= topLayer && layerId <= botLayer )
+            if( zPos >= zMin - 1e-6 && zPos <= zMax + 1e-6 )
                 connectedLayers.push_back( layerId );
         }
 
@@ -481,7 +556,8 @@ void FASTHENRY_EXPORTER::writeVias( std::ofstream& aFile )
             double yMM = iu2mm( via->GetStart().y );
             double zMM = getLayerZMM( layerId );
 
-            aFile << nodeName << " x=" << xMM << " y=" << yMM << " z=" << zMM << std::endl;
+            if( m_definedNodes.insert( nodeName ).second )
+                aFile << nodeName << " x=" << xMM << " y=" << yMM << " z=" << zMM << std::endl;
 
             if( i > 0 )
             {
@@ -497,6 +573,52 @@ void FASTHENRY_EXPORTER::writeVias( std::ofstream& aFile )
         }
 
         aFile << std::endl;
+    }
+
+    aFile << std::endl;
+}
+
+
+void FASTHENRY_EXPORTER::writePadNodes( std::ofstream& aFile )
+{
+    // Emit node definitions for pad nodes that were registered during identifyPorts()
+    // but not yet defined by writeTraces() or writeVias().
+    // These nodes are referenced by .external and .equiv statements.
+
+    aFile << "* ====== Pad nodes ======" << std::endl;
+
+    for( const FOOTPRINT* fp : m_board->Footprints() )
+    {
+        for( const PAD* pad : fp->Pads() )
+        {
+            if( !isNetIncluded( pad->GetNetCode() ) )
+                continue;
+
+            VECTOR2I pos = pad->GetPosition();
+
+            for( PCB_LAYER_ID layerId : { F_Cu, B_Cu } )
+            {
+                if( !pad->IsOnLayer( layerId ) )
+                    continue;
+
+                auto key = std::make_tuple( pos.x, pos.y, static_cast<int>( layerId ) );
+                auto it = m_nodeMap.find( key );
+
+                if( it == m_nodeMap.end() )
+                    continue; // Node was never referenced
+
+                const std::string& nodeName = it->second;
+
+                if( m_definedNodes.insert( nodeName ).second )
+                {
+                    double xMM = iu2mm( pos.x );
+                    double yMM = iu2mm( pos.y );
+                    double zMM = getLayerZMM( layerId );
+
+                    aFile << nodeName << " x=" << xMM << " y=" << yMM << " z=" << zMM << std::endl;
+                }
+            }
+        }
     }
 
     aFile << std::endl;
@@ -550,7 +672,32 @@ void FASTHENRY_EXPORTER::identifyPorts()
         }
     }
 
-    int portIdx = 0;
+    // Find the ground plane zone (for port reference nodes on the plane)
+    const ZONE* groundZone = nullptr;
+    int         groundZoneLayer = -1;
+
+    for( const ZONE* zone : m_board->Zones() )
+    {
+        if( !zone->GetIsRuleArea() && groundNetCodes.count( zone->GetNetCode() ) )
+        {
+            groundZone = zone;
+            LSET layers = zone->GetLayerSet();
+
+            for( PCB_LAYER_ID id : layers.CuStack() )
+            {
+                groundZoneLayer = id;
+                break;
+            }
+
+            break;
+        }
+    }
+
+    // Track which (footprint, netCode) combinations already have a port,
+    // so that when m_GroupPadsByComponent is enabled, multiple pads on the
+    // same net and footprint get merged into a single port via .equiv.
+    // Key: (footprint pointer, net code) -> positive node name of the first port
+    std::map<std::pair<const FOOTPRINT*, int>, std::string> componentPortNodes;
 
     for( const FOOTPRINT* fp : m_board->Footprints() )
     {
@@ -578,15 +725,79 @@ void FASTHENRY_EXPORTER::identifyPorts()
             if( groundNetCodes.count( pad->GetNetCode() ) )
                 continue;  // Skip ground pads themselves
 
-            // Determine which layer this pad is on
+            // Find the nearest trace/via node on this net to use as the positive port node.
+            // Using the actual conductor node (rather than the pad node) ensures the port
+            // is connected to the conductor network that FastHenry solves.
             int layerId = pad->IsOnLayer( F_Cu ) ? F_Cu : B_Cu;
+            VECTOR2I padPos = pad->GetPosition();
 
-            std::string posNode = makePadNodeName( pad, layerId );
-            int gndLayer = groundPad->IsOnLayer( F_Cu ) ? F_Cu : B_Cu;
-            std::string negNode = makePadNodeName( groundPad, gndLayer );
+            std::string posNode;
+            double      bestDistSq = std::numeric_limits<double>::max();
+
+            for( const auto& [key, nodeName] : m_nodeMap )
+            {
+                auto [nx, ny, nl] = key;
+
+                if( nl != layerId )
+                    continue;
+
+                double dx = iu2mm( padPos.x - nx );
+                double dy = iu2mm( padPos.y - ny );
+                double distSq = dx * dx + dy * dy;
+
+                if( distSq < bestDistSq )
+                {
+                    bestDistSq = distSq;
+                    posNode = nodeName;
+                }
+            }
+
+            if( posNode.empty() )
+            {
+                // No conductor node found on this layer — use pad node as fallback
+                posNode = makePadNodeName( pad, layerId );
+            }
+
+            // When grouping by component, merge additional pads on the same
+            // footprint+net into the first port's node via .equiv
+            if( m_config.m_GroupPadsByComponent )
+            {
+                auto groupKey = std::make_pair( fp, pad->GetNetCode() );
+                auto it = componentPortNodes.find( groupKey );
+
+                if( it != componentPortNodes.end() )
+                {
+                    // This pad's node should be shorted to the first port's node
+                    if( posNode != it->second )
+                        m_equivPairs.push_back( { posNode, it->second } );
+
+                    continue; // Don't create a duplicate port
+                }
+
+                componentPortNodes[groupKey] = posNode;
+            }
+
+            // For the ground reference, prefer a named node on the ground plane.
+            // This ensures the node is part of the plane's conductor mesh.
+            std::string negNode;
+
+            if( groundZone && groundZoneLayer >= 0 )
+            {
+                double gndX = iu2mm( groundPad->GetPosition().x );
+                double gndY = iu2mm( groundPad->GetPosition().y );
+                negNode = makePlaneNodeName( groundZone, gndX, gndY );
+                m_groundPlanePortNodes.push_back(
+                        { negNode, gndX, gndY, getLayerZMM( groundZoneLayer ) } );
+            }
+            else
+            {
+                // Fallback: use the pad node directly
+                int gndLayer = groundPad->IsOnLayer( F_Cu ) ? F_Cu : B_Cu;
+                negNode = makePadNodeName( groundPad, gndLayer );
+            }
 
             PDN_PARASITIC::EXTRACTION_PORT port;
-            port.m_Name = "P" + std::to_string( ++portIdx );
+            port.m_Name = fp->GetReference().ToStdString() + "_" + pad->GetNetname().ToStdString();
             port.m_PositiveNode = posNode;
             port.m_NegativeNode = negNode;
             port.m_NetName = pad->GetNetname().ToStdString();
@@ -594,6 +805,118 @@ void FASTHENRY_EXPORTER::identifyPorts()
             port.m_YMM = iu2mm( pad->GetPosition().y );
 
             m_ports.push_back( port );
+        }
+    }
+}
+
+
+void FASTHENRY_EXPORTER::identifyReturnPaths()
+{
+    // For FastHenry to compute impedance, current must flow in a complete loop.
+    // Ports (.external) define one connection between the power conductor and the
+    // ground plane. We need return paths at other locations to close the loop.
+    //
+    // Strategy: for each via on a power (non-ground) net that passes through
+    // a ground plane layer, connect the via's node at that layer to the
+    // ground plane. This is analogous to the .equiv used in the FastHenry
+    // "together.inp" example.
+
+    // Collect ground net codes and ground plane info (same logic as identifyPorts)
+    std::set<int> groundNetCodes;
+
+    for( int netCode : m_netCodes )
+    {
+        NETINFO_ITEM* net = m_board->FindNet( netCode );
+
+        if( !net )
+            continue;
+
+        wxString name = net->GetNetname().Lower();
+
+        if( name.Contains( "gnd" ) || name.Contains( "ground" ) || name.Contains( "vss" ) )
+        {
+            groundNetCodes.insert( netCode );
+        }
+    }
+
+    // Find ground plane zones and their layers
+    struct GROUND_PLANE_INFO
+    {
+        const ZONE* zone;
+        int         layerId;
+        double      x1MM, y1MM, widthMM, heightMM;
+    };
+
+    std::vector<GROUND_PLANE_INFO> groundPlanes;
+
+    for( const ZONE* zone : m_board->Zones() )
+    {
+        if( zone->GetIsRuleArea() || !groundNetCodes.count( zone->GetNetCode() ) )
+            continue;
+
+        BOX2I  bbox = zone->GetBoundingBox();
+        double wMM = iu2mm( bbox.GetWidth() );
+        double hMM = iu2mm( bbox.GetHeight() );
+
+        if( wMM < 1.0 || hMM < 1.0 )
+            continue;
+
+        LSET layers = zone->GetLayerSet();
+
+        for( PCB_LAYER_ID id : layers.CuStack() )
+        {
+            groundPlanes.push_back(
+                    { zone, id, iu2mm( bbox.GetX() ), iu2mm( bbox.GetY() ), wMM, hMM } );
+        }
+    }
+
+    // For each via on a power net, check if it crosses a ground plane layer
+    for( const PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->Type() != PCB_VIA_T )
+            continue;
+
+        const PCB_VIA* via = static_cast<const PCB_VIA*>( track );
+
+        if( !isNetIncluded( via->GetNetCode() ) )
+            continue;
+
+        // Skip vias on ground nets — they're already part of the plane
+        if( groundNetCodes.count( via->GetNetCode() ) )
+            continue;
+
+        PCB_LAYER_ID topLayer, botLayer;
+        via->LayerPair( &topLayer, &botLayer );
+
+        double zTop = getLayerZMM( topLayer );
+        double zBot = getLayerZMM( botLayer );
+        double zMin = std::min( zTop, zBot );
+        double zMax = std::max( zTop, zBot );
+
+        double viaXMM = iu2mm( via->GetStart().x );
+        double viaYMM = iu2mm( via->GetStart().y );
+
+        for( const auto& gp : groundPlanes )
+        {
+            // Check if via passes through this ground plane layer (by z-position)
+            double gpZ = getLayerZMM( gp.layerId );
+
+            if( gpZ < zMin - 1e-6 || gpZ > zMax + 1e-6 )
+                continue;
+
+            // Check if via is within the ground plane bounding box
+            if( viaXMM < gp.x1MM || viaXMM > gp.x1MM + gp.widthMM || viaYMM < gp.y1MM
+                || viaYMM > gp.y1MM + gp.heightMM )
+                continue;
+
+            // Create a named node on the ground plane at the via's (x,y)
+            std::string planeNode = makePlaneNodeName( gp.zone, viaXMM, viaYMM );
+            m_groundPlanePortNodes.push_back(
+                    { planeNode, viaXMM, viaYMM, getLayerZMM( gp.layerId ) } );
+
+            // Connect the via's node at this layer to the plane node via .equiv
+            std::string viaNode = makeViaNodeName( via, gp.layerId );
+            m_equivPairs.push_back( { viaNode, planeNode } );
         }
     }
 }

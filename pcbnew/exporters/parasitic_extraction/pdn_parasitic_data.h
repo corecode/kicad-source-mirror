@@ -151,6 +151,9 @@ struct EXTRACTION_CONFIG
     int         m_PlaneSegX = 20;               ///< Plane mesh segments in X
     int         m_PlaneSegY = 20;               ///< Plane mesh segments in Y
 
+    /// Port generation
+    bool m_GroupPadsByComponent = true; ///< Merge multi-pad ports per footprint+net
+
     /// Output
     std::string m_OutputDir;                    ///< Working directory for intermediate files
 };

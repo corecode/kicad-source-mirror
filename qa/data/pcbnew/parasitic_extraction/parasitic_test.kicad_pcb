@@ -1,0 +1,88 @@
+(kicad_pcb (version 20230620) (generator pcbnew)
+
+  (general
+    (thickness 1.6)
+  )
+
+  (paper "A4")
+
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (32 "B.Adhes" user "B.Adhesive")
+    (33 "F.Adhes" user "F.Adhesive")
+    (34 "B.Paste" user)
+    (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user)
+    (39 "F.Mask" user)
+    (40 "Dwgs.User" user "User.Drawings")
+    (41 "Cmts.User" user "User.Comments")
+    (44 "Edge.Cuts" user)
+    (46 "B.CrtYd" user "B.Courtyard")
+    (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user)
+    (49 "F.Fab" user)
+  )
+
+  (setup
+    (stackup
+      (layer "F.SilkS" (type "Top Silk Screen"))
+      (layer "F.Paste" (type "Top Solder Paste"))
+      (layer "F.Mask" (type "Top Solder Mask") (thickness 0.01))
+      (layer "F.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 1" (type "prepreg") (thickness 0.2) (material "FR4") (epsilon_r 4.5) (loss_tangent 0.02))
+      (layer "In1.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 2" (type "core") (thickness 1.0) (material "FR4") (epsilon_r 4.5) (loss_tangent 0.02))
+      (layer "In2.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 3" (type "prepreg") (thickness 0.2) (material "FR4") (epsilon_r 4.5) (loss_tangent 0.02))
+      (layer "B.Cu" (type "copper") (thickness 0.035))
+      (layer "B.Mask" (type "Bottom Solder Mask") (thickness 0.01))
+      (layer "B.Paste" (type "Bottom Solder Paste"))
+      (layer "B.SilkS" (type "Bottom Silk Screen"))
+      (copper_finish "None")
+      (dielectric_constraints no)
+    )
+    (pad_to_mask_clearance 0)
+  )
+
+  (net 0 "")
+  (net 1 "VDD")
+  (net 2 "GND")
+
+  (footprint "Capacitor_SMD:C_0402_1005Metric" (layer "F.Cu")
+    (tstamp 11111111-1111-1111-1111-111111111111)
+    (at 30.0 15.0)
+    (descr "IC with VDD and GND pads")
+    (attr smd)
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu" "F.Mask")
+      (net 1 "VDD") (tstamp 22222222-2222-2222-2222-222222222222))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu" "F.Mask")
+      (net 2 "GND") (tstamp 33333333-3333-3333-3333-333333333333))
+  )
+
+  (segment (start 20.0 15.0) (end 29.5 15.0) (width 0.25) (layer "F.Cu") (net 1) (tstamp 44444444-4444-4444-4444-444444444444))
+
+  (via (at 20.0 15.0) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (tstamp 55555555-5555-5555-5555-555555555555))
+
+  (zone (net 2) (net_name "GND") (layer "In1.Cu") (tstamp 66666666-6666-6666-6666-666666666666) (hatch edge 0.5)
+    (connect_pads (clearance 0.5))
+    (min_thickness 0.25) (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))
+    (polygon
+      (pts
+        (xy 10.0 5.0)
+        (xy 50.0 5.0)
+        (xy 50.0 25.0)
+        (xy 10.0 25.0)
+      )
+    )
+  )
+
+  (gr_rect (start 5.0 0.0) (end 55.0 30.0)
+    (stroke (width 0.1) (type solid)) (fill none) (layer "Edge.Cuts") (tstamp 77777777-7777-7777-7777-777777777777))
+
+)

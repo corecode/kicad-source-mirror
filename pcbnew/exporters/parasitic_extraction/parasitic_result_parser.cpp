@@ -106,28 +106,44 @@ bool PARASITIC_RESULT_PARSER::ParseFastHenryOutput(
     int matRow = 0;
     int matSize = 0;
 
-    // Re-check if we captured the frequency from the line we broke on
+    // Helper: check a line for both frequency and size info.
+    // FastHenry may put "Impedance matrix for frequency = 1000 1 x 1" on one line.
+    auto parseFreqAndSize = [&]( const std::string& aLine )
     {
         std::smatch match;
 
-        if( std::regex_search( line, match, freqRegex ) )
+        if( std::regex_search( aLine, match, freqRegex ) )
         {
             currentFreq = std::stod( match[1].str() );
             inMatrix = false;
+            matRow = 0;
+
+            // Check for size on the same line (after the frequency part)
+            std::string remainder = match.suffix().str();
+            std::smatch sizeMatch;
+
+            if( std::regex_search( remainder, sizeMatch, sizeRegex ) )
+            {
+                matSize = std::stoi( sizeMatch[1].str() );
+                inMatrix = true;
+                matRow = 0;
+            }
+
+            return true;
         }
-    }
+
+        return false;
+    };
+
+    // Re-check if we captured the frequency from the line we broke on
+    parseFreqAndSize( line );
 
     while( std::getline( file, line ) )
     {
         std::smatch match;
 
-        if( std::regex_search( line, match, freqRegex ) )
-        {
-            currentFreq = std::stod( match[1].str() );
-            inMatrix = false;
-            matRow = 0;
+        if( parseFreqAndSize( line ) )
             continue;
-        }
 
         if( std::regex_search( line, match, sizeRegex ) )
         {
@@ -184,21 +200,37 @@ bool PARASITIC_RESULT_PARSER::ParseFastCapOutput(
 
     std::string line;
     bool inMatrix = false;
+    double      unitScale = 1000.0; // default: assume nanofarads → picofarads
 
     // Parse column headers and matrix rows
     // Format:
-    //   CAPACITANCE MATRIX, nanofarads
+    //   CAPACITANCE MATRIX, picofarads  (or nanofarads, microfarads, etc.)
     //                1         2         3
     //   name1  1   C11      C12       C13
     //   name2  2   C21      C22       C23
     //   name3  3   C31      C32       C33
 
     std::vector<std::string> conductorNames;
+    std::vector<std::vector<double>> matrixRows;
 
     while( std::getline( file, line ) )
     {
         if( line.find( "CAPACITANCE MATRIX" ) != std::string::npos )
         {
+            // Detect unit from header: "CAPACITANCE MATRIX, <unit>farads"
+            if( line.find( "picofarads" ) != std::string::npos )
+                unitScale = 1.0;
+            else if( line.find( "nanofarads" ) != std::string::npos )
+                unitScale = 1000.0;
+            else if( line.find( "microfarads" ) != std::string::npos )
+                unitScale = 1e6;
+            else if( line.find( "millifarads" ) != std::string::npos )
+                unitScale = 1e9;
+            else if( line.find( "femtofarads" ) != std::string::npos )
+                unitScale = 1e-3;
+            else if( line.find( "attofarads" ) != std::string::npos )
+                unitScale = 1e-6;
+
             inMatrix = true;
             // Skip the column header line
             std::getline( file, line );
@@ -230,27 +262,31 @@ bool PARASITIC_RESULT_PARSER::ParseFastCapOutput(
         while( iss >> val )
             rowValues.push_back( val );
 
-        // Store capacitance entries
-        int rowIdx = static_cast<int>( conductorNames.size() ) - 1;
+        matrixRows.push_back( rowValues );
+    }
 
-        for( size_t col = 0; col < rowValues.size(); col++ )
+    file.close();
+
+    // Build capacitance entries now that all conductor names are known
+    for( size_t row = 0; row < matrixRows.size(); row++ )
+    {
+        for( size_t col = 0; col < matrixRows[row].size(); col++ )
         {
             PDN_PARASITIC::CAPACITANCE_ENTRY entry;
-            entry.m_ConductorI = name;
+            entry.m_ConductorI = conductorNames[row];
 
             if( col < conductorNames.size() )
                 entry.m_ConductorJ = conductorNames[col];
             else
                 entry.m_ConductorJ = "C" + std::to_string( col + 1 );
 
-            // Convert nanofarads to picofarads
-            entry.m_CapacitancePF = rowValues[col] * 1000.0;
+            // Convert to picofarads using detected unit scale
+            entry.m_CapacitancePF = matrixRows[row][col] * unitScale;
 
             aCapacitances.push_back( entry );
         }
     }
 
-    file.close();
     return !aCapacitances.empty();
 }
 

@@ -248,6 +248,7 @@ set( PCBNEW_EXPORTERS
     exporters/parasitic_extraction/fasthenry_exporter.cpp
     exporters/parasitic_extraction/parasitic_extraction.cpp
     exporters/parasitic_extraction/parasitic_result_parser.cpp
+    exporters/parasitic_extraction/spice_subckt_exporter.cpp
     )
 
 set( PCBNEW_MICROWAVE_SRCS

@@ -161,11 +161,17 @@ bool PARASITIC_EXTRACTION::RunExtraction()
 bool PARASITIC_EXTRACTION::runFastHenry( const std::string& aInputPath,
                                           const std::string& aOutputDir )
 {
+    // Extract just the filename for use after cd into the output directory
+    std::string fileName = aInputPath;
+    size_t      slashPos = fileName.rfind( '/' );
+
+    if( slashPos != std::string::npos )
+        fileName = fileName.substr( slashPos + 1 );
+
     // Build command line: fasthenry <input.inp>
     // FastHenry writes Zc.mat to the current directory
     std::ostringstream cmd;
-    cmd << "cd " << aOutputDir << " && "
-        << m_config.m_FastHenryPath << " " << aInputPath
+    cmd << "cd " << aOutputDir << " && " << m_config.m_FastHenryPath << " " << fileName
         << " > fasthenry_log.txt 2>&1";
 
     int ret = std::system( cmd.str().c_str() );
@@ -176,14 +182,74 @@ bool PARASITIC_EXTRACTION::runFastHenry( const std::string& aInputPath,
 bool PARASITIC_EXTRACTION::runFastCap( const std::string& aListPath,
                                         const std::string& aOutputDir )
 {
+    // Extract just the filename for use after cd into the output directory
+    std::string lstFileName = aListPath;
+    size_t      slashPos = lstFileName.rfind( '/' );
+
+    if( slashPos != std::string::npos )
+        lstFileName = lstFileName.substr( slashPos + 1 );
+
     // Build command line: fastcap -l<list_file>
     // FastCap writes capacitance matrix to stdout, which we redirect
     std::ostringstream cmd;
-    cmd << "cd " << aOutputDir << " && "
-        << m_config.m_FastCapPath << " -l" << aListPath
+    cmd << "cd " << aOutputDir << " && " << m_config.m_FastCapPath << " -l" << lstFileName
         << " > fastcap_output.txt 2>&1";
 
     int ret = std::system( cmd.str().c_str() );
+
+    // Check if the run succeeded: exit code 0 AND output contains capacitance matrix.
+    // FastCap may exit 0 even on OOM failure, so we verify the output.
+    std::string fcOutPath = aOutputDir + "/fastcap_output.txt";
+
+    if( ret == 0 )
+    {
+        std::ifstream outFile( fcOutPath );
+        std::string   content( ( std::istreambuf_iterator<char>( outFile ) ),
+                               std::istreambuf_iterator<char>() );
+
+        if( content.find( "CAPACITANCE MATRIX" ) != std::string::npos )
+            return true;
+    }
+
+    // If FastCap failed (often OOM with dielectric panels on older FastCap builds),
+    // retry with conductor-only geometry by stripping dielectric (D) lines from the
+    // list file.
+    reportProgress( "FastCap failed with dielectrics, retrying conductor-only...", 72 );
+
+    std::string nodieFileName = lstFileName;
+    size_t      dotPos = nodieFileName.rfind( '.' );
+
+    if( dotPos != std::string::npos )
+        nodieFileName.insert( dotPos, "_nodie" );
+    else
+        nodieFileName += "_nodie";
+
+    std::string nodiePath = aOutputDir + "/" + nodieFileName;
+
+    {
+        std::string   fullLstPath = aOutputDir + "/" + lstFileName;
+        std::ifstream lstIn( fullLstPath );
+        std::ofstream lstOut( nodiePath );
+
+        if( !lstIn.is_open() || !lstOut.is_open() )
+            return false;
+
+        std::string line;
+
+        while( std::getline( lstIn, line ) )
+        {
+            if( !line.empty() && line[0] == 'D' )
+                continue;
+
+            lstOut << line << "\n";
+        }
+    }
+
+    std::ostringstream retryCmd;
+    retryCmd << "cd " << aOutputDir << " && " << m_config.m_FastCapPath << " -l" << nodieFileName
+             << " > fastcap_output.txt 2>&1";
+
+    ret = std::system( retryCmd.str().c_str() );
     return ret == 0;
 }
 
@@ -245,6 +311,13 @@ void PARASITIC_EXTRACTION::buildStackupResults()
 }
 
 
+void PARASITIC_EXTRACTION::reportProgress( const std::string& aMsg, int aPct )
+{
+    if( m_progress )
+        m_progress( aMsg, aPct );
+}
+
+
 bool PARASITIC_EXTRACTION::SerializeResults( const std::string& aJsonPath ) const
 {
     return m_results.SerializeToJson( aJsonPath );
@@ -272,119 +345,155 @@ bool PDN_PARASITIC::EXTRACTION_RESULTS::SerializeToJson( const std::string& aFil
 
     // Stackup
     file << std::fixed;
-    file << "  \"stackup\": [" << std::endl;
 
-    for( size_t i = 0; i < m_Stackup.size(); i++ )
+    if( m_Stackup.empty() )
     {
-        const auto& layer = m_Stackup[i];
-        file << "    {" << std::endl;
-        file << "      \"name\": \"" << layer.m_Name << "\"," << std::endl;
-        file << "      \"is_copper\": " << ( layer.m_IsCopperLayer ? "true" : "false" )
-             << "," << std::endl;
-        file << "      \"z_position_mm\": " << layer.m_ZPositionMM << "," << std::endl;
-        file << "      \"thickness_mm\": " << layer.m_ThicknessMM << "," << std::endl;
-
-        if( layer.m_IsCopperLayer )
-        {
-            file << "      \"conductivity_s_per_m\": " << std::scientific
-                 << layer.m_ConductivitySPerM << std::fixed << std::endl;
-        }
-        else
-        {
-            file << "      \"epsilon_r\": " << layer.m_EpsilonR << "," << std::endl;
-            file << "      \"loss_tangent\": " << layer.m_LossTangent << std::endl;
-        }
-
-        file << "    }" << ( i < m_Stackup.size() - 1 ? "," : "" ) << std::endl;
+        file << "  \"stackup\": []," << std::endl;
     }
+    else
+    {
+        file << "  \"stackup\": [" << std::endl;
 
-    file << "  ]," << std::endl;
+        for( size_t i = 0; i < m_Stackup.size(); i++ )
+        {
+            const auto& layer = m_Stackup[i];
+            file << "    {" << std::endl;
+            file << "      \"name\": \"" << layer.m_Name << "\"," << std::endl;
+            file << "      \"is_copper\": " << ( layer.m_IsCopperLayer ? "true" : "false" ) << ","
+                 << std::endl;
+            file << "      \"z_position_mm\": " << layer.m_ZPositionMM << "," << std::endl;
+            file << "      \"thickness_mm\": " << layer.m_ThicknessMM << "," << std::endl;
+
+            if( layer.m_IsCopperLayer )
+            {
+                file << "      \"conductivity_s_per_m\": " << std::scientific
+                     << layer.m_ConductivitySPerM << std::fixed << std::endl;
+            }
+            else
+            {
+                file << "      \"epsilon_r\": " << layer.m_EpsilonR << "," << std::endl;
+                file << "      \"loss_tangent\": " << layer.m_LossTangent << std::endl;
+            }
+
+            file << "    }" << ( i < m_Stackup.size() - 1 ? "," : "" ) << std::endl;
+        }
+
+        file << "  ]," << std::endl;
+    }
 
     // Ports
-    file << "  \"ports\": [" << std::endl;
-
-    for( size_t i = 0; i < m_Ports.size(); i++ )
+    if( m_Ports.empty() )
     {
-        const auto& port = m_Ports[i];
-        file << "    {" << std::endl;
-        file << "      \"name\": \"" << port.m_Name << "\"," << std::endl;
-        file << "      \"net\": \"" << port.m_NetName << "\"," << std::endl;
-        file << "      \"positive_node\": \"" << port.m_PositiveNode << "\"," << std::endl;
-        file << "      \"negative_node\": \"" << port.m_NegativeNode << "\"," << std::endl;
-        file << "      \"x_mm\": " << port.m_XMM << "," << std::endl;
-        file << "      \"y_mm\": " << port.m_YMM << std::endl;
-        file << "    }" << ( i < m_Ports.size() - 1 ? "," : "" ) << std::endl;
+        file << "  \"ports\": []," << std::endl;
     }
-
-    file << "  ]," << std::endl;
-
-    // Impedance matrix (from FastHenry)
-    file << "  \"impedance_matrix\": [" << std::endl;
-
-    for( size_t i = 0; i < m_ImpedanceMatrix.size(); i++ )
+    else
     {
-        const auto& entry = m_ImpedanceMatrix[i];
-        file << "    {" << std::endl;
-        file << "      \"port_i\": " << entry.m_PortI << "," << std::endl;
-        file << "      \"port_j\": " << entry.m_PortJ << "," << std::endl;
-        file << "      \"points\": [" << std::endl;
+        file << "  \"ports\": [" << std::endl;
 
-        for( size_t j = 0; j < entry.m_Points.size(); j++ )
+        for( size_t i = 0; i < m_Ports.size(); i++ )
         {
-            const auto& pt = entry.m_Points[j];
-            file << "        {" << std::endl;
-            file << "          \"frequency_hz\": " << std::scientific << pt.m_FrequencyHz
-                 << "," << std::endl;
-            file << "          \"z_real_ohm\": " << pt.m_Z.real() << "," << std::endl;
-            file << "          \"z_imag_ohm\": " << pt.m_Z.imag() << std::endl;
-            file << "        }" << ( j < entry.m_Points.size() - 1 ? "," : "" ) << std::endl;
+            const auto& port = m_Ports[i];
+            file << "    {" << std::endl;
+            file << "      \"name\": \"" << port.m_Name << "\"," << std::endl;
+            file << "      \"net\": \"" << port.m_NetName << "\"," << std::endl;
+            file << "      \"positive_node\": \"" << port.m_PositiveNode << "\"," << std::endl;
+            file << "      \"negative_node\": \"" << port.m_NegativeNode << "\"," << std::endl;
+            file << "      \"x_mm\": " << port.m_XMM << "," << std::endl;
+            file << "      \"y_mm\": " << port.m_YMM << std::endl;
+            file << "    }" << ( i < m_Ports.size() - 1 ? "," : "" ) << std::endl;
         }
 
-        file << std::fixed;
-        file << "      ]" << std::endl;
-        file << "    }" << ( i < m_ImpedanceMatrix.size() - 1 ? "," : "" ) << std::endl;
+        file << "  ]," << std::endl;
     }
 
-    file << "  ]," << std::endl;
+    // Impedance matrix (from FastHenry)
+    if( m_ImpedanceMatrix.empty() )
+    {
+        file << "  \"impedance_matrix\": []," << std::endl;
+    }
+    else
+    {
+        file << "  \"impedance_matrix\": [" << std::endl;
+
+        for( size_t i = 0; i < m_ImpedanceMatrix.size(); i++ )
+        {
+            const auto& entry = m_ImpedanceMatrix[i];
+            file << "    {" << std::endl;
+            file << "      \"port_i\": " << entry.m_PortI << "," << std::endl;
+            file << "      \"port_j\": " << entry.m_PortJ << "," << std::endl;
+            file << "      \"points\": [" << std::endl;
+
+            for( size_t j = 0; j < entry.m_Points.size(); j++ )
+            {
+                const auto& pt = entry.m_Points[j];
+                file << "        {" << std::endl;
+                file << "          \"frequency_hz\": " << std::scientific << pt.m_FrequencyHz << ","
+                     << std::endl;
+                file << "          \"z_real_ohm\": " << pt.m_Z.real() << "," << std::endl;
+                file << "          \"z_imag_ohm\": " << pt.m_Z.imag() << std::endl;
+                file << "        }" << ( j < entry.m_Points.size() - 1 ? "," : "" ) << std::endl;
+            }
+
+            file << std::fixed;
+            file << "      ]" << std::endl;
+            file << "    }" << ( i < m_ImpedanceMatrix.size() - 1 ? "," : "" ) << std::endl;
+        }
+
+        file << "  ]," << std::endl;
+    }
 
     // Capacitance matrix (from FastCap)
-    file << "  \"capacitance_matrix\": [" << std::endl;
-
-    for( size_t i = 0; i < m_CapacitanceMatrix.size(); i++ )
+    if( m_CapacitanceMatrix.empty() )
     {
-        const auto& entry = m_CapacitanceMatrix[i];
-        file << "    {" << std::endl;
-        file << "      \"conductor_i\": \"" << entry.m_ConductorI << "\"," << std::endl;
-        file << "      \"conductor_j\": \"" << entry.m_ConductorJ << "\"," << std::endl;
-        file << "      \"capacitance_pf\": " << entry.m_CapacitancePF << std::endl;
-        file << "    }" << ( i < m_CapacitanceMatrix.size() - 1 ? "," : "" ) << std::endl;
+        file << "  \"capacitance_matrix\": []," << std::endl;
     }
+    else
+    {
+        file << "  \"capacitance_matrix\": [" << std::endl;
 
-    file << "  ]," << std::endl;
+        for( size_t i = 0; i < m_CapacitanceMatrix.size(); i++ )
+        {
+            const auto& entry = m_CapacitanceMatrix[i];
+            file << "    {" << std::endl;
+            file << "      \"conductor_i\": \"" << entry.m_ConductorI << "\"," << std::endl;
+            file << "      \"conductor_j\": \"" << entry.m_ConductorJ << "\"," << std::endl;
+            file << "      \"capacitance_pf\": " << entry.m_CapacitancePF << std::endl;
+            file << "    }" << ( i < m_CapacitanceMatrix.size() - 1 ? "," : "" ) << std::endl;
+        }
+
+        file << "  ]," << std::endl;
+    }
 
     // Lumped net parasitics
-    file << "  \"net_parasitics\": [" << std::endl;
-
-    for( size_t i = 0; i < m_NetParasitics.size(); i++ )
+    if( m_NetParasitics.empty() )
     {
-        const auto& np = m_NetParasitics[i];
-        file << "    {" << std::endl;
-        file << "      \"net\": \"" << np.m_NetName << "\"," << std::endl;
-        file << "      \"segment_id\": \"" << np.m_SegmentId << "\"," << std::endl;
-        file << "      \"length_mm\": " << np.m_LengthMM << "," << std::endl;
-        file << "      \"r_mohm\": " << np.m_R_mOhm << "," << std::endl;
-        file << "      \"l_nh\": " << np.m_L_nH << "," << std::endl;
-        file << "      \"c_pf\": " << np.m_C_pF << "," << std::endl;
-        file << "      \"rlgc\": {" << std::endl;
-        file << "        \"r_ohm_per_m\": " << np.m_RLGC.m_R_OhmPerM << "," << std::endl;
-        file << "        \"l_nh_per_m\": " << np.m_RLGC.m_L_nHPerM << "," << std::endl;
-        file << "        \"g_s_per_m\": " << np.m_RLGC.m_G_SPerM << "," << std::endl;
-        file << "        \"c_pf_per_m\": " << np.m_RLGC.m_C_pFPerM << std::endl;
-        file << "      }" << std::endl;
-        file << "    }" << ( i < m_NetParasitics.size() - 1 ? "," : "" ) << std::endl;
+        file << "  \"net_parasitics\": []" << std::endl;
     }
+    else
+    {
+        file << "  \"net_parasitics\": [" << std::endl;
 
-    file << "  ]" << std::endl;
+        for( size_t i = 0; i < m_NetParasitics.size(); i++ )
+        {
+            const auto& np = m_NetParasitics[i];
+            file << "    {" << std::endl;
+            file << "      \"net\": \"" << np.m_NetName << "\"," << std::endl;
+            file << "      \"segment_id\": \"" << np.m_SegmentId << "\"," << std::endl;
+            file << "      \"length_mm\": " << np.m_LengthMM << "," << std::endl;
+            file << "      \"r_mohm\": " << np.m_R_mOhm << "," << std::endl;
+            file << "      \"l_nh\": " << np.m_L_nH << "," << std::endl;
+            file << "      \"c_pf\": " << np.m_C_pF << "," << std::endl;
+            file << "      \"rlgc\": {" << std::endl;
+            file << "        \"r_ohm_per_m\": " << np.m_RLGC.m_R_OhmPerM << "," << std::endl;
+            file << "        \"l_nh_per_m\": " << np.m_RLGC.m_L_nHPerM << "," << std::endl;
+            file << "        \"g_s_per_m\": " << np.m_RLGC.m_G_SPerM << "," << std::endl;
+            file << "        \"c_pf_per_m\": " << np.m_RLGC.m_C_pFPerM << std::endl;
+            file << "      }" << std::endl;
+            file << "    }" << ( i < m_NetParasitics.size() - 1 ? "," : "" ) << std::endl;
+        }
+
+        file << "  ]" << std::endl;
+    }
     file << "}" << std::endl;
 
     file.close();
