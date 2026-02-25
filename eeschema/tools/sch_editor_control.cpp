@@ -2596,28 +2596,28 @@ int SCH_EDITOR_CONTROL::GenerateSystemDiagram( const TOOL_EVENT& aEvent )
         return 0;
     }
 
-    // Run layout
+    // Run layout for each section independently
     int margin = schIUScale.MilsToIU( 500 );
     VECTOR2I origin( margin, margin );
 
     SYSTEM_DIAGRAM_LAYOUT layout;
-    BOX2I busBounds = layout.LayoutBusSection( analyzer.GetData(), origin );
+    layout.LayoutBusSection( analyzer.GetData(), origin );
+    layout.LayoutPowerSection( analyzer.GetData(), origin );
 
-    VECTOR2I powerOrigin = origin;
-    powerOrigin.y = busBounds.GetBottom() + schIUScale.MilsToIU( 600 );
-
-    layout.LayoutPowerSection( analyzer.GetData(), powerOrigin );
-
-    // Generate drawing items on a sub-sheet
+    // Generate drawing items on separate sub-sheets
     SYSTEM_DIAGRAM_GENERATOR generator( &m_frame->Schematic() );
-    SCH_SHEET* sheet = generator.Generate( analyzer.GetData() );
+    SYSTEM_DIAGRAM_SHEETS sheets = generator.Generate( analyzer.GetData() );
 
-    if( sheet )
+    // Navigate to the first generated sheet (prefer connections, fall back to power)
+    SCH_SHEET* targetSheet = sheets.m_connectionsSheet
+                                     ? sheets.m_connectionsSheet
+                                     : sheets.m_powerSheet;
+
+    if( targetSheet )
     {
-        // Navigate to the generated sheet by building a sheet path
         SCH_SHEET_PATH sheetPath;
         sheetPath.push_back( &m_frame->Schematic().Root() );
-        sheetPath.push_back( sheet );
+        sheetPath.push_back( targetSheet );
 
         m_frame->GetToolManager()->RunAction( SCH_ACTIONS::changeSheet, &sheetPath );
         m_frame->GetCanvas()->Refresh();

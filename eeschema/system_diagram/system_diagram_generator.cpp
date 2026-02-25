@@ -61,117 +61,171 @@ SYSTEM_DIAGRAM_GENERATOR::SYSTEM_DIAGRAM_GENERATOR( SCHEMATIC* aSchematic ) :
 }
 
 
-SCH_SHEET* SYSTEM_DIAGRAM_GENERATOR::Generate( SYSTEM_DIAGRAM_DATA& aData )
+SYSTEM_DIAGRAM_SHEETS SYSTEM_DIAGRAM_GENERATOR::Generate( SYSTEM_DIAGRAM_DATA& aData )
 {
-    SCH_SHEET* sheet = getOrCreateSheet();
+    SYSTEM_DIAGRAM_SHEETS result;
 
-    if( !sheet )
+    if( !aData.m_buses.empty() || !aData.m_signals.empty() )
+        result.m_connectionsSheet = generateConnectionsSheet( aData );
+
+    if( !aData.m_powerRoots.empty() )
+        result.m_powerSheet = generatePowerSheet( aData );
+
+    return result;
+}
+
+
+SCH_SHEET* SYSTEM_DIAGRAM_GENERATOR::generateConnectionsSheet( SYSTEM_DIAGRAM_DATA& aData )
+{
+    SCH_SHEET* sheet = getOrCreateSheet( wxT( "System Connections" ),
+                                         wxT( "system_connections.kicad_sch" ) );
+
+    if( !sheet || !sheet->GetScreen() )
         return nullptr;
 
     SCH_SCREEN* screen = sheet->GetScreen();
-
-    if( !screen )
-        return nullptr;
-
-    // Clear existing content
     clearSheet( screen );
 
     int margin = schIUScale.MilsToIU( MARGIN );
-    int sectionGap = schIUScale.MilsToIU( SECTION_GAP );
     int headerHeight = schIUScale.MilsToIU( SECTION_HEADER_SIZE + 100 );
 
-    VECTOR2I currentPos( margin, margin );
+    VECTOR2I pos( margin, margin );
 
-    // Draw warning label at top
-    drawWarningLabel( screen, currentPos );
-    currentPos.y += schIUScale.MilsToIU( 150 );
+    drawWarningLabel( screen, pos );
+    pos.y += schIUScale.MilsToIU( 150 );
 
-    // Draw bus section if there's content
-    if( !aData.m_buses.empty() || !aData.m_signals.empty() )
-    {
-        drawSectionHeader( screen, wxT( "BUS CONNECTIVITY" ), currentPos );
-        currentPos.y += headerHeight;
+    drawSectionHeader( screen, wxT( "SYSTEM CONNECTIONS" ), pos );
+    pos.y += headerHeight;
 
-        drawBusSection( screen, aData, currentPos );
+    drawBusSection( screen, aData );
 
-        // Calculate bus section height
-        int maxBusY = currentPos.y;
-
-        for( const auto& comp : aData.m_components )
-            maxBusY = std::max( maxBusY, comp->m_pos.y + comp->m_size.y );
-
-        currentPos.y = maxBusY + sectionGap;
-    }
-
-    // Draw power section if there's content
-    if( !aData.m_powerRoots.empty() )
-    {
-        drawSectionHeader( screen, wxT( "POWER TOPOLOGY" ), currentPos );
-        currentPos.y += headerHeight;
-
-        drawPowerSection( screen, aData, currentPos );
-    }
-
-    // Calculate total content size and set page
-    int maxX = margin;
-    int maxY = currentPos.y;
-
-    for( const auto& comp : aData.m_components )
-        maxX = std::max( maxX, comp->m_pos.x + comp->m_size.x );
-
-    std::function<void( const SD_POWER_NODE* )> findPowerExtent;
-    findPowerExtent = [&]( const SD_POWER_NODE* node )
-    {
-        maxX = std::max( maxX, node->m_pos.x + node->m_size.x );
-        maxY = std::max( maxY, node->m_pos.y + node->m_size.y );
-
-        for( const SD_POWER_NODE* child : node->m_children )
-            findPowerExtent( child );
-    };
-
-    for( const auto& root : aData.m_powerRoots )
-        findPowerExtent( root.get() );
-
-    setPageSize( screen, VECTOR2I( maxX + margin, maxY + margin ) );
+    VECTOR2I extent = calcBusExtent( aData );
+    setPageSize( screen, VECTOR2I( extent.x + margin, extent.y + margin ) );
 
     return sheet;
 }
 
 
-SCH_SHEET* SYSTEM_DIAGRAM_GENERATOR::getOrCreateSheet()
+SCH_SHEET* SYSTEM_DIAGRAM_GENERATOR::generatePowerSheet( SYSTEM_DIAGRAM_DATA& aData )
+{
+    SCH_SHEET* sheet = getOrCreateSheet( wxT( "Power Distribution" ),
+                                         wxT( "power_distribution.kicad_sch" ) );
+
+    if( !sheet || !sheet->GetScreen() )
+        return nullptr;
+
+    SCH_SCREEN* screen = sheet->GetScreen();
+    clearSheet( screen );
+
+    int margin = schIUScale.MilsToIU( MARGIN );
+    int headerHeight = schIUScale.MilsToIU( SECTION_HEADER_SIZE + 100 );
+
+    VECTOR2I pos( margin, margin );
+
+    drawWarningLabel( screen, pos );
+    pos.y += schIUScale.MilsToIU( 150 );
+
+    drawSectionHeader( screen, wxT( "POWER DISTRIBUTION" ), pos );
+    pos.y += headerHeight;
+
+    drawPowerSection( screen, aData );
+
+    VECTOR2I extent = calcPowerExtent( aData );
+    setPageSize( screen, VECTOR2I( extent.x + margin, extent.y + margin ) );
+
+    return sheet;
+}
+
+
+VECTOR2I SYSTEM_DIAGRAM_GENERATOR::calcBusExtent( const SYSTEM_DIAGRAM_DATA& aData )
+{
+    int margin = schIUScale.MilsToIU( MARGIN );
+    int maxX = margin;
+    int maxY = margin;
+
+    for( const auto& comp : aData.m_components )
+    {
+        maxX = std::max( maxX, comp->m_pos.x + comp->m_size.x );
+        maxY = std::max( maxY, comp->m_pos.y + comp->m_size.y );
+    }
+
+    return VECTOR2I( maxX, maxY );
+}
+
+
+VECTOR2I SYSTEM_DIAGRAM_GENERATOR::calcPowerExtent( const SYSTEM_DIAGRAM_DATA& aData )
+{
+    int margin = schIUScale.MilsToIU( MARGIN );
+    int maxX = margin;
+    int maxY = margin;
+
+    std::function<void( const SD_POWER_NODE* )> findExtent;
+    findExtent = [&]( const SD_POWER_NODE* node )
+    {
+        maxX = std::max( maxX, node->m_pos.x + node->m_size.x );
+        maxY = std::max( maxY, node->m_pos.y + node->m_size.y );
+
+        for( const SD_POWER_NODE* child : node->m_children )
+            findExtent( child );
+    };
+
+    for( const auto& root : aData.m_powerRoots )
+        findExtent( root.get() );
+
+    return VECTOR2I( maxX, maxY );
+}
+
+
+SCH_SHEET* SYSTEM_DIAGRAM_GENERATOR::getOrCreateSheet( const wxString& aName,
+                                                        const wxString& aFileName )
 {
     SCH_SHEET& rootSheet = m_schematic->Root();
     SCH_SCREEN* rootScreen = rootSheet.GetScreen();
 
-    // Look for existing "System Diagram" sheet
+    // Look for existing sheet with this name
     for( SCH_ITEM* item : rootScreen->Items().OfType( SCH_SHEET_T ) )
     {
         SCH_SHEET* existingSheet = static_cast<SCH_SHEET*>( item );
 
-        if( existingSheet->GetName() == wxT( "System Diagram" ) )
+        if( existingSheet->GetName() == aName )
             return existingSheet;
     }
 
-    // Create new sheet
+    // Count existing generated sheets to offset placement
+    int sheetCount = 0;
+
+    for( SCH_ITEM* item : rootScreen->Items().OfType( SCH_SHEET_T ) )
+    {
+        SCH_SHEET* s = static_cast<SCH_SHEET*>( item );
+
+        if( s->GetName() == wxT( "System Connections" )
+            || s->GetName() == wxT( "Power Distribution" ) )
+        {
+            sheetCount++;
+        }
+    }
+
+    // Create new sheet - place below any existing generated sheets
     int margin = schIUScale.MilsToIU( MARGIN );
+    int yOffset = sheetCount * schIUScale.MilsToIU( 700 );
 
     SCH_SHEET* newSheet = new SCH_SHEET( &rootSheet,
-                                         VECTOR2I( margin, margin ),
+                                         VECTOR2I( margin, margin + yOffset ),
                                          VECTOR2I( schIUScale.MilsToIU( 2000 ),
                                                    schIUScale.MilsToIU( 500 ) ) );
 
-    newSheet->SetName( wxT( "System Diagram" ) );
-    newSheet->SetFileName( wxT( "system_diagram.kicad_sch" ) );
+    newSheet->SetName( aName );
+    newSheet->SetFileName( aFileName );
 
     // Create a screen for the sheet
     SCH_SCREEN* newScreen = new SCH_SCREEN( m_schematic );
     newSheet->SetScreen( newScreen );
-    newScreen->SetFileName( wxT( "system_diagram.kicad_sch" ) );
+    newScreen->SetFileName( aFileName );
     newScreen->SetContentModified();
 
     // Set title block
     TITLE_BLOCK titleBlock;
-    titleBlock.SetTitle( wxT( "System Diagram" ) );
+    titleBlock.SetTitle( aName );
     titleBlock.SetComment( 0, wxT( "Auto-generated - edits will be overwritten" ) );
     newScreen->SetTitleBlock( titleBlock );
 
@@ -240,8 +294,7 @@ void SYSTEM_DIAGRAM_GENERATOR::setPageSize( SCH_SCREEN* aScreen, const VECTOR2I&
 
 
 void SYSTEM_DIAGRAM_GENERATOR::drawBusSection( SCH_SCREEN* aScreen,
-                                                const SYSTEM_DIAGRAM_DATA& aData,
-                                                VECTOR2I aOrigin )
+                                                const SYSTEM_DIAGRAM_DATA& aData )
 {
     // Draw component boxes
     for( const auto& comp : aData.m_components )
@@ -447,8 +500,7 @@ void SYSTEM_DIAGRAM_GENERATOR::drawSignalLine( SCH_SCREEN* aScreen, const SD_SIG
 
 
 void SYSTEM_DIAGRAM_GENERATOR::drawPowerSection( SCH_SCREEN* aScreen,
-                                                   const SYSTEM_DIAGRAM_DATA& aData,
-                                                   VECTOR2I aOrigin )
+                                                   const SYSTEM_DIAGRAM_DATA& aData )
 {
     for( const auto& root : aData.m_powerRoots )
     {
