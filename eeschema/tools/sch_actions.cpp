@@ -68,6 +68,13 @@ TOOL_ACTION SCH_ACTIONS::showBusSyntaxHelp( TOOL_ACTION_ARGS()
         .FriendlyName( _( "Show Bus Syntax Help" ) )
         .Icon( BITMAPS::bus_definition_tool ) );
 
+TOOL_ACTION SCH_ACTIONS::generateSystemDiagram( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorControl.generateSystemDiagram" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Generate System Diagram" ) )
+        .Tooltip( _( "Generate a high-level system diagram showing bus connectivity and power topology" ) )
+        .Icon( BITMAPS::hierarchy_nav ) );
+
 TOOL_ACTION SCH_ACTIONS::showSimulator( TOOL_ACTION_ARGS()
         .Name( "eeschema.EditorControl.showSimulator" )
         .Scope( AS_GLOBAL )

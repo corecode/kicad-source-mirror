@@ -80,6 +80,9 @@
 #include <wx/msgdlg.h>
 #include <io/kicad/kicad_io_utils.h>
 #include <printing/dialog_print.h>
+#include <system_diagram/system_diagram_analyzer.h>
+#include <system_diagram/system_diagram_layout.h>
+#include <system_diagram/system_diagram_generator.h>
 
 #ifdef KICAD_IPC_API
 #include <api/api_plugin_manager.h>
@@ -2573,6 +2576,59 @@ int SCH_EDITOR_CONTROL::DrawSheetOnClipboard( const TOOL_EVENT& aEvent )
 }
 
 
+int SCH_EDITOR_CONTROL::GenerateSystemDiagram( const TOOL_EVENT& aEvent )
+{
+    // Ensure connectivity is up to date
+    m_frame->RecalculateConnections( nullptr, GLOBAL_CLEANUP );
+
+    // Run analyzer
+    SYSTEM_DIAGRAM_ANALYZER analyzer( &m_frame->Schematic() );
+
+    if( !analyzer.Analyze() )
+    {
+        wxMessageBox( _( "No bus aliases, marked signals, or power topology found in the "
+                         "schematic.\n\nTo generate a system diagram:\n"
+                         "- Define bus aliases in Schematic Setup\n"
+                         "- Assign nets to a 'System_Diagram' net class\n"
+                         "- Use power pins (PT_POWER_IN/PT_POWER_OUT) on your symbols" ),
+                      _( "Generate System Diagram" ),
+                      wxOK | wxICON_INFORMATION, m_frame );
+        return 0;
+    }
+
+    // Run layout for each section independently
+    // Offset the layout origin to leave room for warning label + section header
+    int margin = schIUScale.MilsToIU( 500 );
+    int headerSpace = schIUScale.MilsToIU( 400 );  // warning + header + spacing
+    VECTOR2I origin( margin, margin + headerSpace );
+
+    SYSTEM_DIAGRAM_LAYOUT layout;
+    layout.LayoutBusSection( analyzer.GetData(), origin );
+    layout.LayoutPowerSection( analyzer.GetData(), origin );
+
+    // Generate drawing items on separate sub-sheets
+    SYSTEM_DIAGRAM_GENERATOR generator( &m_frame->Schematic() );
+    SYSTEM_DIAGRAM_SHEETS sheets = generator.Generate( analyzer.GetData() );
+
+    // Navigate to the first generated sheet (prefer connections, fall back to power)
+    SCH_SHEET* targetSheet = sheets.m_connectionsSheet
+                                     ? sheets.m_connectionsSheet
+                                     : sheets.m_powerSheet;
+
+    if( targetSheet )
+    {
+        SCH_SHEET_PATH sheetPath;
+        sheetPath.push_back( &m_frame->Schematic().Root() );
+        sheetPath.push_back( targetSheet );
+
+        m_frame->GetToolManager()->RunAction( SCH_ACTIONS::changeSheet, &sheetPath );
+        m_frame->GetCanvas()->Refresh();
+    }
+
+    return 0;
+}
+
+
 int SCH_EDITOR_CONTROL::ShowSearch( const TOOL_EVENT& aEvent )
 {
     getEditFrame<SCH_EDIT_FRAME>()->ToggleSearch();
@@ -2994,6 +3050,7 @@ void SCH_EDITOR_CONTROL::setTransitions()
     Go( &SCH_EDITOR_CONTROL::GenerateBOM,            SCH_ACTIONS::generateBOM.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::GenerateBOMLegacy,      SCH_ACTIONS::generateBOMLegacy.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::DrawSheetOnClipboard,   SCH_ACTIONS::drawSheetOnClipboard.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::GenerateSystemDiagram, SCH_ACTIONS::generateSystemDiagram.MakeEvent() );
 
     Go( &SCH_EDITOR_CONTROL::ShowSearch,             SCH_ACTIONS::showSearch.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ShowHierarchy,          SCH_ACTIONS::showHierarchy.MakeEvent() );

@@ -280,6 +280,9 @@ void SCH_EDIT_FRAME::doReCreateMenuBar()
     inspectMenu->Add( SCH_ACTIONS::diffSymbol );
 
     inspectMenu->AppendSeparator();
+    inspectMenu->Add( SCH_ACTIONS::generateSystemDiagram );
+
+    inspectMenu->AppendSeparator();
     inspectMenu->Add( SCH_ACTIONS::showSimulator );
 
 
