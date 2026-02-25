@@ -127,6 +127,8 @@ public:
     int GenerateBOMLegacy( const TOOL_EVENT& aEvent );
     int DrawSheetOnClipboard( const TOOL_EVENT& aEvent );
 
+    int GenerateSystemDiagram( const TOOL_EVENT& aEvent );
+
     int ShowSearch( const TOOL_EVENT& aEvent );
     int ShowHierarchy( const TOOL_EVENT& aEvent );
     int ShowNetNavigator( const TOOL_EVENT& aEvent );

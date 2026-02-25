@@ -36,6 +36,7 @@ include_directories(
     ./dialogs
     ./libview
     ./symbol_editor
+    ./system_diagram
     ./tools
     ./widgets
     )
@@ -434,6 +435,10 @@ set( EESCHEMA_SRCS
     toolbars_symbol_viewer.cpp
 
     api/api_sch_utils.cpp
+
+    system_diagram/system_diagram_analyzer.cpp
+    system_diagram/system_diagram_layout.cpp
+    system_diagram/system_diagram_generator.cpp
 
     netlist_exporters/netlist_exporter_allegro.cpp
     netlist_exporters/netlist_exporter_base.cpp
