@@ -608,6 +608,30 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerNode( SCH_SCREEN* aScreen, const SD_POWE
         currentY += lineSpacing;
     }
 
+    // Current annotations (aggregated from I.* fields on loads)
+    if( !aNode.m_currentByMode.empty() )
+    {
+        int count = 0;
+
+        for( const auto& [mode, amps] : aNode.m_currentByMode )
+        {
+            if( count >= 3 )
+                break;
+
+            wxString currentStr = mode + wxT( ": " )
+                                  + SYSTEM_DIAGRAM_ANALYZER::formatCurrent( amps );
+
+            SCH_TEXT* currentText = new SCH_TEXT(
+                    VECTOR2I( centerX, currentY ), currentStr, LAYER_NOTES );
+            currentText->SetTextSize( VECTOR2I( labelSize, labelSize ) );
+            currentText->SetHorizJustify( GR_TEXT_H_ALIGN_CENTER );
+            currentText->SetTextColor( COLOR4D( 0.6, 0.0, 0.0, 1.0 ) );  // Dark red
+            aScreen->Append( currentText );
+            currentY += lineSpacing;
+            count++;
+        }
+    }
+
     // Load list
     if( !aNode.m_loadRefs.empty() )
     {

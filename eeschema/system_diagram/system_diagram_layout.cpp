@@ -81,6 +81,21 @@ VECTOR2I SYSTEM_DIAGRAM_LAYOUT::computePowerNodeSize( const SD_POWER_NODE& aNode
         lines++;
     }
 
+    // Add current mode lines (at most 3)
+    if( !aNode.m_currentByMode.empty() )
+    {
+        int modeCount = std::min( (int) aNode.m_currentByMode.size(), 3 );
+        lines += modeCount;
+
+        for( const auto& [mode, amps] : aNode.m_currentByMode )
+        {
+            // Estimate width: "typ: 150.0mA" is roughly 12-15 chars
+            wxString currentStr = mode + wxT( ": " ) + wxT( "000.0mA" );
+            int      currentWidth = currentStr.Length() * charWidth;
+            line2Width = std::max( line2Width, currentWidth );
+        }
+    }
+
     // Add load refs
     if( !aNode.m_loadRefs.empty() )
     {

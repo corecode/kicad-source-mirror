@@ -16,7 +16,13 @@ the question *"what talks to what, and how is it powered?"* at a glance.
 - **Power topology diagram**: A tree showing how power flows from sources through regulators
   to rails and on to loads. Detected automatically from `PT_POWER_IN` / `PT_POWER_OUT` pin
   types — no user annotation needed. Voltages shown where available from power symbol values.
-  No current accounting, no utilization, no ERC checks.
+  Currents shown when annotated via `I.*` custom fields on load symbols.
+- **Current annotations**: Components can declare their current draw using custom fields
+  following the `I.*` dot-namespace convention (matching `Sim.*`). Supported formats:
+  - `I.<mode>` (e.g. `I.typ = 150mA`) — total current for single-rail components
+  - `I.<pin>.<mode>` (e.g. `I.VDD.typ = 100mA`) — per-pin current for multi-rail components
+  Values support SI suffixes: A, mA, uA/µA, nA, pA, kA. Currents are aggregated per rail
+  and displayed on the power distribution diagram in dark red.
 - **Auto layout**: A layered (Sugiyama-style) graph layout algorithm places the boxes and
   routes the connections automatically.
 - **Output**: A dedicated sub-sheet in the schematic hierarchy, rendered with native
@@ -25,11 +31,9 @@ the question *"what talks to what, and how is it powered?"* at a glance.
 
 **Deferred (not in this plan):**
 
-- Current accounting and power budgets
 - ERC checks for power (overloaded rails, missing annotations)
 - JSON export / cross-tool data model for PDN analyzer integration
 - Pin-level detail on the diagram (pin names, pin numbers)
-- Custom fields on symbols (`Power_Type`, `Max_Current`, `Current_Draw`, etc.)
 - Settings UI dialog
 - Net class auto-detection of buses (inferring interfaces without explicit aliases)
 - Board-level (pcbnew) integration

@@ -27,6 +27,9 @@
 #include <wx/string.h>
 #include <math/vector2d.h>
 
+/// Field name prefix for current annotations (follows Sim.* dot-namespace convention)
+#define SD_CURRENT_FIELD_PREFIX wxT( "I." )
+
 class SCHEMATIC;
 
 
@@ -72,6 +75,9 @@ struct SD_POWER_NODE
 
     std::vector<SD_POWER_NODE*>  m_children;
     std::vector<wxString>        m_loadRefs;  ///< References of ICs on this rail
+
+    /// Aggregated load current per mode (in amps). Key is mode name (e.g. "typ", "max").
+    std::map<wxString, double>   m_currentByMode;
 };
 
 
@@ -126,6 +132,17 @@ private:
     /// Extract a numeric voltage from a power net name (e.g. "+3V3" -> 3.3)
     static double parseVoltage( const wxString& aNetName );
 
+    /// Phase 5: Collect I.* field annotations and aggregate currents per power node
+    void collectCurrentAnnotations();
+
+public:
+    /// Parse a current value string with SI suffix (e.g. "150mA") to amps
+    static double parseCurrent( const wxString& aValue );
+
+    /// Format a current value in amps to a human-readable string (e.g. 0.15 -> "150.0mA")
+    static wxString formatCurrent( double aAmps );
+
+private:
     SCHEMATIC*           m_schematic;
     SYSTEM_DIAGRAM_DATA  m_data;
 

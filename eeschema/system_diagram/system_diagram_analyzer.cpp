@@ -21,7 +21,9 @@
 
 #include <schematic.h>
 #include <sch_symbol.h>
+#include <sch_field.h>
 #include <sch_pin.h>
+#include <wx/tokenzr.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
 #include <sch_sheet_path.h>
@@ -58,6 +60,7 @@ bool SYSTEM_DIAGRAM_ANALYZER::Analyze()
     buildBusGraph();
     findMarkedSignals();
     buildPowerTree();
+    collectCurrentAnnotations();
 
     // Remove components that don't participate in any bus, signal, or power relationship
     // (they may have been discovered optimistically)
@@ -537,4 +540,257 @@ double SYSTEM_DIAGRAM_ANALYZER::parseVoltage( const wxString& aNetName )
     }
 
     return 0.0;
+}
+
+
+double SYSTEM_DIAGRAM_ANALYZER::parseCurrent( const wxString& aValue )
+{
+    wxString trimmed = aValue.Strip( wxString::both );
+
+    if( trimmed.IsEmpty() )
+        return 0.0;
+
+    // Extract numeric part
+    wxString numStr;
+    size_t   i = 0;
+
+    // Skip leading sign (we only care about magnitude)
+    if( i < trimmed.Length() && ( trimmed[i] == '+' || trimmed[i] == '-' ) )
+        i++;
+
+    // Collect digits and decimal point
+    bool hasDecimal = false;
+
+    while( i < trimmed.Length() )
+    {
+        wxChar ch = trimmed[i];
+
+        if( ch >= '0' && ch <= '9' )
+        {
+            numStr += ch;
+        }
+        else if( ch == '.' && !hasDecimal )
+        {
+            numStr += ch;
+            hasDecimal = true;
+        }
+        else
+        {
+            break;
+        }
+
+        i++;
+    }
+
+    if( numStr.IsEmpty() )
+        return 0.0;
+
+    double value = 0.0;
+
+    if( !numStr.ToDouble( &value ) )
+        return 0.0;
+
+    // Extract unit suffix
+    wxString suffix = trimmed.Mid( i ).Strip( wxString::both );
+
+    // Match suffix to multiplier
+    double multiplier = 1.0;  // Default: amps
+
+    if( suffix.IsEmpty() || suffix.IsSameAs( wxT( "A" ), false ) )
+        multiplier = 1.0;
+    else if( suffix.IsSameAs( wxT( "mA" ), false ) )
+        multiplier = 1e-3;
+    else if( suffix.IsSameAs( wxT( "uA" ), false )
+             || suffix.StartsWith( wxS( "\u00B5" ) )      // µA (micro sign)
+             || suffix.StartsWith( wxS( "\u03BC" ) ) )     // μA (Greek mu)
+        multiplier = 1e-6;
+    else if( suffix.IsSameAs( wxT( "nA" ), false ) )
+        multiplier = 1e-9;
+    else if( suffix.IsSameAs( wxT( "pA" ), false ) )
+        multiplier = 1e-12;
+    else if( suffix.IsSameAs( wxT( "kA" ), false ) )
+        multiplier = 1e3;
+    else
+        return 0.0;  // Unrecognized unit suffix
+
+    return value * multiplier;
+}
+
+
+wxString SYSTEM_DIAGRAM_ANALYZER::formatCurrent( double aAmps )
+{
+    if( aAmps <= 0.0 )
+        return wxEmptyString;
+
+    if( aAmps >= 1.0 )
+        return wxString::Format( wxT( "%.2fA" ), aAmps );
+    else if( aAmps >= 1e-3 )
+        return wxString::Format( wxT( "%.1fmA" ), aAmps * 1e3 );
+    else if( aAmps >= 1e-6 )
+        return wxString::Format( wxT( "%.1fuA" ), aAmps * 1e6 );
+    else if( aAmps >= 1e-9 )
+        return wxString::Format( wxT( "%.1fnA" ), aAmps * 1e9 );
+    else
+        return wxString::Format( wxT( "%.2fpA" ), aAmps * 1e12 );
+}
+
+
+void SYSTEM_DIAGRAM_ANALYZER::collectCurrentAnnotations()
+{
+    if( m_data.m_powerRoots.empty() )
+        return;
+
+    SCH_SHEET_LIST sheets = m_schematic->BuildUnorderedSheetList();
+
+    // Parsed current field data
+    struct CurrentField
+    {
+        std::vector<wxString> parts;  // Name parts after "I." prefix
+        double                amps;   // Parsed current value
+    };
+
+    // Map: component ref -> list of current fields found on that symbol
+    std::map<wxString, std::vector<CurrentField>> refToCurrentFields;
+
+    // Map: (component ref, pin name) -> net name for power-in pins
+    std::map<std::pair<wxString, wxString>, wxString> refPinToNet;
+
+    size_t prefixLen = wxString( SD_CURRENT_FIELD_PREFIX ).Length();
+
+    // Scan all symbols for I.* fields and build pin-to-net mapping
+    for( const SCH_SHEET_PATH& sheetPath : sheets )
+    {
+        SCH_SCREEN* screen = sheetPath.LastScreen();
+
+        if( !screen )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+            wxString    ref = symbol->GetRef( &sheetPath, false );
+
+            // Only process U? components (matching load detection in buildPowerTree)
+            if( !ref.StartsWith( wxT( "U" ) ) )
+                continue;
+
+            // Skip if already processed (same symbol in hierarchy)
+            if( refToCurrentFields.count( ref ) )
+                continue;
+
+            // Collect I.* fields
+            const std::vector<SCH_FIELD>& fields = symbol->GetFields();
+
+            for( const SCH_FIELD& field : fields )
+            {
+                wxString name = field.GetName();
+
+                if( !name.StartsWith( SD_CURRENT_FIELD_PREFIX ) )
+                    continue;
+
+                wxString suffix = name.Mid( prefixLen );
+
+                if( suffix.IsEmpty() )
+                    continue;
+
+                double amps = parseCurrent( field.GetText() );
+
+                if( amps <= 0.0 )
+                    continue;
+
+                CurrentField cf;
+                cf.amps = amps;
+
+                // Split suffix on '.' to get parts
+                wxStringTokenizer tokenizer( suffix, wxT( "." ) );
+
+                while( tokenizer.HasMoreTokens() )
+                    cf.parts.push_back( tokenizer.GetNextToken() );
+
+                if( !cf.parts.empty() )
+                    refToCurrentFields[ref].push_back( cf );
+            }
+
+            // Build pin-to-net mapping for power input pins
+            for( SCH_PIN* pin : symbol->GetPins( &sheetPath ) )
+            {
+                if( pin->GetType() != ELECTRICAL_PINTYPE::PT_POWER_IN )
+                    continue;
+
+                wxString netName;
+
+                SCH_CONNECTION* conn = pin->Connection( &sheetPath );
+
+                if( conn )
+                    netName = conn->GetNetName();
+                else
+                    netName = pin->GetDefaultNetName( sheetPath );
+
+                if( !netName.IsEmpty() )
+                    refPinToNet[{ ref, pin->GetName() }] = netName;
+            }
+        }
+    }
+
+    if( refToCurrentFields.empty() )
+        return;
+
+    // Count how many power nodes each ref appears on as a load.
+    // 2-part fields (I.<mode>) are only attributed when a component is on exactly one rail.
+    std::map<wxString, int> refLoadCount;
+
+    std::function<void( SD_POWER_NODE* )> countLoads;
+    countLoads = [&]( SD_POWER_NODE* node )
+    {
+        for( const wxString& loadRef : node->m_loadRefs )
+            refLoadCount[loadRef]++;
+
+        for( SD_POWER_NODE* child : node->m_children )
+            countLoads( child );
+    };
+
+    for( SD_POWER_NODE* root : m_data.m_powerRoots )
+        countLoads( root );
+
+    // Aggregate currents onto each power node from its loads
+    std::function<void( SD_POWER_NODE* )> aggregateCurrents;
+    aggregateCurrents = [&]( SD_POWER_NODE* node )
+    {
+        for( const wxString& loadRef : node->m_loadRefs )
+        {
+            auto fieldIt = refToCurrentFields.find( loadRef );
+
+            if( fieldIt == refToCurrentFields.end() )
+                continue;
+
+            for( const CurrentField& cf : fieldIt->second )
+            {
+                if( cf.parts.size() == 1 )
+                {
+                    // 2-part field: I.<mode>
+                    // Only use if this component appears as a load on exactly one rail
+                    if( refLoadCount[loadRef] == 1 )
+                        node->m_currentByMode[cf.parts[0]] += cf.amps;
+                }
+                else if( cf.parts.size() == 2 )
+                {
+                    // 3-part field: I.<pin>.<mode>
+                    // Match pin name to this node's output net
+                    wxString pinName = cf.parts[0];
+                    wxString mode = cf.parts[1];
+
+                    auto netIt = refPinToNet.find( { loadRef, pinName } );
+
+                    if( netIt != refPinToNet.end() && netIt->second == node->m_netName )
+                        node->m_currentByMode[mode] += cf.amps;
+                }
+            }
+        }
+
+        for( SD_POWER_NODE* child : node->m_children )
+            aggregateCurrents( child );
+    };
+
+    for( SD_POWER_NODE* root : m_data.m_powerRoots )
+        aggregateCurrents( root );
 }
