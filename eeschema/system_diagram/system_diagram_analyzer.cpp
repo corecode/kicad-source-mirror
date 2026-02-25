@@ -90,7 +90,7 @@ bool SYSTEM_DIAGRAM_ANALYZER::Analyze()
     };
 
     for( const auto& root : m_data.m_powerRoots )
-        collectPowerRefs( root.get() );
+        collectPowerRefs( root );
 
     // Prune non-participating components
     m_data.m_components.erase(
@@ -468,10 +468,14 @@ void SYSTEM_DIAGRAM_ANALYZER::buildPowerTree()
             childNodes.insert( child );
     }
 
+    // Transfer ALL nodes to the data container for ownership, then record roots
     for( auto& [key, node] : allNodes )
     {
-        if( childNodes.find( node.get() ) == childNodes.end() )
-            m_data.m_powerRoots.push_back( std::move( node ) );
+        SD_POWER_NODE* ptr = node.get();
+        m_data.m_allPowerNodes.push_back( std::move( node ) );
+
+        if( childNodes.find( ptr ) == childNodes.end() )
+            m_data.m_powerRoots.push_back( ptr );
     }
 }
 

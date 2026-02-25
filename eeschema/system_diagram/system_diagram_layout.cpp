@@ -399,7 +399,7 @@ BOX2I SYSTEM_DIAGRAM_LAYOUT::LayoutPowerSection( SYSTEM_DIAGRAM_DATA& aData, VEC
 
     for( const auto& root : aData.m_powerRoots )
     {
-        int subtreeHeight = layoutSubtree( root.get(), aOrigin.x, currentY );
+        int subtreeHeight = layoutSubtree( root, aOrigin.x, currentY );
         currentY += subtreeHeight + ySpacing;
 
         // Find max X extent in the tree
@@ -412,7 +412,7 @@ BOX2I SYSTEM_DIAGRAM_LAYOUT::LayoutPowerSection( SYSTEM_DIAGRAM_DATA& aData, VEC
                 findMaxX( child );
         };
 
-        findMaxX( root.get() );
+        findMaxX( root );
     }
 
     bounds.SetEnd( VECTOR2I( maxX, currentY ) );

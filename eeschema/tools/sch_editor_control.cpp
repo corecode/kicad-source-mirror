@@ -2597,8 +2597,10 @@ int SCH_EDITOR_CONTROL::GenerateSystemDiagram( const TOOL_EVENT& aEvent )
     }
 
     // Run layout for each section independently
+    // Offset the layout origin to leave room for warning label + section header
     int margin = schIUScale.MilsToIU( 500 );
-    VECTOR2I origin( margin, margin );
+    int headerSpace = schIUScale.MilsToIU( 400 );  // warning + header + spacing
+    VECTOR2I origin( margin, margin + headerSpace );
 
     SYSTEM_DIAGRAM_LAYOUT layout;
     layout.LayoutBusSection( analyzer.GetData(), origin );

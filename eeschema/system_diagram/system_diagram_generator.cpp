@@ -170,7 +170,7 @@ VECTOR2I SYSTEM_DIAGRAM_GENERATOR::calcPowerExtent( const SYSTEM_DIAGRAM_DATA& a
     };
 
     for( const auto& root : aData.m_powerRoots )
-        findExtent( root.get() );
+        findExtent( root );
 
     return VECTOR2I( maxX, maxY );
 }
@@ -517,7 +517,7 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerSection( SCH_SCREEN* aScreen,
             }
         };
 
-        drawTree( root.get() );
+        drawTree( root );
     }
 }
 

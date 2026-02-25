@@ -81,7 +81,8 @@ struct SYSTEM_DIAGRAM_DATA
     std::vector<std::unique_ptr<SD_COMPONENT>>   m_components;
     std::vector<std::unique_ptr<SD_BUS>>         m_buses;
     std::vector<std::unique_ptr<SD_SIGNAL>>      m_signals;
-    std::vector<std::unique_ptr<SD_POWER_NODE>>  m_powerRoots;  ///< Forest of power trees
+    std::vector<std::unique_ptr<SD_POWER_NODE>>  m_allPowerNodes;  ///< Owns all power nodes
+    std::vector<SD_POWER_NODE*>                  m_powerRoots;     ///< Root nodes (non-owning)
 
     /// Lookup helper
     SD_COMPONENT* FindComponent( const wxString& aRef );
