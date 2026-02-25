@@ -16,11 +16,17 @@ the question *"what talks to what, and how is it powered?"* at a glance.
 - **Power topology diagram**: A tree showing how power flows from sources through regulators
   to rails and on to loads. Detected automatically from `PT_POWER_IN` / `PT_POWER_OUT` pin
   types — no user annotation needed. Voltages shown where available from power symbol values.
-  Currents shown when annotated via `I.*` custom fields on load symbols.
+  Currents shown when annotated via `Pwr.I.*` custom fields on load symbols.
 - **Current annotations**: Components can declare their current draw using custom fields
-  following the `I.*` dot-namespace convention (matching `Sim.*`). Supported formats:
-  - `I.<mode>` (e.g. `I.typ = 150mA`) — total current for single-rail components
-  - `I.<pin>.<mode>` (e.g. `I.VDD.typ = 100mA`) — per-pin current for multi-rail components
+  following the `Pwr.*` dot-namespace convention (matching `Sim.*`). The `Pwr.` namespace
+  is designed for future extension (noise, efficiency, ripple, regulation tolerance, etc.).
+  Current draw fields use the `Pwr.I.` prefix. Supported formats:
+  - `Pwr.I.<mode>` (e.g. `Pwr.I.typ = 150mA`) — total current for single-rail components
+  - `Pwr.I.<pin>.<mode>` (e.g. `Pwr.I.VDD.typ = 100mA`) — per-pin current for multi-rail components
+  - `Pwr.I.<pin>` (e.g. `Pwr.I.VDD = 80mA`) — per-pin current with implicit "typ" mode
+  When a single-part suffix is ambiguous (could be a mode or a pin name), the analyzer
+  checks against the symbol's known power-input pin names. If it matches a pin, it is
+  treated as pin-specific with implicit "typ" mode; otherwise it is treated as a mode name.
   Values support SI suffixes: A, mA, uA/µA, nA, pA, kA. Currents are aggregated per rail
   and displayed on the power distribution diagram in dark red.
 - **Auto layout**: A layered (Sugiyama-style) graph layout algorithm places the boxes and

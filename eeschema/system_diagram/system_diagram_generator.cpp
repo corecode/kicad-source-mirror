@@ -608,7 +608,7 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerNode( SCH_SCREEN* aScreen, const SD_POWE
         currentY += lineSpacing;
     }
 
-    // Current annotations (aggregated from I.* fields on loads)
+    // Current annotations (aggregated from Pwr.I.* fields on loads)
     if( !aNode.m_currentByMode.empty() )
     {
         int count = 0;

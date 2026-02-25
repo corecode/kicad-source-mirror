@@ -27,8 +27,13 @@
 #include <wx/string.h>
 #include <math/vector2d.h>
 
-/// Field name prefix for current annotations (follows Sim.* dot-namespace convention)
-#define SD_CURRENT_FIELD_PREFIX wxT( "I." )
+/// Field name prefix for power annotations (follows Sim.* dot-namespace convention).
+/// Current draw fields use "Pwr.I." prefix, e.g.:
+///   Pwr.I.typ = 150mA           (single-rail: mode only)
+///   Pwr.I.VDD.typ = 100mA       (multi-rail: pin.mode)
+///   Pwr.I.VDD = 80mA            (multi-rail: pin only, implicit "typ" mode)
+#define SD_POWER_FIELD_PREFIX   wxT( "Pwr." )
+#define SD_CURRENT_FIELD_PREFIX wxT( "Pwr.I." )
 
 class SCHEMATIC;
 
@@ -132,7 +137,7 @@ private:
     /// Extract a numeric voltage from a power net name (e.g. "+3V3" -> 3.3)
     static double parseVoltage( const wxString& aNetName );
 
-    /// Phase 5: Collect I.* field annotations and aggregate currents per power node
+    /// Phase 5: Collect Pwr.I.* field annotations and aggregate currents per power node
     void collectCurrentAnnotations();
 
 public:

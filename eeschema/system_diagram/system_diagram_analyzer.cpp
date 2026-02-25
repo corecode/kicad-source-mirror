@@ -645,7 +645,7 @@ void SYSTEM_DIAGRAM_ANALYZER::collectCurrentAnnotations()
     // Parsed current field data
     struct CurrentField
     {
-        std::vector<wxString> parts;  // Name parts after "I." prefix
+        std::vector<wxString> parts;  // Name parts after "Pwr.I." prefix
         double                amps;   // Parsed current value
     };
 
@@ -655,9 +655,12 @@ void SYSTEM_DIAGRAM_ANALYZER::collectCurrentAnnotations()
     // Map: (component ref, pin name) -> net name for power-in pins
     std::map<std::pair<wxString, wxString>, wxString> refPinToNet;
 
+    // Set of known power-in pin names per component (for disambiguation)
+    std::map<wxString, std::set<wxString>> refToPowerPinNames;
+
     size_t prefixLen = wxString( SD_CURRENT_FIELD_PREFIX ).Length();
 
-    // Scan all symbols for I.* fields and build pin-to-net mapping
+    // Scan all symbols for Pwr.I.* fields and build pin-to-net mapping
     for( const SCH_SHEET_PATH& sheetPath : sheets )
     {
         SCH_SCREEN* screen = sheetPath.LastScreen();
@@ -678,7 +681,32 @@ void SYSTEM_DIAGRAM_ANALYZER::collectCurrentAnnotations()
             if( refToCurrentFields.count( ref ) )
                 continue;
 
-            // Collect I.* fields
+            // Build pin-to-net mapping for power input pins first, so we can use it
+            // for disambiguation when parsing fields below.
+            for( SCH_PIN* pin : symbol->GetPins( &sheetPath ) )
+            {
+                if( pin->GetType() != ELECTRICAL_PINTYPE::PT_POWER_IN )
+                    continue;
+
+                wxString netName;
+
+                SCH_CONNECTION* conn = pin->Connection( &sheetPath );
+
+                if( conn )
+                    netName = conn->GetNetName();
+                else
+                    netName = pin->GetDefaultNetName( sheetPath );
+
+                if( !netName.IsEmpty() )
+                {
+                    wxString pinName = pin->GetName();
+                    refPinToNet[{ ref, pinName }] = netName;
+                    refToPowerPinNames[ref].insert( pinName );
+                }
+            }
+
+            // Collect Pwr.I.* fields
+            const std::set<wxString>& pinNames = refToPowerPinNames[ref];
             const std::vector<SCH_FIELD>& fields = symbol->GetFields();
 
             for( const SCH_FIELD& field : fields )
@@ -698,36 +726,69 @@ void SYSTEM_DIAGRAM_ANALYZER::collectCurrentAnnotations()
                 if( amps <= 0.0 )
                     continue;
 
-                CurrentField cf;
-                cf.amps = amps;
-
                 // Split suffix on '.' to get parts
+                std::vector<wxString> rawParts;
                 wxStringTokenizer tokenizer( suffix, wxT( "." ) );
 
                 while( tokenizer.HasMoreTokens() )
-                    cf.parts.push_back( tokenizer.GetNextToken() );
+                    rawParts.push_back( tokenizer.GetNextToken() );
 
-                if( !cf.parts.empty() )
-                    refToCurrentFields[ref].push_back( cf );
-            }
-
-            // Build pin-to-net mapping for power input pins
-            for( SCH_PIN* pin : symbol->GetPins( &sheetPath ) )
-            {
-                if( pin->GetType() != ELECTRICAL_PINTYPE::PT_POWER_IN )
+                if( rawParts.empty() )
                     continue;
 
-                wxString netName;
+                CurrentField cf;
+                cf.amps = amps;
 
-                SCH_CONNECTION* conn = pin->Connection( &sheetPath );
+                if( rawParts.size() == 1 )
+                {
+                    // Single-part suffix: could be a mode (e.g. "typ") or a pin name
+                    // (e.g. "VDD"). Disambiguate by checking against known pin names.
+                    // Case-insensitive comparison for robustness.
+                    bool isPin = false;
 
-                if( conn )
-                    netName = conn->GetNetName();
+                    for( const wxString& pin : pinNames )
+                    {
+                        if( pin.IsSameAs( rawParts[0], false ) )
+                        {
+                            // It's a pin name -> treat as Pwr.I.<pin> with implicit "typ"
+                            cf.parts.push_back( pin );  // Use canonical pin name
+                            cf.parts.push_back( wxT( "typ" ) );
+                            isPin = true;
+                            break;
+                        }
+                    }
+
+                    if( !isPin )
+                    {
+                        // Not a pin name -> treat as Pwr.I.<mode> (single-rail shorthand)
+                        cf.parts.push_back( rawParts[0] );
+                    }
+                }
+                else if( rawParts.size() == 2 )
+                {
+                    // Two-part suffix: Pwr.I.<pin>.<mode>
+                    // Normalize pin name to canonical casing if possible
+                    wxString pinPart = rawParts[0];
+
+                    for( const wxString& pin : pinNames )
+                    {
+                        if( pin.IsSameAs( pinPart, false ) )
+                        {
+                            pinPart = pin;
+                            break;
+                        }
+                    }
+
+                    cf.parts.push_back( pinPart );
+                    cf.parts.push_back( rawParts[1] );
+                }
                 else
-                    netName = pin->GetDefaultNetName( sheetPath );
+                {
+                    // More than 2 parts: ignore (malformed)
+                    continue;
+                }
 
-                if( !netName.IsEmpty() )
-                    refPinToNet[{ ref, pin->GetName() }] = netName;
+                refToCurrentFields[ref].push_back( cf );
             }
         }
     }
@@ -736,7 +797,8 @@ void SYSTEM_DIAGRAM_ANALYZER::collectCurrentAnnotations()
         return;
 
     // Count how many power nodes each ref appears on as a load.
-    // 2-part fields (I.<mode>) are only attributed when a component is on exactly one rail.
+    // Single-part fields (Pwr.I.<mode>) are only attributed when a component
+    // is on exactly one rail.
     std::map<wxString, int> refLoadCount;
 
     std::function<void( SD_POWER_NODE* )> countLoads;
@@ -767,14 +829,14 @@ void SYSTEM_DIAGRAM_ANALYZER::collectCurrentAnnotations()
             {
                 if( cf.parts.size() == 1 )
                 {
-                    // 2-part field: I.<mode>
+                    // Mode-only field: Pwr.I.<mode>
                     // Only use if this component appears as a load on exactly one rail
                     if( refLoadCount[loadRef] == 1 )
                         node->m_currentByMode[cf.parts[0]] += cf.amps;
                 }
                 else if( cf.parts.size() == 2 )
                 {
-                    // 3-part field: I.<pin>.<mode>
+                    // Pin+mode field: Pwr.I.<pin>.<mode> (or disambiguated from Pwr.I.<pin>)
                     // Match pin name to this node's output net
                     wxString pinName = cf.parts[0];
                     wxString mode = cf.parts[1];
