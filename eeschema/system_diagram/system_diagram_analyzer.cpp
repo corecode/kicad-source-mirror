@@ -21,7 +21,9 @@
 
 #include <schematic.h>
 #include <sch_symbol.h>
+#include <sch_field.h>
 #include <sch_pin.h>
+#include <wx/tokenzr.h>
 #include <sch_screen.h>
 #include <sch_sheet.h>
 #include <sch_sheet_path.h>
@@ -58,6 +60,9 @@ bool SYSTEM_DIAGRAM_ANALYZER::Analyze()
     buildBusGraph();
     findMarkedSignals();
     buildPowerTree();
+    collectPowerAnnotations();
+    collectCurrentAnnotations();
+    bubbleUpCurrents();
 
     // Remove components that don't participate in any bus, signal, or power relationship
     // (they may have been discovered optimistically)
@@ -291,6 +296,12 @@ void SYSTEM_DIAGRAM_ANALYZER::buildPowerTree()
     // Map: output net name -> power node that drives it
     std::map<wxString, SD_POWER_NODE*> netToDriver;
 
+    // Map: (ref, pinName) -> netName for power-in pins
+    std::map<std::pair<wxString, wxString>, wxString> refPinToNet;
+
+    // Map: ref -> Pwr.InputPin value (if specified)
+    std::map<wxString, wxString> refToInputPin;
+
     // Scan all symbols for power pins
     for( const SCH_SHEET_PATH& sheetPath : sheets )
     {
@@ -332,6 +343,24 @@ void SYSTEM_DIAGRAM_ANALYZER::buildPowerTree()
                 else if( pinType == ELECTRICAL_PINTYPE::PT_POWER_IN )
                 {
                     powerInPins.push_back( { ref, value, netName, pinType, isConn } );
+                    refPinToNet[{ ref, pin->GetName() }] = netName;
+                }
+            }
+
+            // Read Pwr.InputPin field if present
+            if( !refToInputPin.count( ref ) )
+            {
+                for( const SCH_FIELD& field : symbol->GetFields() )
+                {
+                    if( field.GetName() == SD_INPUT_PIN_FIELD )
+                    {
+                        wxString pinName = field.GetText().Strip( wxString::both );
+
+                        if( !pinName.IsEmpty() )
+                            refToInputPin[ref] = pinName;
+
+                        break;
+                    }
                 }
             }
         }
@@ -401,7 +430,8 @@ void SYSTEM_DIAGRAM_ANALYZER::buildPowerTree()
         }
     }
 
-    // Build tree edges: for each regulator, find its input net's driver
+    // Build tree edges: for each regulator, find its input net's driver.
+    // Use Pwr.InputPin to identify the main power input when multiple exist.
     for( auto& [key, node] : allNodes )
     {
         if( node->m_type != SD_POWER_NODE::REGULATOR )
@@ -412,19 +442,89 @@ void SYSTEM_DIAGRAM_ANALYZER::buildPowerTree()
         if( inIt == refToPowerInNets.end() )
             continue;
 
-        for( const wxString& inNet : inIt->second )
-        {
-            // Skip if this is the same as the output net
-            if( inNet == node->m_netName )
-                continue;
+        // Determine preferred input net from Pwr.InputPin
+        wxString preferredInputNet;
+        auto inputPinIt = refToInputPin.find( node->m_reference );
 
-            auto driverIt = netToDriver.find( inNet );
+        if( inputPinIt != refToInputPin.end() )
+        {
+            // Find the net connected to the specified pin (case-insensitive match)
+            for( const auto& [rp, net] : refPinToNet )
+            {
+                if( rp.first == node->m_reference
+                    && rp.second.IsSameAs( inputPinIt->second, false ) )
+                {
+                    if( net != node->m_netName )
+                        preferredInputNet = net;
+
+                    break;
+                }
+            }
+        }
+
+        wxString mainInputNet;
+
+        // Try preferred net first
+        if( !preferredInputNet.IsEmpty() )
+        {
+            auto driverIt = netToDriver.find( preferredInputNet );
 
             if( driverIt != netToDriver.end() )
             {
                 driverIt->second->m_children.push_back( node.get() );
-                break;  // Only connect to first found parent
+                mainInputNet = preferredInputNet;
             }
+        }
+
+        // Fallback: try all power-in nets
+        if( mainInputNet.IsEmpty() )
+        {
+            for( const wxString& inNet : inIt->second )
+            {
+                if( inNet == node->m_netName )
+                    continue;
+
+                auto driverIt = netToDriver.find( inNet );
+
+                if( driverIt != netToDriver.end() )
+                {
+                    driverIt->second->m_children.push_back( node.get() );
+                    mainInputNet = inNet;
+                    break;
+                }
+            }
+        }
+
+        // Store input net info on the node
+        if( !mainInputNet.IsEmpty() )
+        {
+            node->m_inputNetName = mainInputNet;
+            node->m_inputVoltage = parseVoltage( mainInputNet );
+        }
+
+        // Record bias connections (power-in nets that aren't main input or output)
+        for( const wxString& inNet : inIt->second )
+        {
+            if( inNet == node->m_netName || inNet == mainInputNet )
+                continue;
+
+            // Reverse-lookup pin name for this net
+            wxString pinName;
+
+            for( const auto& [rp, net] : refPinToNet )
+            {
+                if( rp.first == node->m_reference && net == inNet )
+                {
+                    pinName = rp.second;
+                    break;
+                }
+            }
+
+            SD_POWER_NODE::BIAS_CONNECTION bias;
+            bias.m_pinName = pinName;
+            bias.m_netName = inNet;
+            bias.m_voltage = parseVoltage( inNet );
+            node->m_biasConnections.push_back( bias );
         }
     }
 
@@ -537,4 +637,508 @@ double SYSTEM_DIAGRAM_ANALYZER::parseVoltage( const wxString& aNetName )
     }
 
     return 0.0;
+}
+
+
+double SYSTEM_DIAGRAM_ANALYZER::parseEfficiency( const wxString& aValue )
+{
+    wxString trimmed = aValue.Strip( wxString::both );
+
+    if( trimmed.IsEmpty() )
+        return 0.0;
+
+    bool isPercent = trimmed.EndsWith( wxT( "%" ) );
+
+    if( isPercent )
+        trimmed = trimmed.Left( trimmed.Length() - 1 ).Strip( wxString::both );
+
+    double val = 0.0;
+
+    if( !trimmed.ToDouble( &val ) )
+        return 0.0;
+
+    // Treat values > 1 as percentages (e.g. "87" -> 0.87)
+    if( isPercent || val > 1.0 )
+        val /= 100.0;
+
+    if( val <= 0.0 || val > 1.0 )
+        return 0.0;
+
+    return val;
+}
+
+
+void SYSTEM_DIAGRAM_ANALYZER::collectPowerAnnotations()
+{
+    if( m_data.m_powerRoots.empty() )
+        return;
+
+    // Build map: ref -> regulator power nodes
+    std::map<wxString, std::vector<SD_POWER_NODE*>> refToNodes;
+
+    std::function<void( SD_POWER_NODE* )> buildMap;
+    buildMap = [&]( SD_POWER_NODE* node )
+    {
+        if( !node->m_reference.IsEmpty() && node->m_type == SD_POWER_NODE::REGULATOR )
+            refToNodes[node->m_reference].push_back( node );
+
+        for( SD_POWER_NODE* child : node->m_children )
+            buildMap( child );
+    };
+
+    for( SD_POWER_NODE* root : m_data.m_powerRoots )
+        buildMap( root );
+
+    if( refToNodes.empty() )
+        return;
+
+    SCH_SHEET_LIST sheets = m_schematic->BuildUnorderedSheetList();
+    std::set<wxString> processed;
+
+    size_t effPrefixLen = wxString( SD_EFFICIENCY_FIELD_PREFIX ).Length();
+
+    for( const SCH_SHEET_PATH& sheetPath : sheets )
+    {
+        SCH_SCREEN* screen = sheetPath.LastScreen();
+
+        if( !screen )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+            wxString    ref = symbol->GetRef( &sheetPath, false );
+
+            auto nodeIt = refToNodes.find( ref );
+
+            if( nodeIt == refToNodes.end() )
+                continue;
+
+            if( processed.count( ref ) )
+                continue;
+
+            processed.insert( ref );
+
+            wxString typeStr;
+            std::map<wxString, double> effMap;
+
+            for( const SCH_FIELD& field : symbol->GetFields() )
+            {
+                wxString name = field.GetName();
+
+                if( name == SD_TYPE_FIELD )
+                {
+                    typeStr = field.GetText().Strip( wxString::both );
+                }
+                else if( name.StartsWith( SD_EFFICIENCY_FIELD_PREFIX ) )
+                {
+                    wxString mode = name.Mid( effPrefixLen );
+
+                    if( mode.IsEmpty() )
+                        continue;
+
+                    double eff = parseEfficiency( field.GetText() );
+
+                    if( eff > 0.0 )
+                        effMap[mode] = eff;
+                }
+            }
+
+            // Determine converter type
+            SD_POWER_NODE::CONVERTER_TYPE convType = SD_POWER_NODE::CONV_UNKNOWN;
+
+            if( typeStr.IsSameAs( wxT( "LDO" ), false ) )
+                convType = SD_POWER_NODE::CONV_LDO;
+            else if( typeStr.IsSameAs( wxT( "SMPS" ), false ) )
+                convType = SD_POWER_NODE::CONV_SMPS;
+            else if( typeStr.IsSameAs( wxT( "SWITCH" ), false ) )
+                convType = SD_POWER_NODE::CONV_SWITCH;
+
+            // Apply to all power nodes for this component
+            for( SD_POWER_NODE* node : nodeIt->second )
+            {
+                if( convType != SD_POWER_NODE::CONV_UNKNOWN )
+                    node->m_converterType = convType;
+                else
+                    node->m_converterType = SD_POWER_NODE::CONV_LDO;  // Default for regulators
+
+                node->m_efficiencyByMode = effMap;
+            }
+        }
+    }
+}
+
+
+double SYSTEM_DIAGRAM_ANALYZER::parseCurrent( const wxString& aValue )
+{
+    wxString trimmed = aValue.Strip( wxString::both );
+
+    if( trimmed.IsEmpty() )
+        return 0.0;
+
+    // Extract numeric part
+    wxString numStr;
+    size_t   i = 0;
+
+    // Skip leading sign (we only care about magnitude)
+    if( i < trimmed.Length() && ( trimmed[i] == '+' || trimmed[i] == '-' ) )
+        i++;
+
+    // Collect digits and decimal point
+    bool hasDecimal = false;
+
+    while( i < trimmed.Length() )
+    {
+        wxChar ch = trimmed[i];
+
+        if( ch >= '0' && ch <= '9' )
+        {
+            numStr += ch;
+        }
+        else if( ch == '.' && !hasDecimal )
+        {
+            numStr += ch;
+            hasDecimal = true;
+        }
+        else
+        {
+            break;
+        }
+
+        i++;
+    }
+
+    if( numStr.IsEmpty() )
+        return 0.0;
+
+    double value = 0.0;
+
+    if( !numStr.ToDouble( &value ) )
+        return 0.0;
+
+    // Extract unit suffix
+    wxString suffix = trimmed.Mid( i ).Strip( wxString::both );
+
+    // Match suffix to multiplier
+    double multiplier = 1.0;  // Default: amps
+
+    if( suffix.IsEmpty() || suffix.IsSameAs( wxT( "A" ), false ) )
+        multiplier = 1.0;
+    else if( suffix.IsSameAs( wxT( "mA" ), false ) )
+        multiplier = 1e-3;
+    else if( suffix.IsSameAs( wxT( "uA" ), false )
+             || suffix.StartsWith( wxS( "\u00B5" ) )      // µA (micro sign)
+             || suffix.StartsWith( wxS( "\u03BC" ) ) )     // μA (Greek mu)
+        multiplier = 1e-6;
+    else if( suffix.IsSameAs( wxT( "nA" ), false ) )
+        multiplier = 1e-9;
+    else if( suffix.IsSameAs( wxT( "pA" ), false ) )
+        multiplier = 1e-12;
+    else if( suffix.IsSameAs( wxT( "kA" ), false ) )
+        multiplier = 1e3;
+    else
+        return 0.0;  // Unrecognized unit suffix
+
+    return value * multiplier;
+}
+
+
+wxString SYSTEM_DIAGRAM_ANALYZER::formatCurrent( double aAmps )
+{
+    if( aAmps <= 0.0 )
+        return wxEmptyString;
+
+    if( aAmps >= 1.0 )
+        return wxString::Format( wxT( "%.2fA" ), aAmps );
+    else if( aAmps >= 1e-3 )
+        return wxString::Format( wxT( "%.1fmA" ), aAmps * 1e3 );
+    else if( aAmps >= 1e-6 )
+        return wxString::Format( wxT( "%.1fuA" ), aAmps * 1e6 );
+    else if( aAmps >= 1e-9 )
+        return wxString::Format( wxT( "%.1fnA" ), aAmps * 1e9 );
+    else
+        return wxString::Format( wxT( "%.2fpA" ), aAmps * 1e12 );
+}
+
+
+void SYSTEM_DIAGRAM_ANALYZER::collectCurrentAnnotations()
+{
+    if( m_data.m_powerRoots.empty() )
+        return;
+
+    SCH_SHEET_LIST sheets = m_schematic->BuildUnorderedSheetList();
+
+    // Parsed current field data
+    struct CurrentField
+    {
+        std::vector<wxString> parts;  // Name parts after "Pwr.I." prefix
+        double                amps;   // Parsed current value
+    };
+
+    // Map: component ref -> list of current fields found on that symbol
+    std::map<wxString, std::vector<CurrentField>> refToCurrentFields;
+
+    // Map: (component ref, pin name) -> net name for power-in pins
+    std::map<std::pair<wxString, wxString>, wxString> refPinToNet;
+
+    // Set of known power-in pin names per component (for disambiguation)
+    std::map<wxString, std::set<wxString>> refToPowerPinNames;
+
+    size_t prefixLen = wxString( SD_CURRENT_FIELD_PREFIX ).Length();
+
+    // Scan all symbols for Pwr.I.* fields and build pin-to-net mapping
+    for( const SCH_SHEET_PATH& sheetPath : sheets )
+    {
+        SCH_SCREEN* screen = sheetPath.LastScreen();
+
+        if( !screen )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+            wxString    ref = symbol->GetRef( &sheetPath, false );
+
+            // Only process U? components (matching load detection in buildPowerTree)
+            if( !ref.StartsWith( wxT( "U" ) ) )
+                continue;
+
+            // Skip if already processed (same symbol in hierarchy)
+            if( refToCurrentFields.count( ref ) )
+                continue;
+
+            // Build pin-to-net mapping for power input pins first, so we can use it
+            // for disambiguation when parsing fields below.
+            for( SCH_PIN* pin : symbol->GetPins( &sheetPath ) )
+            {
+                if( pin->GetType() != ELECTRICAL_PINTYPE::PT_POWER_IN )
+                    continue;
+
+                wxString netName;
+
+                SCH_CONNECTION* conn = pin->Connection( &sheetPath );
+
+                if( conn )
+                    netName = conn->GetNetName();
+                else
+                    netName = pin->GetDefaultNetName( sheetPath );
+
+                if( !netName.IsEmpty() )
+                {
+                    wxString pinName = pin->GetName();
+                    refPinToNet[{ ref, pinName }] = netName;
+                    refToPowerPinNames[ref].insert( pinName );
+                }
+            }
+
+            // Collect Pwr.I.* fields
+            const std::set<wxString>& pinNames = refToPowerPinNames[ref];
+            const std::vector<SCH_FIELD>& fields = symbol->GetFields();
+
+            for( const SCH_FIELD& field : fields )
+            {
+                wxString name = field.GetName();
+
+                if( !name.StartsWith( SD_CURRENT_FIELD_PREFIX ) )
+                    continue;
+
+                wxString suffix = name.Mid( prefixLen );
+
+                if( suffix.IsEmpty() )
+                    continue;
+
+                double amps = parseCurrent( field.GetText() );
+
+                if( amps <= 0.0 )
+                    continue;
+
+                // Split suffix on '.' to get parts
+                std::vector<wxString> rawParts;
+                wxStringTokenizer tokenizer( suffix, wxT( "." ) );
+
+                while( tokenizer.HasMoreTokens() )
+                    rawParts.push_back( tokenizer.GetNextToken() );
+
+                if( rawParts.empty() )
+                    continue;
+
+                CurrentField cf;
+                cf.amps = amps;
+
+                if( rawParts.size() == 1 )
+                {
+                    // Single-part suffix: could be a mode (e.g. "typ") or a pin name
+                    // (e.g. "VDD"). Disambiguate by checking against known pin names.
+                    // Case-insensitive comparison for robustness.
+                    bool isPin = false;
+
+                    for( const wxString& pin : pinNames )
+                    {
+                        if( pin.IsSameAs( rawParts[0], false ) )
+                        {
+                            // It's a pin name -> treat as Pwr.I.<pin> with implicit "typ"
+                            cf.parts.push_back( pin );  // Use canonical pin name
+                            cf.parts.push_back( wxT( "typ" ) );
+                            isPin = true;
+                            break;
+                        }
+                    }
+
+                    if( !isPin )
+                    {
+                        // Not a pin name -> treat as Pwr.I.<mode> (single-rail shorthand)
+                        cf.parts.push_back( rawParts[0] );
+                    }
+                }
+                else if( rawParts.size() == 2 )
+                {
+                    // Two-part suffix: Pwr.I.<pin>.<mode>
+                    // Normalize pin name to canonical casing if possible
+                    wxString pinPart = rawParts[0];
+
+                    for( const wxString& pin : pinNames )
+                    {
+                        if( pin.IsSameAs( pinPart, false ) )
+                        {
+                            pinPart = pin;
+                            break;
+                        }
+                    }
+
+                    cf.parts.push_back( pinPart );
+                    cf.parts.push_back( rawParts[1] );
+                }
+                else
+                {
+                    // More than 2 parts: ignore (malformed)
+                    continue;
+                }
+
+                refToCurrentFields[ref].push_back( cf );
+            }
+        }
+    }
+
+    if( refToCurrentFields.empty() )
+        return;
+
+    // Count how many power nodes each ref appears on as a load.
+    // Single-part fields (Pwr.I.<mode>) are only attributed when a component
+    // is on exactly one rail.
+    std::map<wxString, int> refLoadCount;
+
+    std::function<void( SD_POWER_NODE* )> countLoads;
+    countLoads = [&]( SD_POWER_NODE* node )
+    {
+        for( const wxString& loadRef : node->m_loadRefs )
+            refLoadCount[loadRef]++;
+
+        for( SD_POWER_NODE* child : node->m_children )
+            countLoads( child );
+    };
+
+    for( SD_POWER_NODE* root : m_data.m_powerRoots )
+        countLoads( root );
+
+    // Aggregate currents onto each power node from its loads
+    std::function<void( SD_POWER_NODE* )> aggregateCurrents;
+    aggregateCurrents = [&]( SD_POWER_NODE* node )
+    {
+        for( const wxString& loadRef : node->m_loadRefs )
+        {
+            auto fieldIt = refToCurrentFields.find( loadRef );
+
+            if( fieldIt == refToCurrentFields.end() )
+                continue;
+
+            for( const CurrentField& cf : fieldIt->second )
+            {
+                if( cf.parts.size() == 1 )
+                {
+                    // Mode-only field: Pwr.I.<mode>
+                    // Only use if this component appears as a load on exactly one rail
+                    if( refLoadCount[loadRef] == 1 )
+                        node->m_currentByMode[cf.parts[0]] += cf.amps;
+                }
+                else if( cf.parts.size() == 2 )
+                {
+                    // Pin+mode field: Pwr.I.<pin>.<mode> (or disambiguated from Pwr.I.<pin>)
+                    // Match pin name to this node's output net
+                    wxString pinName = cf.parts[0];
+                    wxString mode = cf.parts[1];
+
+                    auto netIt = refPinToNet.find( { loadRef, pinName } );
+
+                    if( netIt != refPinToNet.end() && netIt->second == node->m_netName )
+                        node->m_currentByMode[mode] += cf.amps;
+                }
+            }
+        }
+
+        for( SD_POWER_NODE* child : node->m_children )
+            aggregateCurrents( child );
+    };
+
+    for( SD_POWER_NODE* root : m_data.m_powerRoots )
+        aggregateCurrents( root );
+}
+
+
+void SYSTEM_DIAGRAM_ANALYZER::bubbleUpCurrents()
+{
+    if( m_data.m_powerRoots.empty() )
+        return;
+
+    std::function<void( SD_POWER_NODE* )> bubbleUp;
+    bubbleUp = [&]( SD_POWER_NODE* node )
+    {
+        // Process children first (bottom-up)
+        for( SD_POWER_NODE* child : node->m_children )
+            bubbleUp( child );
+
+        // Add each child's input current to this node's total output current
+        for( SD_POWER_NODE* child : node->m_children )
+        {
+            for( const auto& [mode, amps] : child->m_inputCurrentByMode )
+                node->m_currentByMode[mode] += amps;
+        }
+
+        // Compute this node's input current based on converter type
+        if( node->m_type != SD_POWER_NODE::REGULATOR )
+            return;
+
+        for( const auto& [mode, I_out] : node->m_currentByMode )
+        {
+            double I_in = I_out;  // Default: constant current (LDO/SWITCH)
+
+            if( node->m_converterType == SD_POWER_NODE::CONV_SMPS
+                && node->m_voltage > 0.0
+                && node->m_inputVoltage > 0.0 )
+            {
+                // Find efficiency for this mode, falling back to "typ"
+                double eta = 0.85;  // Conservative default
+
+                auto effIt = node->m_efficiencyByMode.find( mode );
+
+                if( effIt != node->m_efficiencyByMode.end() )
+                {
+                    eta = effIt->second;
+                }
+                else
+                {
+                    effIt = node->m_efficiencyByMode.find( wxT( "typ" ) );
+
+                    if( effIt != node->m_efficiencyByMode.end() )
+                        eta = effIt->second;
+                }
+
+                I_in = ( node->m_voltage * I_out ) / ( node->m_inputVoltage * eta );
+            }
+
+            node->m_inputCurrentByMode[mode] = I_in;
+        }
+    };
+
+    for( SD_POWER_NODE* root : m_data.m_powerRoots )
+        bubbleUp( root );
 }

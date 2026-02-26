@@ -21,15 +21,11 @@
 #define SYSTEM_DIAGRAM_GENERATOR_H
 
 #include <math/vector2d.h>
+#include "system_diagram_analyzer.h"
 
 class SCHEMATIC;
 class SCH_SHEET;
 class SCH_SCREEN;
-struct SD_COMPONENT;
-struct SD_BUS;
-struct SD_SIGNAL;
-struct SD_POWER_NODE;
-struct SYSTEM_DIAGRAM_DATA;
 
 
 /**
@@ -94,6 +90,9 @@ private:
     void drawPowerNode( SCH_SCREEN* aScreen, const SD_POWER_NODE& aNode );
     void drawPowerEdge( SCH_SCREEN* aScreen, const SD_POWER_NODE& aParent,
                         const SD_POWER_NODE& aChild );
+    void drawBiasEdge( SCH_SCREEN* aScreen, const SD_POWER_NODE& aBiasSource,
+                       const SD_POWER_NODE& aConsumer,
+                       const SD_POWER_NODE::BIAS_CONNECTION& aBias );
 
     /// Section headers and labels
     void drawSectionHeader( SCH_SCREEN* aScreen, const wxString& aTitle, VECTOR2I aPos );
