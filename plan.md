@@ -19,7 +19,7 @@ the question *"what talks to what, and how is it powered?"* at a glance.
   Currents shown when annotated via `Pwr.I.*` custom fields on load symbols.
 - **Current annotations**: Components can declare their current draw using custom fields
   following the `Pwr.*` dot-namespace convention (matching `Sim.*`). The `Pwr.` namespace
-  is designed for future extension (noise, efficiency, ripple, regulation tolerance, etc.).
+  is designed for future extension (noise, ripple, regulation tolerance, etc.).
   Current draw fields use the `Pwr.I.` prefix. Supported formats:
   - `Pwr.I.<mode>` (e.g. `Pwr.I.typ = 150mA`) — total current for single-rail components
   - `Pwr.I.<pin>.<mode>` (e.g. `Pwr.I.VDD.typ = 100mA`) — per-pin current for multi-rail components
@@ -29,6 +29,17 @@ the question *"what talks to what, and how is it powered?"* at a glance.
   treated as pin-specific with implicit "typ" mode; otherwise it is treated as a mode name.
   Values support SI suffixes: A, mA, uA/µA, nA, pA, kA. Currents are aggregated per rail
   and displayed on the power distribution diagram in dark red.
+- **Converter type annotations**: Regulators can be annotated with `Pwr.Type` (LDO, SMPS,
+  or SWITCH) to control how currents are computed during bubble-up. SMPS regulators use the
+  power-conservation formula `I_in = (V_out × I_out) / (V_in × η)`, while LDO and SWITCH
+  types use constant-current `I_in = I_out`. Efficiency is specified per mode via
+  `Pwr.Eff.<mode>` fields (e.g. `Pwr.Eff.typ = 87%`). The main power input pin can be
+  explicitly identified with `Pwr.InputPin` when a regulator has multiple power-in pins;
+  other power-in pins are treated as bias supplies and drawn with dashed lines.
+- **Current bubble-up**: Output currents (from Pwr.I.* load annotations) are propagated
+  recursively up the power tree. Each regulator computes its input current based on its
+  converter type and efficiency, and that input current is added to the parent node's total
+  output current. The result is that root source nodes show the total system current draw.
 - **Auto layout**: A layered (Sugiyama-style) graph layout algorithm places the boxes and
   routes the connections automatically.
 - **Output**: A dedicated sub-sheet in the schematic hierarchy, rendered with native
@@ -695,8 +706,10 @@ hierarchy into a single high-level view.
 
 These are natural extensions that build on v1 but are explicitly out of scope:
 
-- **Current accounting**: Add `Current_Draw`, `Max_Current` fields. Show utilization
-  bars on power rail boxes. Color-code by utilization.
+- **Quiescent current**: Add `Pwr.Iq.*` fields for bias supply current accounting.
+  When a bias pin exists, Iq is charged to the bias rail rather than the main input.
+- **Current utilization**: Show utilization bars on power rail boxes. Color-code by
+  utilization vs. maximum rated current.
 - **Power ERC checks**: `ERCE_POWER_RAIL_OVERLOAD`, `ERCE_POWER_MISSING_ANNOTATION`, etc.
 - **JSON export**: Serialize the power model for CI/automation and PDN analyzer integration.
 - **Settings dialog**: Let users configure net class name, layout spacing, sheet size

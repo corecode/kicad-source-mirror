@@ -32,8 +32,11 @@
 ///   Pwr.I.typ = 150mA           (single-rail: mode only)
 ///   Pwr.I.VDD.typ = 100mA       (multi-rail: pin.mode)
 ///   Pwr.I.VDD = 80mA            (multi-rail: pin only, implicit "typ" mode)
-#define SD_POWER_FIELD_PREFIX   wxT( "Pwr." )
-#define SD_CURRENT_FIELD_PREFIX wxT( "Pwr.I." )
+#define SD_POWER_FIELD_PREFIX        wxT( "Pwr." )
+#define SD_CURRENT_FIELD_PREFIX      wxT( "Pwr.I." )
+#define SD_TYPE_FIELD                wxT( "Pwr.Type" )
+#define SD_INPUT_PIN_FIELD           wxT( "Pwr.InputPin" )
+#define SD_EFFICIENCY_FIELD_PREFIX   wxT( "Pwr.Eff." )
 
 class SCHEMATIC;
 
@@ -69,6 +72,7 @@ struct SD_SIGNAL
 struct SD_POWER_NODE
 {
     enum TYPE { SOURCE, REGULATOR, RAIL };
+    enum CONVERTER_TYPE { CONV_UNKNOWN, CONV_LDO, CONV_SMPS, CONV_SWITCH };
 
     TYPE        m_type;
     wxString    m_reference;     ///< "J1", "U4", "" (for rail nodes)
@@ -78,10 +82,31 @@ struct SD_POWER_NODE
     VECTOR2I    m_pos;           ///< Assigned by layout
     VECTOR2I    m_size;
 
+    CONVERTER_TYPE              m_converterType = CONV_UNKNOWN;
+    wxString                    m_inputNetName;      ///< Main power input net (for regulators)
+    double                      m_inputVoltage = 0;  ///< Voltage on input net
+
+    /// Efficiency per mode (0.0-1.0), from Pwr.Eff.* fields. Key is mode (e.g. "typ").
+    std::map<wxString, double>  m_efficiencyByMode;
+
+    /// Computed input current per mode (in amps), from bubble-up.
+    std::map<wxString, double>  m_inputCurrentByMode;
+
+    /// Non-main power input pins (bias supplies).
+    struct BIAS_CONNECTION
+    {
+        wxString m_pinName;
+        wxString m_netName;
+        double   m_voltage = 0;
+    };
+
+    std::vector<BIAS_CONNECTION> m_biasConnections;
+
     std::vector<SD_POWER_NODE*>  m_children;
     std::vector<wxString>        m_loadRefs;  ///< References of ICs on this rail
 
-    /// Aggregated load current per mode (in amps). Key is mode name (e.g. "typ", "max").
+    /// Aggregated output current per mode (in amps). Key is mode name (e.g. "typ", "max").
+    /// After bubbleUpCurrents(), includes child regulator input currents.
     std::map<wxString, double>   m_currentByMode;
 };
 
@@ -137,12 +162,21 @@ private:
     /// Extract a numeric voltage from a power net name (e.g. "+3V3" -> 3.3)
     static double parseVoltage( const wxString& aNetName );
 
-    /// Phase 5: Collect Pwr.I.* field annotations and aggregate currents per power node
+    /// Phase 5: Collect Pwr.Type, Pwr.Eff.* annotations on regulator symbols
+    void collectPowerAnnotations();
+
+    /// Phase 6: Collect Pwr.I.* field annotations and aggregate currents per power node
     void collectCurrentAnnotations();
+
+    /// Phase 7: Propagate currents up the tree (child input currents → parent output)
+    void bubbleUpCurrents();
 
 public:
     /// Parse a current value string with SI suffix (e.g. "150mA") to amps
     static double parseCurrent( const wxString& aValue );
+
+    /// Parse an efficiency value (e.g. "0.87", "87%", "87") to a 0-1 range
+    static double parseEfficiency( const wxString& aValue );
 
     /// Format a current value in amps to a human-readable string (e.g. 0.15 -> "150.0mA")
     static wxString formatCurrent( double aAmps );

@@ -75,13 +75,30 @@ VECTOR2I SYSTEM_DIAGRAM_LAYOUT::computePowerNodeSize( const SD_POWER_NODE& aNode
         line1Width = aNode.m_netName.Length() * charWidth;
     }
 
-    // Add voltage text if available
+    // Converter type label (for regulators)
+    if( aNode.m_type == SD_POWER_NODE::REGULATOR
+        && aNode.m_converterType != SD_POWER_NODE::CONV_UNKNOWN )
+    {
+        lines++;
+
+        // Estimate width: "SMPS n=87%" is ~11 chars
+        int typeWidth = 15 * charWidth;  // Generous estimate
+        line2Width = std::max( line2Width, typeWidth );
+    }
+
+    // Voltage text (may include input voltage: "3.3V <- 5.0V")
     if( aNode.m_voltage != 0.0 )
     {
         lines++;
+
+        if( aNode.m_type == SD_POWER_NODE::REGULATOR && aNode.m_inputVoltage != 0.0 )
+        {
+            int voltWidth = 18 * charWidth;  // "3.3V <- 5.0V" ~14 chars
+            line2Width = std::max( line2Width, voltWidth );
+        }
     }
 
-    // Add current mode lines (at most 3)
+    // Output current mode lines (at most 3)
     if( !aNode.m_currentByMode.empty() )
     {
         int modeCount = std::min( (int) aNode.m_currentByMode.size(), 3 );
@@ -89,11 +106,23 @@ VECTOR2I SYSTEM_DIAGRAM_LAYOUT::computePowerNodeSize( const SD_POWER_NODE& aNode
 
         for( const auto& [mode, amps] : aNode.m_currentByMode )
         {
-            // Estimate width: "typ: 150.0mA" is roughly 12-15 chars
             wxString currentStr = mode + wxT( ": " ) + wxT( "000.0mA" );
             int      currentWidth = currentStr.Length() * charWidth;
             line2Width = std::max( line2Width, currentWidth );
         }
+    }
+
+    // Input current lines for SMPS regulators (at most 3)
+    if( aNode.m_type == SD_POWER_NODE::REGULATOR
+        && aNode.m_converterType == SD_POWER_NODE::CONV_SMPS
+        && !aNode.m_inputCurrentByMode.empty() )
+    {
+        int inCount = std::min( (int) aNode.m_inputCurrentByMode.size(), 3 );
+        lines += inCount;
+
+        // "<- typ: 000.0mA" is ~18 chars
+        int inWidth = 18 * charWidth;
+        line2Width = std::max( line2Width, inWidth );
     }
 
     // Add load refs

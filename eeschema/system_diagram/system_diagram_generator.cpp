@@ -502,9 +502,24 @@ void SYSTEM_DIAGRAM_GENERATOR::drawSignalLine( SCH_SCREEN* aScreen, const SD_SIG
 void SYSTEM_DIAGRAM_GENERATOR::drawPowerSection( SCH_SCREEN* aScreen,
                                                    const SYSTEM_DIAGRAM_DATA& aData )
 {
+    // Build a lookup from net name to the power node that drives it (for bias lines)
+    std::map<wxString, const SD_POWER_NODE*> netToNode;
+
+    std::function<void( const SD_POWER_NODE* )> buildNetMap;
+    buildNetMap = [&]( const SD_POWER_NODE* node )
+    {
+        netToNode[node->m_netName] = node;
+
+        for( const SD_POWER_NODE* child : node->m_children )
+            buildNetMap( child );
+    };
+
+    for( const auto& root : aData.m_powerRoots )
+        buildNetMap( root );
+
+    // Draw all nodes and edges recursively
     for( const auto& root : aData.m_powerRoots )
     {
-        // Draw all nodes and edges recursively
         std::function<void( const SD_POWER_NODE* )> drawTree;
         drawTree = [&]( const SD_POWER_NODE* node )
         {
@@ -514,6 +529,15 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerSection( SCH_SCREEN* aScreen,
             {
                 drawPowerEdge( aScreen, *node, *child );
                 drawTree( child );
+            }
+
+            // Draw bias connections (thin dashed lines to bias supply nodes)
+            for( const auto& bias : node->m_biasConnections )
+            {
+                auto biasNodeIt = netToNode.find( bias.m_netName );
+
+                if( biasNodeIt != netToNode.end() )
+                    drawBiasEdge( aScreen, *biasNodeIt->second, *node, bias );
             }
         };
 
@@ -526,7 +550,7 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerNode( SCH_SCREEN* aScreen, const SD_POWE
 {
     int lineWidth = schIUScale.MilsToIU( BOX_LINE_WIDTH );
 
-    // Choose color based on type
+    // Choose color based on type and converter type
     COLOR4D fillColor;
     COLOR4D borderColor;
 
@@ -537,8 +561,16 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerNode( SCH_SCREEN* aScreen, const SD_POWE
         borderColor = COLOR4D( 0.7, 0.4, 0.0, 1.0 );    // Orange border
         break;
     case SD_POWER_NODE::REGULATOR:
-        fillColor = COLOR4D( 0.9, 1.0, 0.9, 1.0 );      // Light green
-        borderColor = COLOR4D( 0.0, 0.5, 0.0, 1.0 );    // Green border
+        if( aNode.m_converterType == SD_POWER_NODE::CONV_SWITCH )
+        {
+            fillColor = COLOR4D( 1.0, 1.0, 0.88, 1.0 );    // Light yellow
+            borderColor = COLOR4D( 0.6, 0.5, 0.0, 1.0 );   // Yellow-brown border
+        }
+        else
+        {
+            fillColor = COLOR4D( 0.9, 1.0, 0.9, 1.0 );     // Light green
+            borderColor = COLOR4D( 0.0, 0.5, 0.0, 1.0 );   // Green border
+        }
         break;
     case SD_POWER_NODE::RAIL:
         fillColor = COLOR4D( 0.95, 0.95, 1.0, 1.0 );    // Light blue
@@ -594,10 +626,54 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerNode( SCH_SCREEN* aScreen, const SD_POWE
         currentY += lineSpacing;
     }
 
-    // Voltage
+    // Converter type label (for regulators)
+    if( aNode.m_type == SD_POWER_NODE::REGULATOR
+        && aNode.m_converterType != SD_POWER_NODE::CONV_UNKNOWN )
+    {
+        wxString typeStr;
+
+        switch( aNode.m_converterType )
+        {
+        case SD_POWER_NODE::CONV_LDO:    typeStr = wxT( "LDO" );    break;
+        case SD_POWER_NODE::CONV_SMPS:   typeStr = wxT( "SMPS" );   break;
+        case SD_POWER_NODE::CONV_SWITCH: typeStr = wxT( "SWITCH" ); break;
+        default: break;
+        }
+
+        // Append efficiency for SMPS (use "typ" if available, else first entry)
+        if( aNode.m_converterType == SD_POWER_NODE::CONV_SMPS
+            && !aNode.m_efficiencyByMode.empty() )
+        {
+            double eff = 0.0;
+            auto   typIt = aNode.m_efficiencyByMode.find( wxT( "typ" ) );
+
+            if( typIt != aNode.m_efficiencyByMode.end() )
+                eff = typIt->second;
+            else
+                eff = aNode.m_efficiencyByMode.begin()->second;
+
+            typeStr += wxString::Format( wxT( " \u03B7=%.0f%%" ), eff * 100.0 );
+        }
+
+        SCH_TEXT* typeText = new SCH_TEXT(
+                VECTOR2I( centerX, currentY ), typeStr, LAYER_NOTES );
+        typeText->SetTextSize( VECTOR2I( labelSize, labelSize ) );
+        typeText->SetHorizJustify( GR_TEXT_H_ALIGN_CENTER );
+        typeText->SetItalic( true );
+        typeText->SetTextColor( COLOR4D( 0.3, 0.3, 0.3, 1.0 ) );
+        aScreen->Append( typeText );
+        currentY += lineSpacing;
+    }
+
+    // Voltage (show input voltage for regulators: "3.3V <- 5.0V")
     if( aNode.m_voltage != 0.0 )
     {
         wxString voltStr = wxString::Format( wxT( "%.1fV" ), aNode.m_voltage );
+
+        if( aNode.m_type == SD_POWER_NODE::REGULATOR && aNode.m_inputVoltage != 0.0 )
+        {
+            voltStr += wxString::Format( wxT( " \u2190 %.1fV" ), aNode.m_inputVoltage );
+        }
 
         SCH_TEXT* voltText = new SCH_TEXT(
                 VECTOR2I( centerX, currentY ), voltStr, LAYER_NOTES );
@@ -608,7 +684,7 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerNode( SCH_SCREEN* aScreen, const SD_POWE
         currentY += lineSpacing;
     }
 
-    // Current annotations (aggregated from Pwr.I.* fields on loads)
+    // Output current annotations (aggregated from loads + child regulator inputs)
     if( !aNode.m_currentByMode.empty() )
     {
         int count = 0;
@@ -627,6 +703,32 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerNode( SCH_SCREEN* aScreen, const SD_POWE
             currentText->SetHorizJustify( GR_TEXT_H_ALIGN_CENTER );
             currentText->SetTextColor( COLOR4D( 0.6, 0.0, 0.0, 1.0 ) );  // Dark red
             aScreen->Append( currentText );
+            currentY += lineSpacing;
+            count++;
+        }
+    }
+
+    // Input current for regulators (when different from output, i.e. SMPS)
+    if( aNode.m_type == SD_POWER_NODE::REGULATOR
+        && aNode.m_converterType == SD_POWER_NODE::CONV_SMPS
+        && !aNode.m_inputCurrentByMode.empty() )
+    {
+        int count = 0;
+
+        for( const auto& [mode, amps] : aNode.m_inputCurrentByMode )
+        {
+            if( count >= 3 )
+                break;
+
+            wxString inStr = wxT( "\u2190 " ) + mode + wxT( ": " )
+                             + SYSTEM_DIAGRAM_ANALYZER::formatCurrent( amps );
+
+            SCH_TEXT* inText = new SCH_TEXT(
+                    VECTOR2I( centerX, currentY ), inStr, LAYER_NOTES );
+            inText->SetTextSize( VECTOR2I( labelSize, labelSize ) );
+            inText->SetHorizJustify( GR_TEXT_H_ALIGN_CENTER );
+            inText->SetTextColor( COLOR4D( 0.4, 0.0, 0.4, 1.0 ) );  // Dark purple
+            aScreen->Append( inText );
             currentY += lineSpacing;
             count++;
         }
@@ -692,6 +794,52 @@ void SYSTEM_DIAGRAM_GENERATOR::drawPowerEdge( SCH_SCREEN* aScreen,
     arrowLine2->SetLineWidth( lineWidth );
     arrowLine2->SetLineColor( COLOR4D( 0.0, 0.5, 0.0, 1.0 ) );
     aScreen->Append( arrowLine2 );
+}
+
+
+void SYSTEM_DIAGRAM_GENERATOR::drawBiasEdge( SCH_SCREEN* aScreen,
+                                               const SD_POWER_NODE& aBiasSource,
+                                               const SD_POWER_NODE& aConsumer,
+                                               const SD_POWER_NODE::BIAS_CONNECTION& aBias )
+{
+    int lineWidth = schIUScale.MilsToIU( SIGNAL_LINE_WIDTH );
+    int labelSize = schIUScale.MilsToIU( LABEL_TEXT_SIZE - 5 );
+
+    // Line from bias source's right edge to consumer's top/bottom edge
+    VECTOR2I startPt( aBiasSource.m_pos.x + aBiasSource.m_size.x,
+                      aBiasSource.m_pos.y + aBiasSource.m_size.y / 2 );
+    VECTOR2I endPt( aConsumer.m_pos.x + aConsumer.m_size.x / 2,
+                    aConsumer.m_pos.y );
+
+    // If consumer is below the bias source, connect to top; otherwise bottom
+    if( aConsumer.m_pos.y > aBiasSource.m_pos.y + aBiasSource.m_size.y )
+        endPt.y = aConsumer.m_pos.y;
+    else if( aConsumer.m_pos.y + aConsumer.m_size.y < aBiasSource.m_pos.y )
+        endPt.y = aConsumer.m_pos.y + aConsumer.m_size.y;
+    else
+        endPt = VECTOR2I( aConsumer.m_pos.x,
+                          aConsumer.m_pos.y + aConsumer.m_size.y / 2 );
+
+    SCH_LINE* line = new SCH_LINE( startPt, LAYER_NOTES );
+    line->SetEndPoint( endPt );
+    line->SetLineWidth( lineWidth );
+    line->SetLineStyle( LINE_STYLE::DASH );
+    line->SetLineColor( COLOR4D( 0.5, 0.5, 0.5, 1.0 ) );  // Gray
+    aScreen->Append( line );
+
+    // Label at midpoint
+    if( !aBias.m_pinName.IsEmpty() )
+    {
+        VECTOR2I midPt( ( startPt.x + endPt.x ) / 2,
+                        ( startPt.y + endPt.y ) / 2 - schIUScale.MilsToIU( 25 ) );
+
+        SCH_TEXT* label = new SCH_TEXT( midPt, aBias.m_pinName, LAYER_NOTES );
+        label->SetTextSize( VECTOR2I( labelSize, labelSize ) );
+        label->SetItalic( true );
+        label->SetHorizJustify( GR_TEXT_H_ALIGN_CENTER );
+        label->SetTextColor( COLOR4D( 0.5, 0.5, 0.5, 1.0 ) );
+        aScreen->Append( label );
+    }
 }
 
 
