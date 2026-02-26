@@ -21,15 +21,11 @@
 #define SYSTEM_DIAGRAM_GENERATOR_H
 
 #include <math/vector2d.h>
+#include "system_diagram_analyzer.h"
 
 class SCHEMATIC;
 class SCH_SHEET;
 class SCH_SCREEN;
-struct SD_COMPONENT;
-struct SD_BUS;
-struct SD_SIGNAL;
-struct SD_POWER_NODE;
-struct SYSTEM_DIAGRAM_DATA;
 
 
 /**
