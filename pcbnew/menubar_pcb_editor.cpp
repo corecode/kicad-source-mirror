@@ -390,6 +390,9 @@ void PCB_EDIT_FRAME::doReCreateMenuBar()
     inspectMenu->Add( PCB_ACTIONS::showFootprintAssociations );
     inspectMenu->Add( PCB_ACTIONS::diffFootprint );
 
+    inspectMenu->AppendSeparator();
+    inspectMenu->Add( PCB_ACTIONS::extractParasitics );
+
 
     //-- Tools menu ----------------------------------------------------------
     //

@@ -85,6 +85,30 @@ const wxAuiPaneInfo& defaultNetNavigatorPaneInfo()
 }
 
 
+const wxAuiPaneInfo& defaultPdnAnalyzerPaneInfo()
+{
+    static wxAuiPaneInfo paneInfo;
+
+    paneInfo.Name( wxS( "PdnAnalyzer" ) )
+            .Caption( _( "PDN Analyzer" ) )
+            .CaptionVisible( true )
+            .PaneBorder( true )
+            .Left()
+            .Layer( 3 )
+            .Position( 0 )
+            .TopDockable( false )
+            .BottomDockable( false )
+            .CloseButton( true )
+            .MinSize( 200, 150 )
+            .BestSize( 400, 300 )
+            .FloatingSize( 500, 400 )
+            .FloatingPosition( 100, 100 )
+            .Show( false );
+
+    return paneInfo;
+}
+
+
 const wxAuiPaneInfo& defaultPropertiesPaneInfo( wxWindow* aWindow )
 {
     static wxAuiPaneInfo paneInfo;
@@ -315,6 +339,9 @@ EESCHEMA_SETTINGS::EESCHEMA_SETTINGS() :
 
     m_params.emplace_back( new PARAM<float>( "aui.properties_splitter_proportion",
             &m_AuiPanels.properties_splitter, 0.5f ) );
+
+    m_params.emplace_back(
+            new PARAM<bool>( "aui.show_pdn_analyzer", &m_AuiPanels.show_pdn_analyzer, false ) );
 
     m_params.emplace_back( new PARAM<bool>( "autoplace_fields.enable",
             &m_AutoplaceFields.enable, true ) );

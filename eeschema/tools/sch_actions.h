@@ -306,6 +306,7 @@ public:
     static TOOL_ACTION updateNetHighlighting;
     static TOOL_ACTION highlightNetTool;
     static TOOL_ACTION showNetNavigator;
+    static TOOL_ACTION showPdnAnalyzer;
 
     // Drag and drop
     static TOOL_ACTION ddAppendFile;

@@ -21,6 +21,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <fstream>
+
 #include <bitmaps.h>
 #include <pcb_group.h>
 #include <tool/tool_manager.h>
@@ -43,9 +45,12 @@
 #include <widgets/wx_html_report_box.h>
 #include <widgets/footprint_diff_widget.h>
 #include <drc/drc_item.h>
+#include <footprint.h>
 #include <pad.h>
 #include <project_pcb.h>
 #include <view/view_controls.h>
+#include <exporters/parasitic_extraction/parasitic_extraction.h>
+#include <exporters/parasitic_extraction/spice_subckt_exporter.h>
 
 
 BOARD_INSPECTION_TOOL::BOARD_INSPECTION_TOOL() :
@@ -2143,6 +2148,263 @@ void BOARD_INSPECTION_TOOL::doHideRatsnestNet( int aNetCode, bool aHide )
 }
 
 
+int BOARD_INSPECTION_TOOL::ExtractParasitics( const TOOL_EVENT& aEvent )
+{
+    wxCHECK( m_frame, 0 );
+
+    PCB_SELECTION_TOOL* selTool = m_toolMgr->GetTool<PCB_SELECTION_TOOL>();
+
+    wxCHECK( selTool, 0 );
+
+    const PCB_SELECTION& selection = selTool->GetSelection();
+
+    // Collect pads from selection
+    std::vector<PAD*> pads;
+
+    for( EDA_ITEM* item : selection )
+    {
+        if( item->Type() == PCB_PAD_T )
+            pads.push_back( static_cast<PAD*>( item ) );
+    }
+
+    if( pads.empty() )
+    {
+        m_frame->ShowInfoBarError( _( "Select at least one pad for parasitic extraction." ) );
+        return 0;
+    }
+
+    // Classify pads as signal or ground by net name heuristic
+    std::vector<PAD*> signalPads;
+    std::vector<PAD*> groundPads;
+
+    for( PAD* pad : pads )
+    {
+        wxString netName = pad->GetNetname().Lower();
+
+        if( netName.Contains( "gnd" ) || netName.Contains( "ground" ) || netName.Contains( "vss" ) )
+        {
+            groundPads.push_back( pad );
+        }
+        else
+        {
+            signalPads.push_back( pad );
+        }
+    }
+
+    if( signalPads.empty() )
+    {
+        m_frame->ShowInfoBarError(
+                _( "No signal pads in selection. All selected pads are on ground nets." ) );
+        return 0;
+    }
+
+    if( groundPads.empty() )
+    {
+        m_frame->ShowInfoBarError(
+                _( "No ground pads in selection. Select at least one pad on a GND/VSS net." ) );
+        return 0;
+    }
+
+    // Build PORT_SPEC for each pad
+    PDN_PARASITIC::EXTRACTION_CONFIG config;
+
+    auto iu2mm = []( int aIU ) -> double
+    {
+        return aIU / 1e6;
+    };
+
+    auto buildSpec = [&]( PAD* aPad, bool aIsGround ) -> PDN_PARASITIC::PORT_SPEC
+    {
+        PDN_PARASITIC::PORT_SPEC spec;
+        FOOTPRINT*               fp = aPad->GetParentFootprint();
+
+        spec.m_Name = fp->GetReference().ToStdString() + "_" + aPad->GetNetname().ToStdString();
+        spec.m_NetName = aPad->GetNetname().ToStdString();
+        spec.m_NetCode = aPad->GetNetCode();
+        spec.m_XMM = iu2mm( aPad->GetPosition().x );
+        spec.m_YMM = iu2mm( aPad->GetPosition().y );
+        spec.m_LayerId = aPad->IsOnLayer( F_Cu ) ? F_Cu : B_Cu;
+        spec.m_IsGround = aIsGround;
+        return spec;
+    };
+
+    for( PAD* pad : signalPads )
+        config.m_PortSpecs.push_back( buildSpec( pad, false ) );
+
+    for( PAD* pad : groundPads )
+        config.m_PortSpecs.push_back( buildSpec( pad, true ) );
+
+    // Set up output directory alongside the .kicad_pcb file
+    wxFileName projectFn = m_frame->Prj().GetProjectFullName();
+    wxString   outputDir =
+            projectFn.GetPath() + wxFileName::GetPathSeparator() + wxT( "parasitic_extraction" );
+
+    if( !wxFileName::DirExists( outputDir ) )
+        wxFileName::Mkdir( outputDir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL );
+
+    config.m_OutputDir = outputDir.ToStdString();
+
+    // Run extraction
+    BOARD*               board = m_frame->GetBoard();
+    PARASITIC_EXTRACTION extraction( board, config );
+
+    extraction.SetProgressCallback(
+            [&]( const std::string& aMsg, int aPct )
+            {
+                m_frame->SetStatusText( wxString::FromUTF8( aMsg ) );
+            } );
+
+    // Helper to read a solver log file, reporting error lines prominently and
+    // truncating the bulk output to a reasonable size for the dialog.
+    static constexpr int MAX_LOG_LINES = 200;
+
+    auto reportLogFile =
+            []( WX_HTML_REPORT_BOX* aPage, const std::string& aPath, const wxString& aLabel )
+    {
+        std::ifstream logFile( aPath );
+
+        if( !logFile.is_open() )
+            return;
+
+        aPage->Report( aLabel, RPT_SEVERITY_INFO );
+
+        std::vector<std::string> errorLines;
+        std::vector<std::string> tailLines;
+        std::string              line;
+        int                      totalLines = 0;
+
+        while( std::getline( logFile, line ) )
+        {
+            totalLines++;
+
+            if( line.substr( 0, 5 ) == "Error" )
+                errorLines.push_back( line );
+
+            tailLines.push_back( line );
+
+            if( (int) tailLines.size() > MAX_LOG_LINES )
+                tailLines.erase( tailLines.begin() );
+        }
+
+        // Show error lines first
+        for( const auto& err : errorLines )
+            aPage->Report( wxString::FromUTF8( err ), RPT_SEVERITY_ERROR );
+
+        if( !errorLines.empty() )
+            aPage->Report( wxEmptyString );
+
+        // Show tail of log (truncated if needed)
+        if( totalLines > MAX_LOG_LINES )
+        {
+            aPage->Report( wxString::Format( _( "... (%d lines omitted) ..." ),
+                                             totalLines - MAX_LOG_LINES ) );
+        }
+
+        for( const auto& l : tailLines )
+            aPage->Report( wxString::FromUTF8( l ) );
+
+        aPage->Report( wxEmptyString );
+    };
+
+    std::string logDir = extraction.GetOutputDir();
+
+    if( !extraction.RunExtraction() )
+    {
+        DIALOG_BOOK_REPORTER dialog( m_frame, wxT( "PARASITIC_EXTRACTION" ),
+                                     _( "Parasitic Extraction" ) );
+
+        WX_HTML_REPORT_BOX* logPage = dialog.AddHTMLPage( _( "Log" ) );
+
+        logPage->Report( _( "Parasitic extraction failed." ), RPT_SEVERITY_ERROR );
+        logPage->Report( wxString::FromUTF8( extraction.GetErrorMessage() ) );
+        logPage->Report( wxEmptyString );
+
+        reportLogFile( logPage, logDir + "/fasthenry_log.txt", _( "FastHenry output:" ) );
+        reportLogFile( logPage, logDir + "/fastcap_output.txt", _( "FastCap output:" ) );
+
+        logPage->Report( wxString::Format( _( "Output directory: %s" ), outputDir ) );
+        logPage->Flush();
+
+        dialog.ShowModal();
+        return 0;
+    }
+
+    // Export to SPICE subcircuit
+    const PDN_PARASITIC::EXTRACTION_RESULTS& results = extraction.GetResults();
+    SPICE_SUBCKT_EXPORTER                    spiceExporter( results );
+
+    wxString boardName = projectFn.GetName();
+    spiceExporter.SetSubcktName( boardName.ToStdString() );
+
+    wxString subcktPath = outputDir + wxFileName::GetPathSeparator() + boardName + wxT( ".subckt" );
+
+    if( !spiceExporter.Export( subcktPath.ToStdString() ) )
+    {
+        m_frame->ShowInfoBarError( _( "Failed to write SPICE subcircuit file." ) );
+        return 0;
+    }
+
+    // Show results dialog
+    {
+        DIALOG_BOOK_REPORTER dialog( m_frame, wxT( "PARASITIC_EXTRACTION" ),
+                                     _( "Parasitic Extraction" ) );
+
+        // Results page
+        WX_HTML_REPORT_BOX* resultsPage = dialog.AddHTMLPage( _( "Results" ) );
+
+        int portCount = spiceExporter.GetPortCount();
+
+        resultsPage->Report( wxString::Format( _( "Exported %d-port parasitic model to %s" ),
+                                               portCount, subcktPath ),
+                             RPT_SEVERITY_ACTION );
+        resultsPage->Report( wxEmptyString );
+
+        for( const auto& pp : spiceExporter.GetPortParasitics() )
+        {
+            resultsPage->Report( wxString::Format( wxT( "Port %s: R = %.3f m\u03A9, L = %.3f nH" ),
+                                                   wxString::FromUTF8( pp.m_Name ),
+                                                   pp.m_R_Ohm * 1e3, pp.m_L_Henry * 1e9 ) );
+        }
+
+        const auto& couplings = spiceExporter.GetCouplingPairs();
+
+        if( !couplings.empty() )
+        {
+            resultsPage->Report( wxEmptyString );
+
+            const auto& portNames = spiceExporter.GetPortNames();
+
+            for( const auto& cp : couplings )
+            {
+                wxString nameI = ( cp.m_PortI < (int) portNames.size() )
+                                         ? wxString::FromUTF8( portNames[cp.m_PortI] )
+                                         : wxString::Format( wxT( "%d" ), cp.m_PortI );
+                wxString nameJ = ( cp.m_PortJ < (int) portNames.size() )
+                                         ? wxString::FromUTF8( portNames[cp.m_PortJ] )
+                                         : wxString::Format( wxT( "%d" ), cp.m_PortJ );
+
+                resultsPage->Report(
+                        wxString::Format( wxT( "K(%s, %s) = %.4f" ), nameI, nameJ, cp.m_K ) );
+            }
+        }
+
+        resultsPage->Flush();
+
+        // Log page with solver output
+        WX_HTML_REPORT_BOX* logPage = dialog.AddHTMLPage( _( "Log" ) );
+
+        reportLogFile( logPage, logDir + "/fasthenry_log.txt", _( "FastHenry output:" ) );
+        reportLogFile( logPage, logDir + "/fastcap_output.txt", _( "FastCap output:" ) );
+
+        logPage->Flush();
+
+        dialog.ShowModal();
+    }
+
+    return 0;
+}
+
+
 void BOARD_INSPECTION_TOOL::setTransitions()
 {
     Go( &BOARD_INSPECTION_TOOL::LocalRatsnestTool,   PCB_ACTIONS::localRatsnestTool.MakeEvent() );
@@ -2154,6 +2416,7 @@ void BOARD_INSPECTION_TOOL::setTransitions()
     Go( &BOARD_INSPECTION_TOOL::InspectConstraints,  PCB_ACTIONS::inspectConstraints.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::DiffFootprint,       PCB_ACTIONS::diffFootprint.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::ShowFootprintLinks,  PCB_ACTIONS::showFootprintAssociations.MakeEvent() );
+    Go( &BOARD_INSPECTION_TOOL::ExtractParasitics, PCB_ACTIONS::extractParasitics.MakeEvent() );
 
     Go( &BOARD_INSPECTION_TOOL::HighlightNet,        PCB_ACTIONS::highlightNet.MakeEvent() );
     Go( &BOARD_INSPECTION_TOOL::HighlightNet,        PCB_ACTIONS::highlightNetSelection.MakeEvent() );

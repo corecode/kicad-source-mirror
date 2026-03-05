@@ -331,6 +331,15 @@ int SCH_EDITOR_CONTROL::Quit( const TOOL_EVENT& aEvent )
 int SCH_EDITOR_CONTROL::CrossProbeToPcb( const TOOL_EVENT& aEvent )
 {
     doCrossProbeSchToPcb( aEvent, false );
+
+    SCH_EDIT_FRAME* editFrame = dynamic_cast<SCH_EDIT_FRAME*>( m_frame );
+
+    if( editFrame )
+    {
+        wxCommandEvent event( EDA_EVT_SCH_SELECTION_CHANGED );
+        wxPostEvent( editFrame, event );
+    }
+
     return 0;
 }
 
@@ -2650,6 +2659,13 @@ int SCH_EDITOR_CONTROL::ShowNetNavigator( const TOOL_EVENT& aEvent )
 }
 
 
+int SCH_EDITOR_CONTROL::ShowPdnAnalyzer( const TOOL_EVENT& aEvent )
+{
+    getEditFrame<SCH_EDIT_FRAME>()->TogglePdnAnalyzer();
+    return 0;
+}
+
+
 int SCH_EDITOR_CONTROL::ToggleProperties( const TOOL_EVENT& aEvent )
 {
     getEditFrame<SCH_EDIT_FRAME>()->ToggleProperties();
@@ -3055,6 +3071,7 @@ void SCH_EDITOR_CONTROL::setTransitions()
     Go( &SCH_EDITOR_CONTROL::ShowSearch,             SCH_ACTIONS::showSearch.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ShowHierarchy,          SCH_ACTIONS::showHierarchy.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ShowNetNavigator,       SCH_ACTIONS::showNetNavigator.MakeEvent() );
+    Go( &SCH_EDITOR_CONTROL::ShowPdnAnalyzer,        SCH_ACTIONS::showPdnAnalyzer.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ToggleProperties,       ACTIONS::showProperties.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ToggleLibraryTree,      SCH_ACTIONS::showDesignBlockPanel.MakeEvent() );
     Go( &SCH_EDITOR_CONTROL::ToggleLibraryTree,      SCH_ACTIONS::showDesignBlockPanel.MakeEvent() );

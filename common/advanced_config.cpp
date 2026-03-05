@@ -99,6 +99,7 @@ static const wxChar UpdateUIEventInterval[] = wxT( "UpdateUIEventInterval" );
 static const wxChar V3DRT_BevelHeight_um[] = wxT( "V3DRT_BevelHeight_um" );
 static const wxChar V3DRT_BevelExtentFactor[] = wxT( "V3DRT_BevelExtentFactor" );
 static const wxChar EnableDesignBlocks[] = wxT( "EnableDesignBlocks" );
+static const wxChar EnablePdnAnalyzer[] = wxT( "EnablePdnAnalyzer" );
 static const wxChar EnableGenerators[] = wxT( "EnableGenerators" );
 static const wxChar EnableLibWithText[] = wxT( "EnableLibWithText" );
 static const wxChar EnableLibDir[] = wxT( "EnableLibDir" );
@@ -263,6 +264,7 @@ ADVANCED_CFG::ADVANCED_CFG()
     m_UpdateUIEventInterval     = 0;
     m_ShowRepairSchematic       = false;
     m_EnableDesignBlocks        = true;
+    m_EnablePdnAnalyzer         = true;
     m_EnableGenerators          = false;
     m_EnableLibWithText         = false;
     m_EnableLibDir              = false;
@@ -507,6 +509,9 @@ void ADVANCED_CFG::loadSettings( wxConfigBase& aCfg )
 
     configParams.push_back( new PARAM_CFG_BOOL( true, AC_KEYS::EnableDesignBlocks,
                                                 &m_EnableDesignBlocks, m_EnableDesignBlocks ) );
+
+    configParams.push_back( new PARAM_CFG_BOOL( true, AC_KEYS::EnablePdnAnalyzer,
+                                                &m_EnablePdnAnalyzer, m_EnablePdnAnalyzer ) );
 
     configParams.push_back( new PARAM_CFG_BOOL( true, AC_KEYS::EnableGenerators,
                                                 &m_EnableGenerators, m_EnableGenerators ) );

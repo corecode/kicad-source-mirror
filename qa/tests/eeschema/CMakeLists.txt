@@ -95,6 +95,7 @@ set( QA_EESCHEMA_SRCS
     test_schematic.cpp
     test_symbol_library_manager.cpp
     test_symbol_embedded_files.cpp
+    test_pdn_analyzer.cpp
 )
 
 if( WIN32 )

@@ -92,6 +92,9 @@ public:
     int DiffFootprint( const TOOL_EVENT& aEvent );
     void DiffFootprint( FOOTPRINT* aFootprint );
 
+    ///< Extract parasitic R/L/C for selected pads into a SPICE subcircuit.
+    int ExtractParasitics( const TOOL_EVENT& aEvent );
+
     /**
      * @return true if a net or nets to highlight have been set
      */

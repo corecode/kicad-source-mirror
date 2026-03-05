@@ -63,7 +63,13 @@ bool FASTCAP_EXPORTER::Export( const std::string& aOutputDir,
     // Resolve nets
     m_netCodes.clear();
 
-    if( m_config.m_NetNames.empty() )
+    if( !m_config.m_PortSpecs.empty() )
+    {
+        // Derive nets from explicit pad selection
+        for( const PDN_PARASITIC::PORT_SPEC& spec : m_config.m_PortSpecs )
+            m_netCodes.insert( spec.m_NetCode );
+    }
+    else if( m_config.m_NetNames.empty() )
     {
         for( const PCB_TRACK* track : m_board->Tracks() )
             m_netCodes.insert( track->GetNetCode() );
@@ -650,11 +656,8 @@ std::string FASTCAP_EXPORTER::writePlaneGeometry( const std::string& aOutputDir 
 
         LSET layers = zone->GetLayerSet();
 
-        for( int layerId = F_Cu; layerId <= B_Cu; layerId++ )
+        for( PCB_LAYER_ID layerId : layers.CuStack() )
         {
-            if( !layers.test( layerId ) )
-                continue;
-
             double zTop = getLayerZTopM( layerId );
             double zBot = getLayerZBotM( layerId );
             double x1 = iu2m( bbox.GetX() );
@@ -709,9 +712,11 @@ std::string FASTCAP_EXPORTER::writeDielectricSurface( const std::string& aOutput
     int nX = std::max( 2, static_cast<int>( std::ceil( aExtentXM / aMeshSizeM ) ) );
     int nY = std::max( 2, static_cast<int>( std::ceil( aExtentYM / aMeshSizeM ) ) );
 
-    // Cap the mesh density to avoid excessive panel counts
-    nX = std::min( nX, 50 );
-    nY = std::min( nY, 50 );
+    // Cap the mesh density to avoid excessive panel counts.
+    // FastCap memory usage scales as O(N^2) with panel count;
+    // the original MIT FastCap2 has a ~4MB internal memory limit.
+    nX = std::min( nX, 10 );
+    nY = std::min( nY, 10 );
 
     double dx = aExtentXM / nX;
     double dy = aExtentYM / nY;

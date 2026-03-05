@@ -1845,6 +1845,13 @@ TOOL_ACTION PCB_ACTIONS::boardStatistics( TOOL_ACTION_ARGS()
         .FriendlyName( _( "Show Board Statistics" ) )
         .Tooltip( _( "Shows board statistics" ) ) );
 
+TOOL_ACTION PCB_ACTIONS::extractParasitics( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.InspectionTool.ExtractParasitics" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Extract Parasitics to SPICE..." ) )
+        .Tooltip( _( "Extract parasitic R/L/C for selected pads into a SPICE subcircuit" ) )
+        .Icon( BITMAPS::sim_run ) );
+
 TOOL_ACTION PCB_ACTIONS::inspectClearance( TOOL_ACTION_ARGS()
         .Name( "pcbnew.InspectionTool.InspectClearance" )
         .Scope( AS_GLOBAL )

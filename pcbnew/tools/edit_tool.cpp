@@ -387,6 +387,7 @@ bool EDIT_TOOL::Init()
     menu.AddItem( PCB_ACTIONS::assignNetClass,    SELECTION_CONDITIONS::OnlyTypes( connectedTypes )
                                                       && !inFootprintEditor );
     menu.AddItem( PCB_ACTIONS::inspectClearance,  SELECTION_CONDITIONS::Count( 2 ) );
+    menu.AddItem( PCB_ACTIONS::extractParasitics, SELECTION_CONDITIONS::HasType( PCB_PAD_T ) );
 
     // Footprint actions
     menu.AddSeparator();
