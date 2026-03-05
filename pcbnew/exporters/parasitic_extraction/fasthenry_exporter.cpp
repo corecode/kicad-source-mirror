@@ -100,8 +100,8 @@ bool FASTHENRY_EXPORTER::Export( const std::string& aOutputPath )
     // Identify port locations from pads
     identifyPorts();
 
-    // Create return paths: connect power vias to ground planes via .equiv
-    // at layer crossings to form complete current loops for FastHenry
+    // Create return paths for power vias that cross ground plane layers.
+    // Must run after identifyPorts() so we can exclude port terminal nodes.
     identifyReturnPaths();
 
     std::ofstream file( aOutputPath );
@@ -267,6 +267,7 @@ void FASTHENRY_EXPORTER::registerNodes()
 {
     // Pre-create node names for all trace endpoints and via positions.
     // This populates m_nodeMap so identifyPorts() can find nearest conductor nodes.
+    // Also populates m_nodeNetCode so searches can filter by net.
 
     for( const PCB_TRACK* track : m_board->Tracks() )
     {
@@ -278,6 +279,14 @@ void FASTHENRY_EXPORTER::registerNodes()
 
         makeTrackNodeName( track, true );
         makeTrackNodeName( track, false );
+
+        int  netCode = track->GetNetCode();
+        auto key1 = std::make_tuple( track->GetStart().x, track->GetStart().y,
+                                     static_cast<int>( track->GetLayer() ) );
+        auto key2 = std::make_tuple( track->GetEnd().x, track->GetEnd().y,
+                                     static_cast<int>( track->GetLayer() ) );
+        m_nodeNetCode.emplace( key1, netCode );
+        m_nodeNetCode.emplace( key2, netCode );
     }
 
     for( const PCB_TRACK* track : m_board->Tracks() )
@@ -298,10 +307,17 @@ void FASTHENRY_EXPORTER::registerNodes()
         double zMin = std::min( zTop, zBot );
         double zMax = std::max( zTop, zBot );
 
+        int netCode = via->GetNetCode();
+
         for( auto& [layerId, zPos] : m_layerZMM )
         {
             if( zPos >= zMin - 1e-6 && zPos <= zMax + 1e-6 )
+            {
                 makeViaNodeName( via, layerId );
+
+                auto key = std::make_tuple( via->GetStart().x, via->GetStart().y, layerId );
+                m_nodeNetCode.emplace( key, netCode );
+            }
         }
     }
 }
@@ -743,6 +759,7 @@ void FASTHENRY_EXPORTER::identifyPorts()
             // is connected to the conductor network that FastHenry solves.
             int layerId = pad->IsOnLayer( F_Cu ) ? F_Cu : B_Cu;
             VECTOR2I padPos = pad->GetPosition();
+            int      padNetCode = pad->GetNetCode();
 
             std::string posNode;
             double      bestDistSq = std::numeric_limits<double>::max();
@@ -752,6 +769,12 @@ void FASTHENRY_EXPORTER::identifyPorts()
                 auto [nx, ny, nl] = key;
 
                 if( nl != layerId )
+                    continue;
+
+                // Only match nodes on the same net to avoid picking ground nodes
+                auto netIt = m_nodeNetCode.find( key );
+
+                if( netIt == m_nodeNetCode.end() || netIt->second != padNetCode )
                     continue;
 
                 double dx = iu2mm( padPos.x - nx );
@@ -873,7 +896,7 @@ void FASTHENRY_EXPORTER::identifyExplicitPorts()
 
     for( const auto* spec : signalSpecs )
     {
-        // Find the nearest conductor node to this pad's position
+        // Find the nearest conductor node on the same net as this pad
         int layerId = spec->m_LayerId;
 
         std::string posNode;
@@ -884,6 +907,12 @@ void FASTHENRY_EXPORTER::identifyExplicitPorts()
             auto [nx, ny, nl] = key;
 
             if( nl != layerId )
+                continue;
+
+            // Only match nodes on the same net to avoid picking ground nodes
+            auto netIt = m_nodeNetCode.find( key );
+
+            if( netIt == m_nodeNetCode.end() || netIt->second != spec->m_NetCode )
                 continue;
 
             double dx = spec->m_XMM - iu2mm( nx );
@@ -989,15 +1018,24 @@ void FASTHENRY_EXPORTER::identifyExplicitPorts()
 void FASTHENRY_EXPORTER::identifyReturnPaths()
 {
     // For FastHenry to compute impedance, current must flow in a complete loop.
-    // Ports (.external) define one connection between the power conductor and the
-    // ground plane. We need return paths at other locations to close the loop.
+    // Ports (.external) define current injection between signal conductors and
+    // the ground plane. Additional return paths are needed at other locations
+    // to close the loop — specifically, power vias that pass through ground
+    // plane layers need an electrical connection to the plane mesh.
     //
-    // Strategy: for each via on a power (non-ground) net that passes through
-    // a ground plane layer, connect the via's node at that layer to the
-    // ground plane. This is analogous to the .equiv used in the FastHenry
-    // "together.inp" example.
+    // We must NOT equiv any node that is used as a port terminal, as that
+    // would make the .external's positive and negative nodes the same.
 
-    // Collect ground net codes and ground plane info (same logic as identifyPorts)
+    // Build a set of all node names used as port terminals
+    std::set<std::string> portNodes;
+
+    for( const auto& port : m_ports )
+    {
+        portNodes.insert( port.m_PositiveNode );
+        portNodes.insert( port.m_NegativeNode );
+    }
+
+    // Collect ground net codes
     std::set<int> groundNetCodes;
 
     for( int netCode : m_netCodes )
@@ -1085,13 +1123,39 @@ void FASTHENRY_EXPORTER::identifyReturnPaths()
                 || viaYMM > gp.y1MM + gp.heightMM )
                 continue;
 
+            // Get the via's node name at this ground plane layer
+            std::string viaNode = makeViaNodeName( via, gp.layerId );
+
+            // Skip if this via node is used as a port terminal — equiv'ing it
+            // to the ground plane would make the .external invalid
+            if( portNodes.count( viaNode ) )
+                continue;
+
+            // Also check all via nodes on other layers — if any is a port terminal,
+            // equiv'ing at this layer would still short the via barrel (which
+            // connects all layers) to the ground plane
+            bool usedAsPort = false;
+
+            for( auto& [layerId, zPos] : m_layerZMM )
+            {
+                std::string nodeAtLayer = makeViaNodeName( via, layerId );
+
+                if( portNodes.count( nodeAtLayer ) )
+                {
+                    usedAsPort = true;
+                    break;
+                }
+            }
+
+            if( usedAsPort )
+                continue;
+
             // Create a named node on the ground plane at the via's (x,y)
             std::string planeNode = makePlaneNodeName( gp.zone, viaXMM, viaYMM );
             m_groundPlanePortNodes.push_back(
                     { planeNode, viaXMM, viaYMM, getLayerZMM( gp.layerId ) } );
 
             // Connect the via's node at this layer to the plane node via .equiv
-            std::string viaNode = makeViaNodeName( via, gp.layerId );
             m_equivPairs.push_back( { viaNode, planeNode } );
         }
     }

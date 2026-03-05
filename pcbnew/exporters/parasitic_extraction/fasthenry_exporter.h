@@ -128,7 +128,8 @@ private:
     /// Create ports from explicit PORT_SPEC entries (user-selected pads)
     void identifyExplicitPorts();
 
-    /// Connect power vias to ground planes at layer crossings to form return paths
+    /// Connect power vias to ground planes at layer crossings to form return paths.
+    /// Skips vias whose nodes are used as port terminals.
     void identifyReturnPaths();
 
     BOARD*                                  m_board;
@@ -154,6 +155,9 @@ private:
 
     /// Map from (x_iu, y_iu, layer) to node name for de-duplication
     std::map<std::tuple<int, int, int>, std::string> m_nodeMap;
+
+    /// Map from (x_iu, y_iu, layer) to net code (parallel to m_nodeMap)
+    std::map<std::tuple<int, int, int>, int> m_nodeNetCode;
 
     /// Set of node names that have had their coordinate definition emitted
     std::set<std::string> m_definedNodes;

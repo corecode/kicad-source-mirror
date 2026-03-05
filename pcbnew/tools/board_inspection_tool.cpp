@@ -21,6 +21,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <fstream>
+
 #include <bitmaps.h>
 #include <pcb_group.h>
 #include <tool/tool_manager.h>
@@ -2252,10 +2254,78 @@ int BOARD_INSPECTION_TOOL::ExtractParasitics( const TOOL_EVENT& aEvent )
                 m_frame->SetStatusText( wxString::FromUTF8( aMsg ) );
             } );
 
+    // Helper to read a solver log file, reporting error lines prominently and
+    // truncating the bulk output to a reasonable size for the dialog.
+    static constexpr int MAX_LOG_LINES = 200;
+
+    auto reportLogFile =
+            []( WX_HTML_REPORT_BOX* aPage, const std::string& aPath, const wxString& aLabel )
+    {
+        std::ifstream logFile( aPath );
+
+        if( !logFile.is_open() )
+            return;
+
+        aPage->Report( aLabel, RPT_SEVERITY_INFO );
+
+        std::vector<std::string> errorLines;
+        std::vector<std::string> tailLines;
+        std::string              line;
+        int                      totalLines = 0;
+
+        while( std::getline( logFile, line ) )
+        {
+            totalLines++;
+
+            if( line.substr( 0, 5 ) == "Error" )
+                errorLines.push_back( line );
+
+            tailLines.push_back( line );
+
+            if( (int) tailLines.size() > MAX_LOG_LINES )
+                tailLines.erase( tailLines.begin() );
+        }
+
+        // Show error lines first
+        for( const auto& err : errorLines )
+            aPage->Report( wxString::FromUTF8( err ), RPT_SEVERITY_ERROR );
+
+        if( !errorLines.empty() )
+            aPage->Report( wxEmptyString );
+
+        // Show tail of log (truncated if needed)
+        if( totalLines > MAX_LOG_LINES )
+        {
+            aPage->Report( wxString::Format( _( "... (%d lines omitted) ..." ),
+                                             totalLines - MAX_LOG_LINES ) );
+        }
+
+        for( const auto& l : tailLines )
+            aPage->Report( wxString::FromUTF8( l ) );
+
+        aPage->Report( wxEmptyString );
+    };
+
+    std::string logDir = extraction.GetOutputDir();
+
     if( !extraction.RunExtraction() )
     {
-        m_frame->ShowInfoBarError( _( "Parasitic extraction failed. Check that FastHenry and "
-                                      "FastCap are installed and on your PATH." ) );
+        DIALOG_BOOK_REPORTER dialog( m_frame, wxT( "PARASITIC_EXTRACTION" ),
+                                     _( "Parasitic Extraction" ) );
+
+        WX_HTML_REPORT_BOX* logPage = dialog.AddHTMLPage( _( "Log" ) );
+
+        logPage->Report( _( "Parasitic extraction failed." ), RPT_SEVERITY_ERROR );
+        logPage->Report( wxString::FromUTF8( extraction.GetErrorMessage() ) );
+        logPage->Report( wxEmptyString );
+
+        reportLogFile( logPage, logDir + "/fasthenry_log.txt", _( "FastHenry output:" ) );
+        reportLogFile( logPage, logDir + "/fastcap_output.txt", _( "FastCap output:" ) );
+
+        logPage->Report( wxString::Format( _( "Output directory: %s" ), outputDir ) );
+        logPage->Flush();
+
+        dialog.ShowModal();
         return 0;
     }
 
@@ -2274,10 +2344,62 @@ int BOARD_INSPECTION_TOOL::ExtractParasitics( const TOOL_EVENT& aEvent )
         return 0;
     }
 
-    // Report success
-    int portCount = spiceExporter.GetPortCount();
-    m_frame->ShowInfoBarMsg( wxString::Format( _( "Exported %d-port parasitic model to %s" ),
-                                               portCount, subcktPath ) );
+    // Show results dialog
+    {
+        DIALOG_BOOK_REPORTER dialog( m_frame, wxT( "PARASITIC_EXTRACTION" ),
+                                     _( "Parasitic Extraction" ) );
+
+        // Results page
+        WX_HTML_REPORT_BOX* resultsPage = dialog.AddHTMLPage( _( "Results" ) );
+
+        int portCount = spiceExporter.GetPortCount();
+
+        resultsPage->Report( wxString::Format( _( "Exported %d-port parasitic model to %s" ),
+                                               portCount, subcktPath ),
+                             RPT_SEVERITY_ACTION );
+        resultsPage->Report( wxEmptyString );
+
+        for( const auto& pp : spiceExporter.GetPortParasitics() )
+        {
+            resultsPage->Report( wxString::Format( wxT( "Port %s: R = %.3f m\u03A9, L = %.3f nH" ),
+                                                   wxString::FromUTF8( pp.m_Name ),
+                                                   pp.m_R_Ohm * 1e3, pp.m_L_Henry * 1e9 ) );
+        }
+
+        const auto& couplings = spiceExporter.GetCouplingPairs();
+
+        if( !couplings.empty() )
+        {
+            resultsPage->Report( wxEmptyString );
+
+            const auto& portNames = spiceExporter.GetPortNames();
+
+            for( const auto& cp : couplings )
+            {
+                wxString nameI = ( cp.m_PortI < (int) portNames.size() )
+                                         ? wxString::FromUTF8( portNames[cp.m_PortI] )
+                                         : wxString::Format( wxT( "%d" ), cp.m_PortI );
+                wxString nameJ = ( cp.m_PortJ < (int) portNames.size() )
+                                         ? wxString::FromUTF8( portNames[cp.m_PortJ] )
+                                         : wxString::Format( wxT( "%d" ), cp.m_PortJ );
+
+                resultsPage->Report(
+                        wxString::Format( wxT( "K(%s, %s) = %.4f" ), nameI, nameJ, cp.m_K ) );
+            }
+        }
+
+        resultsPage->Flush();
+
+        // Log page with solver output
+        WX_HTML_REPORT_BOX* logPage = dialog.AddHTMLPage( _( "Log" ) );
+
+        reportLogFile( logPage, logDir + "/fasthenry_log.txt", _( "FastHenry output:" ) );
+        reportLogFile( logPage, logDir + "/fastcap_output.txt", _( "FastCap output:" ) );
+
+        logPage->Flush();
+
+        dialog.ShowModal();
+    }
 
     return 0;
 }

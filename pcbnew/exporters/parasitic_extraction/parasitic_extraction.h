@@ -67,6 +67,12 @@ public:
     /// Get the extraction results (valid after RunExtraction succeeds)
     const PDN_PARASITIC::EXTRACTION_RESULTS& GetResults() const { return m_results; }
 
+    /// Get the error message from the last failed operation
+    const std::string& GetErrorMessage() const { return m_errorMsg; }
+
+    /// Get the output directory path
+    const std::string& GetOutputDir() const { return m_config.m_OutputDir; }
+
     /// Serialize results to JSON for the external PDN analyzer
     bool SerializeResults( const std::string& aJsonPath ) const;
 
@@ -87,6 +93,7 @@ private:
     PDN_PARASITIC::EXTRACTION_CONFIG    m_config;
     PDN_PARASITIC::EXTRACTION_RESULTS   m_results;
     ProgressCallback                    m_progress;
+    std::string                         m_errorMsg;
 };
 
 #endif  // PARASITIC_EXTRACTION_H

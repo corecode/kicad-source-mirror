@@ -52,7 +52,10 @@ PARASITIC_EXTRACTION::PARASITIC_EXTRACTION(
 bool PARASITIC_EXTRACTION::ExportGeometry()
 {
     if( !m_board )
+    {
+        m_errorMsg = "No board loaded";
         return false;
+    }
 
     const std::string& outDir = m_config.m_OutputDir;
 
@@ -64,6 +67,7 @@ bool PARASITIC_EXTRACTION::ExportGeometry()
 
     if( !fhExporter.Export( fhPath ) )
     {
+        m_errorMsg = "Failed to export FastHenry geometry files";
         reportProgress( "FastHenry export failed", -1 );
         return false;
     }
@@ -75,6 +79,7 @@ bool PARASITIC_EXTRACTION::ExportGeometry()
 
     if( !fcExporter.Export( outDir, "pdn_extraction.lst" ) )
     {
+        m_errorMsg = "Failed to export FastCap geometry files";
         reportProgress( "FastCap export failed", -1 );
         return false;
     }
@@ -100,6 +105,7 @@ bool PARASITIC_EXTRACTION::RunExtraction()
 
     if( !runFastHenry( outDir + "/pdn_extraction.inp", outDir ) )
     {
+        // m_errorMsg is set by runFastHenry with log content
         reportProgress( "FastHenry solver failed", -1 );
         return false;
     }
@@ -109,6 +115,7 @@ bool PARASITIC_EXTRACTION::RunExtraction()
 
     if( !runFastCap( outDir + "/pdn_extraction.lst", outDir ) )
     {
+        // m_errorMsg is set by runFastCap with log content
         reportProgress( "FastCap solver failed", -1 );
         return false;
     }
@@ -121,6 +128,7 @@ bool PARASITIC_EXTRACTION::RunExtraction()
     if( !PARASITIC_RESULT_PARSER::ParseFastHenryOutput(
             zcMatPath, m_results.m_Ports, m_results.m_ImpedanceMatrix ) )
     {
+        m_errorMsg = "Failed to parse FastHenry output (Zc.mat)";
         reportProgress( "Failed to parse FastHenry output", -1 );
         return false;
     }
@@ -133,6 +141,7 @@ bool PARASITIC_EXTRACTION::RunExtraction()
     if( !PARASITIC_RESULT_PARSER::ParseFastCapOutput(
             fcOutPath, m_results.m_CapacitanceMatrix ) )
     {
+        m_errorMsg = "Failed to parse FastCap output (fastcap_output.txt)";
         reportProgress( "Failed to parse FastCap output", -1 );
         return false;
     }
@@ -175,7 +184,16 @@ bool PARASITIC_EXTRACTION::runFastHenry( const std::string& aInputPath,
         << " > fasthenry_log.txt 2>&1";
 
     int ret = std::system( cmd.str().c_str() );
-    return ret == 0;
+
+    if( ret != 0 )
+    {
+        m_errorMsg = "FastHenry solver failed (exit code " + std::to_string( ret )
+                     + ").\n"
+                       "See fasthenry_log.txt in the output directory for details.";
+        return false;
+    }
+
+    return true;
 }
 
 
@@ -232,7 +250,10 @@ bool PARASITIC_EXTRACTION::runFastCap( const std::string& aListPath,
         std::ofstream lstOut( nodiePath );
 
         if( !lstIn.is_open() || !lstOut.is_open() )
+        {
+            m_errorMsg = "FastCap solver failed and could not create conductor-only retry file";
             return false;
+        }
 
         std::string line;
 
@@ -250,7 +271,16 @@ bool PARASITIC_EXTRACTION::runFastCap( const std::string& aListPath,
              << " > fastcap_output.txt 2>&1";
 
     ret = std::system( retryCmd.str().c_str() );
-    return ret == 0;
+
+    if( ret != 0 )
+    {
+        m_errorMsg = "FastCap solver failed (exit code " + std::to_string( ret )
+                     + ").\n"
+                       "See fastcap_output.txt in the output directory for details.";
+        return false;
+    }
+
+    return true;
 }
 
 
