@@ -159,9 +159,6 @@ private:
     /// Phase 4: Build power tree from PT_POWER_IN / PT_POWER_OUT pins
     void buildPowerTree();
 
-    /// Extract a numeric voltage from a power net name (e.g. "+3V3" -> 3.3)
-    static double parseVoltage( const wxString& aNetName );
-
     /// Phase 5: Collect Pwr.Type, Pwr.Eff.* annotations on regulator symbols
     void collectPowerAnnotations();
 
@@ -172,6 +169,9 @@ private:
     void bubbleUpCurrents();
 
 public:
+    /// Extract a numeric voltage from a power net name (e.g. "+3V3" -> 3.3)
+    static double parseVoltage( const wxString& aNetName );
+
     /// Parse a current value string with SI suffix (e.g. "150mA") to amps
     static double parseCurrent( const wxString& aValue );
 

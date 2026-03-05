@@ -2624,6 +2624,10 @@ int SCH_EDITOR_CONTROL::GenerateSystemDiagram( const TOOL_EVENT& aEvent )
                                      ? sheets.m_connectionsSheet
                                      : sheets.m_powerSheet;
 
+    // Refresh the cached hierarchy so the hierarchy pane picks up new sheets
+    m_frame->Schematic().RefreshHierarchy();
+    m_frame->UpdateHierarchyNavigator();
+
     if( targetSheet )
     {
         SCH_SHEET_PATH sheetPath;

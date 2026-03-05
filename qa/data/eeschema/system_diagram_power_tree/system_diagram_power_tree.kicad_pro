@@ -1,0 +1,32 @@
+{
+  "board": {
+    "design_settings": {
+      "defaults": {},
+      "rules": {}
+    }
+  },
+  "meta": {
+    "filename": "system_diagram_power_tree.kicad_pro",
+    "version": 1
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "name": "Default",
+        "nets": []
+      }
+    ]
+  },
+  "schematic": {
+    "drawing": {},
+    "meta": {
+      "version": 1
+    }
+  },
+  "sheets": [
+    [
+      "a0000000-0000-0000-0000-000000000001",
+      ""
+    ]
+  ]
+}

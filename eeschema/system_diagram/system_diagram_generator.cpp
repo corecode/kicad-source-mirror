@@ -232,6 +232,17 @@ SCH_SHEET* SYSTEM_DIAGRAM_GENERATOR::getOrCreateSheet( const wxString& aName,
     // Add the sheet symbol to the root screen
     rootScreen->Append( newSheet );
 
+    // Register a sheet instance with a page number so the hierarchy pane can find it.
+    // Without this, GetPageNumber() returns empty and the sheet won't appear properly.
+    SCH_SHEET_PATH instance;
+    instance.push_back( &rootSheet );
+    instance.push_back( newSheet );
+
+    SCH_SHEET_LIST hierarchy = m_schematic->BuildUnorderedSheetList();
+    wxString       pageNumber;
+    pageNumber.Printf( wxT( "%d" ), static_cast<int>( hierarchy.size() ) + 1 );
+    instance.SetPageNumber( pageNumber );
+
     return newSheet;
 }
 
