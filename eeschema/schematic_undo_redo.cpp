@@ -468,6 +468,12 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
                 schItem->SwapData( itemCopy );
                 bulkChangedItems.emplace_back( schItem );
 
+                // SwapData on symbols always replaces pin objects, so the
+                // connection graph must rebuild even if HasConnectivityChanges
+                // returned false (e.g. value-only or footprint-only changes).
+                if( schItem->Type() == SCH_SYMBOL_T )
+                    propagateConnectivityDamage( schItem );
+
                 // Special cases for items which have instance data
                 if( schItem->GetParent() && schItem->GetParent()->Type() == SCH_SYMBOL_T
                   && schItem->Type() == SCH_FIELD_T )
