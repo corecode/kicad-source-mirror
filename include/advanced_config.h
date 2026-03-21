@@ -580,6 +580,15 @@ public:
     bool m_EnableLibDir;
 
     /**
+     * Enable the PDN impedance analyzer panel in eeschema.
+     *
+     * Setting name: "EnablePdnAnalyzer"
+     * Valid values: 0 or 1
+     * Default value: 1
+     */
+    bool m_EnablePdnAnalyzer;
+
+    /**
      * Board object selection visibility limit.
      *
      * This ratio is used to determine if an object in a selected object layer stack is

@@ -107,6 +107,7 @@ static const wxChar EnablePcbDesignBlocks[] = wxT( "EnablePcbDesignBlocks" );
 static const wxChar EnableGenerators[] = wxT( "EnableGenerators" );
 static const wxChar EnableLibWithText[] = wxT( "EnableLibWithText" );
 static const wxChar EnableLibDir[] = wxT( "EnableLibDir" );
+static const wxChar EnablePdnAnalyzer[] = wxT( "EnablePdnAnalyzer" );
 static const wxChar DisambiguationTime[] = wxT( "DisambiguationTime" );
 static const wxChar PcbSelectionVisibilityRatio[] = wxT( "PcbSelectionVisibilityRatio" );
 static const wxChar FontErrorSize[] = wxT( "FontErrorSize" );
@@ -277,6 +278,7 @@ ADVANCED_CFG::ADVANCED_CFG()
     m_EnableGenerators = false;
     m_EnableLibWithText = false;
     m_EnableLibDir = false;
+    m_EnablePdnAnalyzer = true;
 
     m_3DRT_BevelHeight_um = 30;
     m_3DRT_BevelExtentFactor = 1.0 / 16.0;
@@ -548,6 +550,9 @@ void ADVANCED_CFG::loadSettings( wxConfigBase& aCfg )
 
     m_entries.push_back(
             std::make_unique<PARAM_CFG_BOOL>( true, AC_KEYS::EnableLibDir, &m_EnableLibDir, m_EnableLibDir ) );
+
+    m_entries.push_back( std::make_unique<PARAM_CFG_BOOL>( true, AC_KEYS::EnablePdnAnalyzer, &m_EnablePdnAnalyzer,
+                                                           m_EnablePdnAnalyzer ) );
 
     m_entries.push_back( std::make_unique<PARAM_CFG_DOUBLE>( true, AC_KEYS::PcbSelectionVisibilityRatio,
                                                              &m_PcbSelectionVisibilityRatio,

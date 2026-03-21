@@ -282,6 +282,8 @@ EESCHEMA_SETTINGS::EESCHEMA_SETTINGS() :
     m_params.emplace_back( new PARAM<int>( "aui.remote_symbol_panel_float_height",
             &m_AuiPanels.remote_symbol_panel_float_height, -1 ) );
 
+    m_params.emplace_back( new PARAM<bool>( "aui.show_pdn_analyzer", &m_AuiPanels.show_pdn_analyzer, false ) );
+
     m_params.emplace_back( new PARAM<bool>( "aui.schematic_hierarchy_float",
             &m_AuiPanels.schematic_hierarchy_float, false ) );
 

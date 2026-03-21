@@ -190,6 +190,9 @@ void SCH_EDIT_FRAME::doReCreateMenuBar()
     showHidePanels->Add( SCH_ACTIONS::showDesignBlockPanel, ACTION_MENU::CHECK, _( "Design Blocks" ) );
     wxMenuItem* remoteSymbolItem = showHidePanels->Add( SCH_ACTIONS::showRemoteSymbolPanel, ACTION_MENU::CHECK, _( "Remote Symbols" ) );
 
+    if( ADVANCED_CFG::GetCfg().m_EnablePdnAnalyzer )
+        showHidePanels->Add( SCH_ACTIONS::showPdnAnalyzer, ACTION_MENU::CHECK, _( "PDN Impedance Analyzer" ) );
+
     if( m_remoteSymbolPane && !m_remoteSymbolPane->HasDataSources() )
     {
         remoteSymbolItem->Enable( false );

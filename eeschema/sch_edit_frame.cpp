@@ -34,6 +34,7 @@
 #include <dialogs/dialog_symbol_fields_table.h>
 #include <widgets/sch_design_block_pane.h>
 #include <widgets/panel_remote_symbol.h>
+#include <widgets/pdn_panel.h>
 #include <wx/srchctrl.h>
 #include <mail_type.h>
 #include <wx/clntdata.h>
@@ -161,8 +162,8 @@ wxDEFINE_EVENT( EDA_EVT_SCHEMATIC_CHANGED, wxCommandEvent );
 
 
 SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
-        SCH_BASE_FRAME( aKiway, aParent, FRAME_SCH, wxT( "Eeschema" ), wxDefaultPosition,
-                        wxDefaultSize, KICAD_DEFAULT_DRAWFRAME_STYLE, SCH_EDIT_FRAME_NAME ),
+        SCH_BASE_FRAME( aKiway, aParent, FRAME_SCH, wxT( "Eeschema" ), wxDefaultPosition, wxDefaultSize,
+                        KICAD_DEFAULT_DRAWFRAME_STYLE, SCH_EDIT_FRAME_NAME ),
         m_ercDialog( nullptr ),
         m_diffSymbolDialog( nullptr ),
         m_symbolFieldsTableDialog( nullptr ),
@@ -173,6 +174,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
         m_highlightedConnChanged( false ),
         m_designBlocksPane( nullptr ),
         m_remoteSymbolPane( nullptr ),
+        m_pdnPanel( nullptr ),
         m_currentVariantCtrl( nullptr )
 {
     m_maximizeByDefault = true;
@@ -235,6 +237,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_searchPane = new SCH_SEARCH_PANE( this );
     m_propertiesPanel = new SCH_PROPERTIES_PANEL( this, this );
     m_remoteSymbolPane = new PANEL_REMOTE_SYMBOL( this );
+    m_pdnPanel = new PDN_PANEL( this );
 
     m_propertiesPanel->SetSplitterProportion( eeconfig()->m_AuiPanels.properties_splitter );
 
@@ -275,6 +278,22 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_auimgr.AddPane( m_designBlocksPane, defaultDesignBlocksPaneInfo( this ) );
     m_auimgr.AddPane( m_remoteSymbolPane, defaultRemoteSymbolPaneInfo( this ) );
+
+    m_auimgr.AddPane( m_pdnPanel, EDA_PANE()
+                                          .Palette()
+                                          .Name( PdnAnalyzerPaneName() )
+                                          .Caption( _( "PDN Impedance" ) )
+                                          .Right()
+                                          .Layer( 3 )
+                                          .Position( 3 )
+                                          .TopDockable( false )
+                                          .BottomDockable( false )
+                                          .CloseButton( true )
+                                          .MinSize( FromDIP( wxSize( 300, 200 ) ) )
+                                          .BestSize( FromDIP( wxSize( 500, 350 ) ) )
+                                          .FloatingSize( FromDIP( wxSize( 700, 500 ) ) )
+                                          .FloatingPosition( FromDIP( wxPoint( 100, 100 ) ) )
+                                          .Show( aui_cfg.show_pdn_analyzer ) );
 
     m_auimgr.AddPane( createHighlightedNetNavigator(), defaultNetNavigatorPaneInfo() );
 
@@ -2551,6 +2570,9 @@ void SCH_EDIT_FRAME::SetHighlightedConnection( const wxString& aConnection,
 
     if( refreshNetNavigator )
         RefreshNetNavigator( aSelection );
+
+    if( m_pdnPanel )
+        m_pdnPanel->OnSchSelectionChanged();
 }
 
 
@@ -2993,6 +3015,28 @@ void SCH_EDIT_FRAME::ToggleRemoteSymbolPanel()
 
         m_auimgr.Update();
     }
+}
+
+
+void SCH_EDIT_FRAME::TogglePdnAnalyzer()
+{
+    EESCHEMA_SETTINGS* cfg = eeconfig();
+
+    wxCHECK( cfg, /* void */ );
+
+    wxAuiPaneInfo& pdnPane = m_auimgr.GetPane( PdnAnalyzerPaneName() );
+
+    pdnPane.Show( !pdnPane.IsShown() );
+    cfg->m_AuiPanels.show_pdn_analyzer = pdnPane.IsShown();
+
+    m_auimgr.Update();
+}
+
+
+void SCH_EDIT_FRAME::NotifyPdnSelectionChanged()
+{
+    if( m_pdnPanel )
+        m_pdnPanel->OnSchSelectionChanged();
 }
 
 

@@ -112,6 +112,7 @@ public:
         int  remote_symbol_panel_docked_width;
         int  remote_symbol_panel_float_width;
         int  remote_symbol_panel_float_height;
+        bool    show_pdn_analyzer;
     };
 
     struct AUTOPLACE_FIELDS
