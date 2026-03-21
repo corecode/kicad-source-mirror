@@ -2092,7 +2092,9 @@ void mpWindow::OnPaint( wxPaintEvent& WXUNUSED( event ) )
         if( m_last_lx != m_scrX || m_last_ly != m_scrY )
         {
             delete m_buff_bmp;
-            m_buff_bmp = new wxBitmap( m_scrX, m_scrY );
+            double scaleFactor = GetContentScaleFactor();
+            m_buff_bmp = new wxBitmap( m_scrX * scaleFactor, m_scrY * scaleFactor );
+            m_buff_bmp->SetScaleFactor( scaleFactor );
             m_buff_dc.SelectObject( *m_buff_bmp );
             m_last_lx   = m_scrX;
             m_last_ly   = m_scrY;
