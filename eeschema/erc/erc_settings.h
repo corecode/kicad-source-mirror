@@ -89,8 +89,10 @@ enum ERCE_T
     ERCE_UNCONNECTED_WIRE_ENDPOINT, ///< A label is connected to more than one wire.
     ERCE_STACKED_PIN_SYNTAX,      ///< Pin name resembles stacked pin notation.
     ERCE_FIELD_NAME_WHITESPACE,   ///< Field name has leading or trailing whitespace.
+    ERCE_ALIAS_LABEL_SIMILARITY,  ///< Alias label =X and net label X on different nets.
+    ERCE_ALIAS_WITHOUT_DRIVER,    ///< Alias label =X on a net with no real driver.
 
-    ERCE_LAST = ERCE_FIELD_NAME_WHITESPACE,
+    ERCE_LAST = ERCE_ALIAS_WITHOUT_DRIVER,
 
     ERCE_DUPLICATE_PIN_ERROR,
     ERCE_PIN_TO_PIN_WARNING,    // pin connected to an other pin: warning level

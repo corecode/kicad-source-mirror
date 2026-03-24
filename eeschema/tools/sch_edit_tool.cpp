@@ -267,6 +267,7 @@ private:
         Add( _( "Net Label" ),          ID_POPUP_SCH_PIN_TRICKS_NET_LABEL,    BITMAPS::add_label );
         Add( _( "Hierarchical Label" ), ID_POPUP_SCH_PIN_TRICKS_HIER_LABEL,   BITMAPS::add_hierarchical_label );
         Add( _( "Global Label" ),       ID_POPUP_SCH_PIN_TRICKS_GLOBAL_LABEL, BITMAPS::add_glabel );
+        Add( _( "Alias Label" ),        ID_POPUP_SCH_PIN_TRICKS_ALIAS_LABEL,  BITMAPS::add_label );
     }
 };
 

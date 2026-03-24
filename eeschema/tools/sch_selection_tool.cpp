@@ -994,6 +994,9 @@ int SCH_SELECTION_TOOL::Main( const TOOL_EVENT& aEvent )
                         case ID_POPUP_SCH_PIN_TRICKS_GLOBAL_LABEL:
                             label = new SCH_GLOBALLABEL( item->GetPosition(), labelText );
                             break;
+                        case ID_POPUP_SCH_PIN_TRICKS_ALIAS_LABEL:
+                            label = new SCH_LABEL( item->GetPosition(), wxS( "=" ) + labelText );
+                            break;
                         default:
                             continue;
                         }

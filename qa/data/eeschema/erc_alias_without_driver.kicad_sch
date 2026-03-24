@@ -1,0 +1,34 @@
+(kicad_sch
+	(version 20240620)
+	(generator "eeschema")
+	(generator_version "8.99")
+	(uuid "a0000003-0000-0000-0000-000000000001")
+	(paper "A4")
+	(lib_symbols)
+	(wire
+		(pts
+			(xy 100 100) (xy 130 100)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b0000001-0000-0000-0000-000000000003")
+	)
+	(label "=PB8"
+		(at 100 100 0)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "c0000001-0000-0000-0000-000000000003")
+	)
+	(sheet_instances
+		(path "/"
+			(page "1")
+		)
+	)
+)
