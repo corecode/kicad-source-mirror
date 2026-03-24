@@ -67,6 +67,21 @@ static const wxChar DanglingProfileMask[] = wxT( "CONN_PROFILE" );
 static const wxChar ConnTrace[] = wxT( "CONN" );
 
 
+/**
+ * Check if a driver item is an alias label (local label starting with '=').
+ * Alias labels participate in connectivity but are not strong drivers for
+ * net naming purposes.
+ */
+static bool IsAliasLabel( SCH_ITEM* aItem, const CONNECTION_SUBGRAPH& aSubgraph )
+{
+    if( aItem->Type() != SCH_LABEL_T )
+        return false;
+
+    const wxString& name = aSubgraph.GetNameForDriver( aItem );
+    return name.StartsWith( wxS( "=" ) );
+}
+
+
 void CONNECTION_SUBGRAPH::RemoveItem( SCH_ITEM* aItem )
 {
     m_items.erase( aItem );
@@ -169,8 +184,15 @@ bool CONNECTION_SUBGRAPH::ResolveDrivers( bool aCheckMultipleDrivers )
                 return false;
             else if( b_lowQualityName && !a_lowQualityName )
                 return true;
-            else
-                return a_name < b_name;
+
+            // Alias labels (=prefix) are lower priority than real labels
+            bool a_alias = a_name.StartsWith( wxS( "=" ) );
+            bool b_alias = b_name.StartsWith( wxS( "=" ) );
+
+            if( a_alias != b_alias )
+                return !a_alias;
+
+            return a_name < b_name;
         };
 
     PRIORITY            highest_priority = PRIORITY::INVALID;
@@ -198,7 +220,7 @@ bool CONNECTION_SUBGRAPH::ResolveDrivers( bool aCheckMultipleDrivers )
                 continue;
         }
 
-        if( item_priority >= PRIORITY::HIER_LABEL )
+        if( item_priority >= PRIORITY::HIER_LABEL && !IsAliasLabel( item, *this ) )
             strong_drivers.insert( item );
 
         if( item_priority > highest_priority )
@@ -248,11 +270,20 @@ bool CONNECTION_SUBGRAPH::ResolveDrivers( bool aCheckMultipleDrivers )
     if( strong_drivers.size() > 1 )
         m_multiple_drivers = true;
 
-    // Drop weak drivers
+    // Drop weak drivers, but keep alias labels for ERC checking
     if( m_strong_driver )
     {
+        std::set<SCH_ITEM*> alias_drivers;
+
+        for( SCH_ITEM* item : m_drivers )
+        {
+            if( IsAliasLabel( item, *this ) )
+                alias_drivers.insert( item );
+        }
+
         m_drivers.clear();
         m_drivers.insert( strong_drivers.begin(), strong_drivers.end() );
+        m_drivers.insert( alias_drivers.begin(), alias_drivers.end() );
     }
 
     // Cache driver connection
@@ -3379,6 +3410,12 @@ int CONNECTION_GRAPH::RunERC()
         error_count += ercCheckSingleGlobalLabel();
     }
 
+    if( settings.IsTestEnabled( ERCE_ALIAS_LABEL_SIMILARITY )
+            || settings.IsTestEnabled( ERCE_ALIAS_WITHOUT_DRIVER ) )
+    {
+        error_count += ercCheckAliasLabels();
+    }
+
     return error_count;
 }
 
@@ -3392,6 +3429,14 @@ bool CONNECTION_GRAPH::ercCheckMultipleDrivers( const CONNECTION_SUBGRAPH* aSubg
         for( SCH_ITEM* driver : aSubgraph->m_drivers )
         {
             if( driver == aSubgraph->m_driver )
+                continue;
+
+            // Skip alias labels — they deliberately share the net without conflict
+            if( IsAliasLabel( driver, *aSubgraph ) )
+                continue;
+
+            // Also skip if the primary driver is an alias label
+            if( IsAliasLabel( aSubgraph->m_driver, *aSubgraph ) )
                 continue;
 
             if( driver->Type() == SCH_GLOBAL_LABEL_T
@@ -3613,7 +3658,11 @@ bool CONNECTION_GRAPH::ercCheckBusToBusEntryConflicts( const CONNECTION_SUBGRAPH
             wxString baseName = sheet.PathHumanReadable();
 
             for( SCH_ITEM* driver : aSubgraph->m_drivers )
-                test_names.insert( baseName + aSubgraph->GetNameForDriver( driver ) );
+            {
+                // Skip alias labels — they should not be matched against bus members
+                if( !IsAliasLabel( driver, *aSubgraph ) )
+                    test_names.insert( baseName + aSubgraph->GetNameForDriver( driver ) );
+            }
 
             for( const auto& member : bus_wire->Connection( &sheet )->Members() )
             {
@@ -4254,6 +4303,139 @@ int CONNECTION_GRAPH::ercCheckSingleGlobalLabel()
             sheet.LastScreen()->Append( marker );
 
             errors++;
+        }
+    }
+
+    return errors;
+}
+
+
+int CONNECTION_GRAPH::ercCheckAliasLabels()
+{
+    int errors = 0;
+
+    ERC_SETTINGS& settings = m_schematic->ErcSettings();
+
+    // Collect information about all alias labels and all net labels across the design.
+    // An alias label "=FOO" on net N should ideally have a corresponding net label "FOO"
+    // on the *same* net.  If "FOO" appears on a *different* net, that is a similarity error.
+    // If no real driver exists on the alias label's net, that is a "without driver" error.
+
+    struct ALIAS_INFO
+    {
+        wxString                baseName;       // the name without the '=' prefix
+        SCH_ITEM*               item;
+        SCH_SHEET_PATH          sheet;
+        CONNECTION_SUBGRAPH*    subgraph;
+    };
+
+    std::vector<ALIAS_INFO> aliasLabels;
+
+    // Map from base name -> list of (subgraph, sheet, item) for real labels
+    std::unordered_map<wxString, std::vector<ALIAS_INFO>> realLabelMap;
+
+    for( CONNECTION_SUBGRAPH* subgraph : m_subgraphs )
+    {
+        if( subgraph->m_absorbed )
+            continue;
+
+        for( SCH_ITEM* item : subgraph->GetItems() )
+        {
+            if( item->Type() != SCH_LABEL_T )
+                continue;
+
+            const wxString& name = subgraph->GetNameForDriver( item );
+
+            if( name.StartsWith( wxS( "=" ) ) )
+            {
+                ALIAS_INFO info;
+                info.baseName = name.Mid( 1 );
+                info.item = item;
+                info.sheet = subgraph->GetSheet();
+                info.subgraph = subgraph;
+                aliasLabels.push_back( info );
+            }
+            else
+            {
+                ALIAS_INFO info;
+                info.baseName = name;
+                info.item = item;
+                info.sheet = subgraph->GetSheet();
+                info.subgraph = subgraph;
+                realLabelMap[name].push_back( info );
+            }
+        }
+    }
+
+    // Check 1: Alias label similarity — alias "=X" and real label "X" on different nets
+    if( settings.IsTestEnabled( ERCE_ALIAS_LABEL_SIMILARITY ) )
+    {
+        for( const ALIAS_INFO& alias : aliasLabels )
+        {
+            auto it = realLabelMap.find( alias.baseName );
+
+            if( it == realLabelMap.end() )
+                continue;
+
+            for( const ALIAS_INFO& real : it->second )
+            {
+                // Same net is fine — that's the intended usage
+                if( alias.subgraph->GetDriverConnection()
+                        && real.subgraph->GetDriverConnection()
+                        && alias.subgraph->GetDriverConnection()->Name()
+                                   == real.subgraph->GetDriverConnection()->Name() )
+                {
+                    continue;
+                }
+
+                // Different nets — report
+                std::shared_ptr<ERC_ITEM> ercItem =
+                        ERC_ITEM::Create( ERCE_ALIAS_LABEL_SIMILARITY );
+                ercItem->SetItems( alias.item, real.item );
+                ercItem->SetSheetSpecificPath( alias.sheet );
+                ercItem->SetItemsSheetPaths( alias.sheet, real.sheet );
+
+                SCH_MARKER* marker =
+                        new SCH_MARKER( std::move( ercItem ), alias.item->GetPosition() );
+                alias.sheet.LastScreen()->Append( marker );
+                errors++;
+            }
+        }
+    }
+
+    // Check 2: Alias without driver — alias "=X" on a net with no strong driver
+    if( settings.IsTestEnabled( ERCE_ALIAS_WITHOUT_DRIVER ) )
+    {
+        for( const ALIAS_INFO& alias : aliasLabels )
+        {
+            // Check whether the subgraph has any non-alias strong driver
+            bool hasRealDriver = false;
+
+            for( SCH_ITEM* driver : alias.subgraph->m_drivers )
+            {
+                if( driver == alias.item )
+                    continue;
+
+                if( !IsAliasLabel( driver, *alias.subgraph ) )
+                {
+                    hasRealDriver = true;
+                    break;
+                }
+            }
+
+            if( !hasRealDriver )
+            {
+                std::shared_ptr<ERC_ITEM> ercItem =
+                        ERC_ITEM::Create( ERCE_ALIAS_WITHOUT_DRIVER );
+                ercItem->SetItems( alias.item );
+                ercItem->SetSheetSpecificPath( alias.sheet );
+                ercItem->SetItemsSheetPaths( alias.sheet );
+
+                SCH_MARKER* marker =
+                        new SCH_MARKER( std::move( ercItem ), alias.item->GetPosition() );
+                alias.sheet.LastScreen()->Append( marker );
+                errors++;
+            }
         }
     }
 

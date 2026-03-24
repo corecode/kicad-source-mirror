@@ -752,6 +752,12 @@ private:
     int ercCheckSingleGlobalLabel();
 
     /**
+     * Check for alias labels (=X) that conflict with real labels (X) on different nets,
+     * and for alias labels on nets with no real driver.
+     */
+    int ercCheckAliasLabels();
+
+    /**
      * Get the number of pins in a given subgraph.
      *
      * @param aLocSubgraph Subgraph to search

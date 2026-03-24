@@ -87,7 +87,11 @@ enum ERCE_T
     ERCE_LABEL_MULTIPLE_WIRES,    ///< A label is connected to more than one wire.
     ERCE_UNCONNECTED_WIRE_ENDPOINT, ///< A label is connected to more than one wire.
 
-    ERCE_LAST = ERCE_UNCONNECTED_WIRE_ENDPOINT,
+    
+    ERCE_ALIAS_LABEL_SIMILARITY,  ///< Alias label =X and net label X on different nets.
+    ERCE_ALIAS_WITHOUT_DRIVER,    ///< Alias label =X on a net with no real driver.
+
+    ERCE_LAST = ERCE_ALIAS_WITHOUT_DRIVER,
 
     ERCE_DUPLICATE_PIN_ERROR,
     ERCE_PIN_TO_PIN_WARNING,    // pin connected to an other pin: warning level

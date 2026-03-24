@@ -244,6 +244,8 @@ private:
     static ERC_ITEM duplicateReference;
     static ERC_ITEM busEntryNeeded;
     static ERC_ITEM unconnectedWireEndpoint;
+    static ERC_ITEM aliasLabelSimilarity;
+    static ERC_ITEM aliasWithoutDriver;
 
     /// True if this item is specific to a sheet instance (as opposed to applying to all instances)
     std::optional<SCH_SHEET_PATH> m_sheetSpecificPath;

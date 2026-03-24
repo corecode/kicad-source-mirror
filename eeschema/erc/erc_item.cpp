@@ -229,6 +229,14 @@ ERC_ITEM ERC_ITEM::unconnectedWireEndpoint( ERCE_UNCONNECTED_WIRE_ENDPOINT,
         _HKI( "Unconnected wire endpoint" ),
         wxT( "unconnected_wire_endpoint" ) );
 
+ERC_ITEM ERC_ITEM::aliasLabelSimilarity( ERCE_ALIAS_LABEL_SIMILARITY,
+        _HKI( "Alias label and net label with similar names on different nets" ),
+        wxT( "alias_label_similarity" ) );
+
+ERC_ITEM ERC_ITEM::aliasWithoutDriver( ERCE_ALIAS_WITHOUT_DRIVER,
+        _HKI( "Alias label on net with no driver" ),
+        wxT( "alias_without_driver" ) );
+
 std::vector<std::reference_wrapper<RC_ITEM>> ERC_ITEM::allItemTypes(
         {
             ERC_ITEM::heading_connections,
@@ -261,6 +269,8 @@ std::vector<std::reference_wrapper<RC_ITEM>> ERC_ITEM::allItemTypes(
             ERC_ITEM::busToBusConflict,
             ERC_ITEM::busToNetConflict,
             ERC_ITEM::netNotBusMember,
+            ERC_ITEM::aliasLabelSimilarity,
+            ERC_ITEM::aliasWithoutDriver,
 
             ERC_ITEM::heading_misc,
             ERC_ITEM::unannotated,
@@ -345,6 +355,8 @@ std::shared_ptr<ERC_ITEM> ERC_ITEM::Create( int aErrorCode )
     case ERCE_MISSING_POWER_INPUT_PIN: return std::make_shared<ERC_ITEM>( missingPowerInputPin );
     case ERCE_MISSING_BIDI_PIN:        return std::make_shared<ERC_ITEM>( missingBidiPin );
     case ERCE_UNCONNECTED_WIRE_ENDPOINT: return std::make_shared<ERC_ITEM>( unconnectedWireEndpoint );
+    case ERCE_ALIAS_LABEL_SIMILARITY:  return std::make_shared<ERC_ITEM>( aliasLabelSimilarity );
+    case ERCE_ALIAS_WITHOUT_DRIVER:    return std::make_shared<ERC_ITEM>( aliasWithoutDriver );
     case ERCE_UNSPECIFIED:
     default:
         wxFAIL_MSG( wxS( "Unknown ERC error code" ) );

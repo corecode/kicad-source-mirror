@@ -63,6 +63,7 @@ set( QA_EESCHEMA_SRCS
     erc/test_erc_label_multiple_wires.cpp
     erc/test_erc_unconnected_wire_endpoints.cpp
     erc/test_erc_wire_bus_entry.cpp
+    erc/test_erc_alias_labels.cpp
 
     test_connectivity_algo.cpp
     test_issue18119_bus_hierarchy.cpp
