@@ -274,6 +274,8 @@ set( EESCHEMA_SIM_SRCS
 
     sim/legacy_workbook.cpp
 
+    system_diagram/system_diagram_analyzer.cpp
+
     widgets/tuner_slider.cpp
     widgets/tuner_slider_base.cpp
     )
