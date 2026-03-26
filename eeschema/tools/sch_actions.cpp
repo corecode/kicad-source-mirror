@@ -150,6 +150,13 @@ TOOL_ACTION SCH_ACTIONS::showDesignBlockPanel( TOOL_ACTION_ARGS()
         .Tooltip( _( "Show/hide design blocks library" ) )
         .Icon( BITMAPS::search_tree ) );
 
+TOOL_ACTION SCH_ACTIONS::showPdnAnalyzer( TOOL_ACTION_ARGS()
+        .Name( "eeschema.PdnAnalyzer.showPanel" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "PDN Impedance Analyzer" ) )
+        .Tooltip( _( "Show/hide the PDN impedance analyzer panel" ) )
+        .Icon( BITMAPS::sim_tune ) );
+
 TOOL_ACTION SCH_ACTIONS::saveSheetAsDesignBlock( TOOL_ACTION_ARGS()
         .Name( "eeschema.SchDesignBlockControl.saveSheetAsDesignBlock" )
         .Scope( AS_GLOBAL )

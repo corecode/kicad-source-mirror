@@ -94,6 +94,7 @@
 #include <widgets/hierarchy_pane.h>
 #include <widgets/sch_properties_panel.h>
 #include <widgets/sch_search_pane.h>
+#include <widgets/pdn_panel.h>
 #include <wildcards_and_files_ext.h>
 #include <wx/cmdline.h>
 #include <wx/app.h>
@@ -135,6 +136,7 @@ END_EVENT_TABLE()
 
 wxDEFINE_EVENT( EDA_EVT_SCHEMATIC_CHANGING, wxCommandEvent );
 wxDEFINE_EVENT( EDA_EVT_SCHEMATIC_CHANGED, wxCommandEvent );
+wxDEFINE_EVENT( EDA_EVT_SCH_SELECTION_CHANGED, wxCommandEvent );
 
 
 SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
@@ -144,6 +146,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
         m_diffSymbolDialog( nullptr ),
         m_symbolFieldsTableDialog( nullptr ),
         m_netNavigator( nullptr ),
+        m_pdnPanel( nullptr ),
         m_highlightedConnChanged( false ),
         m_designBlocksPane( nullptr )
 {
@@ -250,6 +253,9 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_auimgr.AddPane( createHighlightedNetNavigator(), defaultNetNavigatorPaneInfo() );
 
+    m_pdnPanel = new PDN_PANEL( this );
+    m_auimgr.AddPane( m_pdnPanel, defaultPdnAnalyzerPaneInfo() );
+
     m_auimgr.AddPane( m_optionsToolBar, EDA_PANE().VToolbar().Name( wxS( "OptToolbar" ) )
                       .Left().Layer( 2 ) );
 
@@ -284,6 +290,9 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     netNavigatorPane.Show( aui_cfg.show_net_nav_panel );
     propertiesPane.Show( aui_cfg.show_properties );
     designBlocksPane.Show( aui_cfg.design_blocks_show );
+
+    wxAuiPaneInfo& pdnPane = m_auimgr.GetPane( PdnAnalyzerPaneName() );
+    pdnPane.Show( aui_cfg.show_pdn_analyzer );
     updateSelectionFilterVisbility();
 
     // The selection filter doesn't need to grow in the vertical direction when docked
@@ -597,6 +606,12 @@ void SCH_EDIT_FRAME::setupUIConditions()
                 return m_auimgr.GetPane( NetNavigatorPaneName() ).IsShown();
             };
 
+    auto pdnAnalyzerCond =
+            [ this ] (const SELECTION& aSel )
+            {
+                return m_auimgr.GetPane( PdnAnalyzerPaneName() ).IsShown();
+            };
+
     auto designBlockCond =
             [ this ] (const SELECTION& aSel )
             {
@@ -622,6 +637,7 @@ void SCH_EDIT_FRAME::setupUIConditions()
     mgr->SetConditions( SCH_ACTIONS::showSearch,           CHECK( searchPaneCond ) );
     mgr->SetConditions( SCH_ACTIONS::showHierarchy,        CHECK( hierarchyNavigatorCond ) );
     mgr->SetConditions( SCH_ACTIONS::showNetNavigator,     CHECK( netNavigatorCond ) );
+    mgr->SetConditions( SCH_ACTIONS::showPdnAnalyzer,      CHECK( pdnAnalyzerCond ) );
     mgr->SetConditions( ACTIONS::showProperties,           CHECK( propertiesCond ) );
     mgr->SetConditions( SCH_ACTIONS::showDesignBlockPanel, CHECK( designBlockCond ) );
     mgr->SetConditions( ACTIONS::toggleGrid,               CHECK( cond.GridVisible() ) );
@@ -2374,6 +2390,30 @@ void SCH_EDIT_FRAME::SetHighlightedConnection( const wxString& aConnection,
 
     if( refreshNetNavigator )
         RefreshNetNavigator( aSelection );
+
+    wxAuiPaneInfo& pdnPane = m_auimgr.GetPane( PdnAnalyzerPaneName() );
+
+    if( pdnPane.IsShown() )
+        m_pdnPanel->OnHighlightedNetChanged( aConnection );
+}
+
+
+void SCH_EDIT_FRAME::TogglePdnAnalyzer()
+{
+    EESCHEMA_SETTINGS* cfg = eeconfig();
+
+    wxCHECK( cfg, /* void */ );
+
+    wxAuiPaneInfo& pdnPane = m_auimgr.GetPane( PdnAnalyzerPaneName() );
+
+    pdnPane.Show( !pdnPane.IsShown() );
+
+    cfg->m_AuiPanels.show_pdn_analyzer = pdnPane.IsShown();
+
+    m_auimgr.Update();
+
+    if( pdnPane.IsShown() )
+        m_pdnPanel->UpdateNetworks();
 }
 
 

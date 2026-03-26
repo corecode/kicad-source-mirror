@@ -197,6 +197,9 @@ public:
     static TOOL_ACTION setExcludeFromBoard;
     static TOOL_ACTION setDNP;
 
+    // PDN Analyzer
+    static TOOL_ACTION showPdnAnalyzer;
+
     // Design Block management
     static TOOL_ACTION showDesignBlockPanel;
     static TOOL_ACTION saveSheetAsDesignBlock;

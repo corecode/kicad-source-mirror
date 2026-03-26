@@ -36,6 +36,7 @@ include_directories(
     ./dialogs
     ./libview
     ./symbol_editor
+    ./system_diagram
     ./tools
     ./widgets
     )
@@ -274,6 +275,9 @@ set( EESCHEMA_SIM_SRCS
 
     sim/legacy_workbook.cpp
 
+    sim/pdn_analyzer.cpp
+    sim/spice_model_downloader.cpp
+
     system_diagram/system_diagram_analyzer.cpp
 
     widgets/tuner_slider.cpp
@@ -288,6 +292,7 @@ set( EESCHEMA_WIDGETS
     widgets/panel_sch_selection_filter_base.cpp
     widgets/panel_sch_selection_filter.cpp
     widgets/panel_symbol_chooser.cpp
+    widgets/pdn_panel.cpp
     widgets/pin_shape_combobox.cpp
     widgets/pin_type_combobox.cpp
     widgets/symbol_diff_widget.cpp
