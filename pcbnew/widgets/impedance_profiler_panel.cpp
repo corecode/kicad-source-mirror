@@ -276,14 +276,18 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     std::vector<double> impedances;
 
     // Cache: avoid re-solving identical cross-sections.
-    // Key = (layer, width) since stackup is constant along the board.
+    // Key includes layer, width, and reference plane presence (hasRefAbove/Below)
+    // so that traces passing over zone gaps get different impedance values.
     struct XS_KEY
     {
         PCB_LAYER_ID layer;
         int          width;
+        bool         refAbove;
+        bool         refBelow;
         bool operator<( const XS_KEY& o ) const
         {
-            return std::tie( layer, width ) < std::tie( o.layer, o.width );
+            return std::tie( layer, width, refAbove, refBelow )
+                   < std::tie( o.layer, o.width, o.refAbove, o.refBelow );
         }
     };
 
@@ -295,7 +299,10 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     for( const PATH_POINT& pt : path )
     {
         if( pt.isVia )
+        {
+            lastItem = nullptr; // force recompute after via (layer may change)
             continue;
+        }
 
         double z0 = 0.0;
 
@@ -306,7 +313,13 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         else
         {
             PCB_TRACK* track = static_cast<PCB_TRACK*>( pt.item );
-            XS_KEY key = { track->GetLayer(), track->GetWidth() };
+
+            LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
+                                                            pt.position,
+                                                            track->GetWidth() );
+
+            XS_KEY key = { track->GetLayer(), track->GetWidth(),
+                           geom.hasRefAbove, geom.hasRefBelow };
 
             auto cacheIt = z0Cache.find( key );
 
@@ -316,9 +329,6 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
             }
             else
             {
-                LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
-                                                                pt.position,
-                                                                track->GetWidth() );
 
                 // Build BEM cross-section from LAYER_GEOMETRY
                 XS_GEOMETRY xs;
