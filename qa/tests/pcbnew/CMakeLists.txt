@@ -55,6 +55,7 @@ set( QA_PCBNEW_SRCS
     test_zone.cpp
     test_zone_filler.cpp
     test_analytical_impedance.cpp
+    test_bem_2d_solver.cpp
     test_trace_path_walker.cpp
 
     drc/test_custom_rule_severities.cpp
@@ -130,9 +131,12 @@ include_directories(
     ${INC_AFTER}
 )
 
+find_package( Eigen3 REQUIRED NO_MODULE )
+
 target_link_libraries( qa_pcbnew
     qa_pcbnew_utils
     pcbnew_kiface_objects
+    Eigen3::Eigen
     3d-viewer
     connectivity
     pcbcommon

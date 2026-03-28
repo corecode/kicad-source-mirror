@@ -430,6 +430,7 @@ set( PCBNEW_CLASS_SRCS
     widgets/impedance_profiler_panel.cpp
 
     sipi/analytical_impedance.cpp
+    sipi/bem_2d_solver.cpp
     sipi/stackup_reader.cpp
     sipi/trace_path_walker.cpp
 
@@ -725,6 +726,8 @@ make_lexer(
     DSN
     )
 
+find_package( Eigen3 REQUIRED NO_MODULE )
+
 target_link_libraries( pcbnew_kiface_objects
     PRIVATE
         common
@@ -735,6 +738,7 @@ target_link_libraries( pcbnew_kiface_objects
         Boost::boost
         ZLIB::ZLIB
         ${OCC_LIBRARIES}
+        Eigen3::Eigen
     )
 
 add_library( pcbnew_kiface MODULE )
