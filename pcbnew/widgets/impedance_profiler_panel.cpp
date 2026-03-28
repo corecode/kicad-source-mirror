@@ -269,172 +269,259 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     const auto& path = walker.GetPath();
     const WALK_RESULT& result = walker.GetResult();
 
-    // Build impedance profile using BEM solver with cache
+    // Build impedance profile using BEM solver with neighbor detection.
+    // At each sample point, find nearby traces on the same layer and include
+    // them in the BEM cross-section. This makes Z₀ vary along the route as
+    // the trace passes through areas with different coupling.
     STACKUP_READER stackup( board );
 
     std::vector<double> positions;
     std::vector<double> impedances;
 
-    // Cache: avoid re-solving identical cross-sections.
-    // Key includes layer, width, and reference plane presence (hasRefAbove/Below)
-    // so that traces passing over zone gaps get different impedance values.
+    // Coupling horizon: ignore traces farther than this (nm).
+    // 3× the max dielectric height is the standard rule of thumb.
+    int couplingHorizon = 2000000; // 2mm default
+
+    // Cache keyed on quantized neighbor configuration to avoid redundant BEM solves.
+    // Key: (layer, width, refAbove, refBelow, quantized neighbor distances)
     struct XS_KEY
     {
-        PCB_LAYER_ID layer;
-        int          width;
-        bool         refAbove;
-        bool         refBelow;
+        PCB_LAYER_ID       layer;
+        int                width;
+        bool               refAbove;
+        bool               refBelow;
+        std::vector<int>   neighborKeys; // quantized (distance_um, width_nm) pairs
+
         bool operator<( const XS_KEY& o ) const
         {
-            return std::tie( layer, width, refAbove, refBelow )
-                   < std::tie( o.layer, o.width, o.refAbove, o.refBelow );
+            if( layer != o.layer ) return layer < o.layer;
+            if( width != o.width ) return width < o.width;
+            if( refAbove != o.refAbove ) return refAbove < o.refAbove;
+            if( refBelow != o.refBelow ) return refBelow < o.refBelow;
+            return neighborKeys < o.neighborKeys;
         }
     };
 
     std::map<XS_KEY, double> z0Cache;
 
-    BOARD_CONNECTED_ITEM* lastItem = nullptr;
-    double                lastZ0 = 0.0;
+    // Collect all track segments on the board (for neighbor search)
+    // grouped by layer for efficiency.
+    std::map<PCB_LAYER_ID, std::vector<PCB_TRACK*>> tracksByLayer;
 
-    for( const PATH_POINT& pt : path )
+    for( PCB_TRACK* t : board->Tracks() )
     {
+        if( t->Type() == PCB_VIA_T )
+            continue;
+
+        tracksByLayer[t->GetLayer()].push_back( t );
+    }
+
+    // Sample at each path point (not just per-segment) since neighbors vary
+    int  sampleInterval = std::max( 1, (int) path.size() / 200 ); // limit to ~200 samples
+    bool lastWasVia = false;
+
+    for( int pi = 0; pi < (int) path.size(); pi++ )
+    {
+        const PATH_POINT& pt = path[pi];
+
         if( pt.isVia )
         {
-            lastItem = nullptr; // force recompute after via (layer may change)
+            lastWasVia = true;
             continue;
         }
 
-        double z0 = 0.0;
-
-        if( pt.item == lastItem )
+        // Sample every Nth point (but always sample after a via and at start/end)
+        if( pi % sampleInterval != 0 && !lastWasVia
+            && pi != 0 && pi != (int) path.size() - 1 )
         {
-            z0 = lastZ0;
+            continue;
+        }
+
+        lastWasVia = false;
+
+        PCB_TRACK* track = static_cast<PCB_TRACK*>( pt.item );
+
+        LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
+                                                        pt.position,
+                                                        track->GetWidth() );
+
+        // Find neighbor traces at this point.
+        // Project each nearby track onto the perpendicular cut line and measure
+        // the lateral distance from our signal trace center.
+        struct NEIGHBOR
+        {
+            int distNm; // signed distance from signal center (nm), positive = right
+            int widthNm;
+        };
+
+        std::vector<NEIGHBOR> neighbors;
+
+        VECTOR2D normal( -pt.tangent.y, pt.tangent.x ); // perpendicular to trace direction
+
+        auto it = tracksByLayer.find( track->GetLayer() );
+
+        if( it != tracksByLayer.end() )
+        {
+            for( PCB_TRACK* other : it->second )
+            {
+                if( other == track )
+                    continue;
+
+                // Quick bounding-box rejection
+                VECTOR2I mid( ( other->GetStart().x + other->GetEnd().x ) / 2,
+                              ( other->GetStart().y + other->GetEnd().y ) / 2 );
+
+                VECTOR2D delta( mid.x - pt.position.x, mid.y - pt.position.y );
+                double alongDist = delta.x * pt.tangent.x + delta.y * pt.tangent.y;
+
+                // Only consider tracks that overlap with our current segment
+                double otherHalfLen = other->GetLength() / 2.0 + track->GetLength() / 2.0;
+
+                if( std::abs( alongDist ) > otherHalfLen )
+                    continue;
+
+                // Lateral distance
+                double lateralDist = delta.x * normal.x + delta.y * normal.y;
+
+                if( std::abs( lateralDist ) > couplingHorizon )
+                    continue;
+
+                neighbors.push_back(
+                        { static_cast<int>( lateralDist ), other->GetWidth() } );
+            }
+        }
+
+        // Sort neighbors by absolute distance for deterministic cache key
+        std::sort( neighbors.begin(), neighbors.end(),
+                   []( const NEIGHBOR& a, const NEIGHBOR& b )
+                   {
+                       return std::abs( a.distNm ) < std::abs( b.distNm );
+                   } );
+
+        // Limit to 4 nearest neighbors (BEM cost grows with conductor count)
+        if( neighbors.size() > 4 )
+            neighbors.resize( 4 );
+
+        // Build cache key with quantized neighbor distances (10µm buckets)
+        XS_KEY key;
+        key.layer = track->GetLayer();
+        key.width = track->GetWidth();
+        key.refAbove = geom.hasRefAbove;
+        key.refBelow = geom.hasRefBelow;
+
+        for( const NEIGHBOR& nb : neighbors )
+        {
+            key.neighborKeys.push_back( nb.distNm / 10000 ); // quantize to 10µm
+            key.neighborKeys.push_back( nb.widthNm );
+        }
+
+        double z0 = 0.0;
+        auto cacheIt = z0Cache.find( key );
+
+        if( cacheIt != z0Cache.end() )
+        {
+            z0 = cacheIt->second;
         }
         else
         {
-            PCB_TRACK* track = static_cast<PCB_TRACK*>( pt.item );
+            // Build BEM cross-section
+            XS_GEOMETRY xs;
+            double      condY = 0.0;
 
-            LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
-                                                            pt.position,
-                                                            track->GetWidth() );
+            bool hasAbove = ( geom.hAbove > 0.0 );
+            bool hasBelow = ( geom.hBelow > 0.0 );
 
-            XS_KEY key = { track->GetLayer(), track->GetWidth(),
-                           geom.hasRefAbove, geom.hasRefBelow };
-
-            auto cacheIt = z0Cache.find( key );
-
-            if( cacheIt != z0Cache.end() )
+            if( hasAbove && hasBelow )
             {
-                z0 = cacheIt->second;
+                xs.groundY = 0.0;
+                xs.hasUpperGround = true;
+                xs.upperGroundY = -( geom.hAbove + geom.hBelow );
+                condY = -geom.hBelow;
+                xs.epsilonR = ( geom.erAbove + geom.erBelow ) / 2.0;
+
+                if( std::abs( geom.erAbove - geom.erBelow ) > 0.5 )
+                {
+                    XS_DIELECTRIC_REGION regA, regB;
+                    regA.yTop = xs.upperGroundY;
+                    regA.yBottom = condY;
+                    regA.epsilonR = geom.erAbove;
+                    regB.yTop = condY;
+                    regB.yBottom = 0.0;
+                    regB.epsilonR = geom.erBelow;
+                    xs.dielectrics.push_back( regA );
+                    xs.dielectrics.push_back( regB );
+                }
+            }
+            else if( hasBelow )
+            {
+                xs.groundY = 0.0;
+                condY = -( geom.hBelow + geom.traceThickness / 2.0 );
+                xs.epsilonR = geom.erBelow;
+
+                XS_DIELECTRIC_REGION air, diel;
+                air.yTop = -10e-3;
+                air.yBottom = -geom.hBelow;
+                air.epsilonR = 1.0;
+                diel.yTop = -geom.hBelow;
+                diel.yBottom = 0.0;
+                diel.epsilonR = geom.erBelow;
+                xs.dielectrics.push_back( air );
+                xs.dielectrics.push_back( diel );
+            }
+            else if( hasAbove )
+            {
+                xs.groundY = -( geom.hAbove + geom.traceThickness );
+                condY = -geom.traceThickness / 2.0;
+                xs.epsilonR = geom.erAbove;
+
+                XS_DIELECTRIC_REGION diel, air;
+                diel.yTop = xs.groundY;
+                diel.yBottom = -geom.traceThickness;
+                diel.epsilonR = geom.erAbove;
+                air.yTop = -geom.traceThickness;
+                air.yBottom = 10e-3;
+                air.epsilonR = 1.0;
+                xs.dielectrics.push_back( diel );
+                xs.dielectrics.push_back( air );
+            }
+
+            // Signal conductor at x=0
+            XS_CONDUCTOR cond;
+            cond.centerX = 0.0;
+            cond.centerY = condY;
+            cond.width = geom.traceWidth;
+            cond.thickness = geom.traceThickness;
+            xs.conductors.push_back( cond );
+
+            // Add neighbor conductors at their lateral offsets
+            for( const NEIGHBOR& nb : neighbors )
+            {
+                XS_CONDUCTOR nbCond;
+                nbCond.centerX = nb.distNm * 1e-9; // nm → meters
+                nbCond.centerY = condY;             // same layer
+                nbCond.width = nb.widthNm * 1e-9;
+                nbCond.thickness = geom.traceThickness;
+                xs.conductors.push_back( nbCond );
+            }
+
+            // Solve — Z₀ of conductor 0 (our signal) accounts for coupling
+            BEM_2D_SOLVER solver;
+            solver.SetGeometry( xs );
+            solver.SetPanelsPerEdge( neighbors.empty() ? 15 : 10 );
+
+            if( solver.Solve() && solver.GetResult().Z0 > 0.0 )
+            {
+                z0 = solver.GetResult().Z0;
             }
             else
             {
-
-                // Build BEM cross-section from LAYER_GEOMETRY
-                XS_GEOMETRY xs;
-
-                XS_CONDUCTOR cond;
-                cond.centerX = 0.0;
-                cond.width = geom.traceWidth;
-                cond.thickness = geom.traceThickness;
-
-                bool hasAbove = ( geom.hAbove > 0.0 );
-                bool hasBelow = ( geom.hBelow > 0.0 );
-
-                if( hasAbove && hasBelow )
-                {
-                    // Stripline: conductor between two ground planes
-                    // Ground below at y=0, conductor centered between planes
-                    xs.groundY = 0.0;
-                    xs.hasUpperGround = true;
-                    xs.upperGroundY = -( geom.hAbove + geom.hBelow );
-
-                    cond.centerY = -geom.hBelow;
-                    xs.epsilonR = ( geom.erAbove + geom.erBelow ) / 2.0;
-
-                    // If εr differs significantly, add dielectric regions
-                    if( std::abs( geom.erAbove - geom.erBelow ) > 0.5 )
-                    {
-                        XS_DIELECTRIC_REGION regAbove;
-                        regAbove.yTop = xs.upperGroundY;
-                        regAbove.yBottom = cond.centerY;
-                        regAbove.epsilonR = geom.erAbove;
-
-                        XS_DIELECTRIC_REGION regBelow;
-                        regBelow.yTop = cond.centerY;
-                        regBelow.yBottom = 0.0;
-                        regBelow.epsilonR = geom.erBelow;
-
-                        xs.dielectrics.push_back( regAbove );
-                        xs.dielectrics.push_back( regBelow );
-                    }
-                }
-                else if( hasBelow )
-                {
-                    // Microstrip: conductor above ground, dielectric below, air above
-                    xs.groundY = 0.0;
-                    cond.centerY = -( geom.hBelow + geom.traceThickness / 2.0 );
-                    xs.epsilonR = geom.erBelow;
-
-                    XS_DIELECTRIC_REGION air;
-                    air.yTop = -10e-3; // far above
-                    air.yBottom = -geom.hBelow;
-                    air.epsilonR = 1.0;
-
-                    XS_DIELECTRIC_REGION diel;
-                    diel.yTop = -geom.hBelow;
-                    diel.yBottom = 0.0;
-                    diel.epsilonR = geom.erBelow;
-
-                    xs.dielectrics.push_back( air );
-                    xs.dielectrics.push_back( diel );
-                }
-                else if( hasAbove )
-                {
-                    // Inverted microstrip: ground above, dielectric above, air below
-                    xs.groundY = -( geom.hAbove + geom.traceThickness );
-                    cond.centerY = -geom.traceThickness / 2.0;
-                    xs.epsilonR = geom.erAbove;
-
-                    XS_DIELECTRIC_REGION diel;
-                    diel.yTop = xs.groundY;
-                    diel.yBottom = -geom.traceThickness;
-                    diel.epsilonR = geom.erAbove;
-
-                    XS_DIELECTRIC_REGION air;
-                    air.yTop = -geom.traceThickness;
-                    air.yBottom = 10e-3;
-                    air.epsilonR = 1.0;
-
-                    xs.dielectrics.push_back( diel );
-                    xs.dielectrics.push_back( air );
-                }
-
-                xs.conductors.push_back( cond );
-
-                // Solve
-                BEM_2D_SOLVER solver;
-                solver.SetGeometry( xs );
-                solver.SetPanelsPerEdge( 15 );
-
-                if( solver.Solve() && solver.GetResult().Z0 > 0.0 )
-                {
-                    z0 = solver.GetResult().Z0;
-                }
-                else
-                {
-                    // Fallback to analytical
-                    z0 = STACKUP_READER::ComputeZ0( geom );
-                }
-
-                z0Cache[key] = z0;
+                z0 = STACKUP_READER::ComputeZ0( geom );
             }
 
-            lastItem = pt.item;
-            lastZ0 = z0;
+            z0Cache[key] = z0;
         }
 
-        positions.push_back( pt.distFromStart / 1e6 ); // nm -> mm
+        positions.push_back( pt.distFromStart / 1e6 ); // nm → mm
         impedances.push_back( z0 );
     }
 
