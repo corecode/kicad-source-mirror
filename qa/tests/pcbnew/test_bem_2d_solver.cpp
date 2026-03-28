@@ -256,4 +256,143 @@ BOOST_AUTO_TEST_CASE( EffectiveEr )
 }
 
 
+/**
+ * Coupled microstrip: two parallel traces, compute Zdiff.
+ * w = 0.1mm each, spacing = 0.15mm edge-to-edge, h = 0.1mm, er = 4.4.
+ */
+BOOST_AUTO_TEST_CASE( CoupledMicrostrip )
+{
+    double w = 0.1e-3;
+    double s = 0.15e-3; // edge-to-edge gap
+    double t = 35e-6;
+    double h = 0.1e-3;
+    double er = 4.4;
+
+    XS_GEOMETRY geom;
+
+    // Left trace
+    XS_CONDUCTOR cond1;
+    cond1.centerX = -( s / 2.0 + w / 2.0 ); // centered left of the gap
+    cond1.centerY = -( h + t / 2.0 );
+    cond1.width = w;
+    cond1.thickness = t;
+    geom.conductors.push_back( cond1 );
+
+    // Right trace
+    XS_CONDUCTOR cond2;
+    cond2.centerX = ( s / 2.0 + w / 2.0 ); // centered right of the gap
+    cond2.centerY = -( h + t / 2.0 );
+    cond2.width = w;
+    cond2.thickness = t;
+    geom.conductors.push_back( cond2 );
+
+    geom.groundY = 0.0;
+    geom.epsilonR = er;
+
+    // Dielectric regions: FR4 below, air above
+    XS_DIELECTRIC_REGION dielAbove;
+    dielAbove.yTop = -10e-3;
+    dielAbove.yBottom = -h;
+    dielAbove.epsilonR = 1.0;
+
+    XS_DIELECTRIC_REGION dielBelow;
+    dielBelow.yTop = -h;
+    dielBelow.yBottom = 0.0;
+    dielBelow.epsilonR = er;
+
+    geom.dielectrics.push_back( dielAbove );
+    geom.dielectrics.push_back( dielBelow );
+
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( geom );
+    solver.SetPanelsPerEdge( 15 );
+
+    bool ok = solver.Solve();
+    BOOST_REQUIRE( ok );
+
+    const RLGC_RESULT& result = solver.GetResult();
+
+    BOOST_TEST_MESSAGE( "Coupled microstrip:" );
+    BOOST_TEST_MESSAGE( "  Z0 (single-ended) = " << result.Z0 << " Ohm" );
+    BOOST_TEST_MESSAGE( "  Zdiff = " << result.Zdiff << " Ohm" );
+    BOOST_TEST_MESSAGE( "  C matrix:\n" << result.C );
+    BOOST_TEST_MESSAGE( "  L matrix:\n" << result.L );
+
+    // Zdiff should be roughly 2× Z0 (exact only for zero coupling)
+    BOOST_CHECK_GT( result.Zdiff, 0.0 );
+    BOOST_CHECK_GT( result.Z0, 0.0 );
+
+    // Zdiff should be less than 2×Z0 (coupling reduces Zdiff)
+    BOOST_CHECK_LT( result.Zdiff, 2.0 * result.Z0 );
+
+    // C matrix should be symmetric with negative off-diagonal (mutual capacitance)
+    BOOST_CHECK_CLOSE( result.C( 0, 1 ), result.C( 1, 0 ), 0.1 );
+    BOOST_CHECK_LT( result.C( 0, 1 ), 0.0 ); // mutual C is negative in Maxwell form
+
+    // L matrix should be symmetric with positive off-diagonal (mutual inductance)
+    BOOST_CHECK_CLOSE( result.L( 0, 1 ), result.L( 1, 0 ), 0.1 );
+    BOOST_CHECK_GT( result.L( 0, 1 ), 0.0 );
+
+    // Zdiff should be in a reasonable range (typically 80-120Ω for FR4 diff pair)
+    BOOST_CHECK_GT( result.Zdiff, 50.0 );
+    BOOST_CHECK_LT( result.Zdiff, 200.0 );
+}
+
+
+/**
+ * Wider spacing should give Zdiff closer to 2×Z0 (less coupling).
+ */
+BOOST_AUTO_TEST_CASE( CoupledSpacingEffect )
+{
+    auto makeGeom = []( double spacing ) -> XS_GEOMETRY
+    {
+        double w = 0.1e-3;
+        double t = 35e-6;
+        double h = 0.1e-3;
+
+        XS_GEOMETRY geom;
+
+        XS_CONDUCTOR c1;
+        c1.centerX = -( spacing / 2.0 + w / 2.0 );
+        c1.centerY = -( h + t / 2.0 );
+        c1.width = w;
+        c1.thickness = t;
+        geom.conductors.push_back( c1 );
+
+        XS_CONDUCTOR c2;
+        c2.centerX = ( spacing / 2.0 + w / 2.0 );
+        c2.centerY = -( h + t / 2.0 );
+        c2.width = w;
+        c2.thickness = t;
+        geom.conductors.push_back( c2 );
+
+        geom.groundY = 0.0;
+        geom.epsilonR = 4.4;
+        return geom;
+    };
+
+    BEM_2D_SOLVER solverClose;
+    solverClose.SetGeometry( makeGeom( 0.1e-3 ) );
+    solverClose.SetPanelsPerEdge( 10 );
+    solverClose.Solve();
+
+    BEM_2D_SOLVER solverFar;
+    solverFar.SetGeometry( makeGeom( 0.5e-3 ) );
+    solverFar.SetPanelsPerEdge( 10 );
+    solverFar.Solve();
+
+    BOOST_TEST_MESSAGE( "Close spacing: Zdiff = " << solverClose.GetResult().Zdiff
+                        << ", Z0 = " << solverClose.GetResult().Z0 );
+    BOOST_TEST_MESSAGE( "Far spacing:   Zdiff = " << solverFar.GetResult().Zdiff
+                        << ", Z0 = " << solverFar.GetResult().Z0 );
+
+    // Wider spacing → less coupling → Zdiff closer to 2×Z0
+    double ratioClose = solverClose.GetResult().Zdiff / ( 2.0 * solverClose.GetResult().Z0 );
+    double ratioFar = solverFar.GetResult().Zdiff / ( 2.0 * solverFar.GetResult().Z0 );
+
+    BOOST_TEST_MESSAGE( "Zdiff/(2*Z0) ratio: close=" << ratioClose << " far=" << ratioFar );
+    BOOST_CHECK_GT( ratioFar, ratioClose );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

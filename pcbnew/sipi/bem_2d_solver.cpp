@@ -405,9 +405,11 @@ bool BEM_2D_SOLVER::Solve()
     {
         // Differential impedance from odd-mode:
         // Z_odd = sqrt(L_odd / C_odd)
-        // L_odd = L11 - L12,  C_odd = C11 + C12 (note: C12 is negative in the C matrix)
+        // In the Maxwell capacitance matrix, C12 < 0 (= -C_mutual).
+        // Odd-mode: C_odd = C11 - C12 = C11 + |C12|  (coupling adds capacitance)
+        // Odd-mode: L_odd = L11 - L12  (opposing currents reduce inductance)
         double L_odd = L( 0, 0 ) - L( 0, 1 );
-        double C_odd = C( 0, 0 ) + C( 0, 1 ); // C01 is typically negative
+        double C_odd = C( 0, 0 ) - C( 0, 1 );
 
         if( C_odd > 0.0 && L_odd > 0.0 )
         {
