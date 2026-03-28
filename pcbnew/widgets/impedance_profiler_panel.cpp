@@ -413,6 +413,10 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
 
         VECTOR2D normal( -pt.tangent.y, pt.tangent.x ); // perpendicular to trace direction
 
+        // Minimum edge-to-edge distance to count as a neighbor (not overlapping).
+        // Two traces closer than this are either the same trace or a DRC violation.
+        int minEdgeToEdge = 10000; // 10µm in nm
+
         auto it = tracksByLayer.find( track->GetLayer() );
 
         if( it != tracksByLayer.end() )
@@ -422,23 +426,59 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
                 if( other == track )
                     continue;
 
-                // Quick bounding-box rejection
-                VECTOR2I mid( ( other->GetStart().x + other->GetEnd().x ) / 2,
-                              ( other->GetStart().y + other->GetEnd().y ) / 2 );
-
-                VECTOR2D delta( mid.x - pt.position.x, mid.y - pt.position.y );
-                double alongDist = delta.x * pt.tangent.x + delta.y * pt.tangent.y;
-
-                // Only consider tracks that overlap with our current segment
-                double otherHalfLen = other->GetLength() / 2.0 + track->GetLength() / 2.0;
-
-                if( std::abs( alongDist ) > otherHalfLen )
+                // Skip segments that share an endpoint with the current segment.
+                // These are topologically connected (the next/prev segment at a bend),
+                // not coupling neighbors. But segments on the same net that DON'T
+                // share an endpoint (e.g., adjacent serpentine legs) ARE neighbors.
+                if( other->GetStart() == track->GetStart()
+                    || other->GetStart() == track->GetEnd()
+                    || other->GetEnd() == track->GetStart()
+                    || other->GetEnd() == track->GetEnd() )
+                {
                     continue;
+                }
 
-                // Lateral distance
+                // Compute the closest point on the other segment to our sample point,
+                // then project onto our perpendicular to get the lateral distance.
+                VECTOR2D otherDir( other->GetEnd().x - other->GetStart().x,
+                                   other->GetEnd().y - other->GetStart().y );
+                double otherLen = otherDir.EuclideanNorm();
+
+                if( otherLen < 1.0 )
+                    continue; // degenerate segment
+
+                otherDir = otherDir / otherLen;
+
+                // Parameter t along the other segment for closest point to our position
+                VECTOR2D toSample( pt.position.x - other->GetStart().x,
+                                   pt.position.y - other->GetStart().y );
+                double t = toSample.x * otherDir.x + toSample.y * otherDir.y;
+                t = std::max( 0.0, std::min( t, otherLen ) );
+
+                // Closest point on other segment
+                VECTOR2D closest( other->GetStart().x + t * otherDir.x,
+                                  other->GetStart().y + t * otherDir.y );
+
+                VECTOR2D delta( closest.x - pt.position.x, closest.y - pt.position.y );
+
+                // Lateral distance (projection onto our perpendicular)
                 double lateralDist = delta.x * normal.x + delta.y * normal.y;
 
                 if( std::abs( lateralDist ) > couplingHorizon )
+                    continue;
+
+                // Check edge-to-edge distance
+                double halfWidths = ( track->GetWidth() + other->GetWidth() ) / 2.0;
+                double edgeToEdge = std::abs( lateralDist ) - halfWidths;
+
+                if( edgeToEdge < minEdgeToEdge )
+                    continue; // overlapping or touching — not a real neighbor
+
+                // Along-track check: the closest point should be roughly "beside" us,
+                // not far ahead or behind
+                double alongDist = delta.x * pt.tangent.x + delta.y * pt.tangent.y;
+
+                if( std::abs( alongDist ) > track->GetLength() )
                     continue;
 
                 neighbors.push_back(

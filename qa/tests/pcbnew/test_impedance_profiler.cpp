@@ -110,6 +110,8 @@ static std::vector<NEIGHBOR_SAMPLE> extractNeighborInfo(
         sample.traceWidth = track->GetWidth();
         sample.distFromStart = pt.distFromStart;
 
+        int minEdgeToEdge = 10000; // 10µm
+
         auto it = tracksByLayer.find( track->GetLayer() );
 
         if( it != tracksByLayer.end() )
@@ -119,20 +121,49 @@ static std::vector<NEIGHBOR_SAMPLE> extractNeighborInfo(
                 if( other == track )
                     continue;
 
-                VECTOR2I mid( ( other->GetStart().x + other->GetEnd().x ) / 2,
-                              ( other->GetStart().y + other->GetEnd().y ) / 2 );
-
-                VECTOR2D delta( mid.x - pt.position.x, mid.y - pt.position.y );
-                double alongDist = delta.x * pt.tangent.x + delta.y * pt.tangent.y;
-
-                double otherHalfLen = other->GetLength() / 2.0 + track->GetLength() / 2.0;
-
-                if( std::abs( alongDist ) > otherHalfLen )
+                // Skip endpoint-connected segments (same trace at a bend)
+                if( other->GetStart() == track->GetStart()
+                    || other->GetStart() == track->GetEnd()
+                    || other->GetEnd() == track->GetStart()
+                    || other->GetEnd() == track->GetEnd() )
+                {
                     continue;
+                }
+
+                // Closest point on other segment to our sample point
+                VECTOR2D otherDir( other->GetEnd().x - other->GetStart().x,
+                                   other->GetEnd().y - other->GetStart().y );
+                double otherLen = otherDir.EuclideanNorm();
+
+                if( otherLen < 1.0 )
+                    continue;
+
+                otherDir = otherDir / otherLen;
+
+                VECTOR2D toSample( pt.position.x - other->GetStart().x,
+                                   pt.position.y - other->GetStart().y );
+                double t = toSample.x * otherDir.x + toSample.y * otherDir.y;
+                t = std::max( 0.0, std::min( t, otherLen ) );
+
+                VECTOR2D closest( other->GetStart().x + t * otherDir.x,
+                                  other->GetStart().y + t * otherDir.y );
+
+                VECTOR2D delta( closest.x - pt.position.x, closest.y - pt.position.y );
 
                 double lateralDist = delta.x * sample.normal.x + delta.y * sample.normal.y;
 
                 if( std::abs( lateralDist ) > couplingHorizon )
+                    continue;
+
+                double halfWidths = ( track->GetWidth() + other->GetWidth() ) / 2.0;
+                double edgeToEdge = std::abs( lateralDist ) - halfWidths;
+
+                if( edgeToEdge < minEdgeToEdge )
+                    continue;
+
+                double alongDist = delta.x * pt.tangent.x + delta.y * pt.tangent.y;
+
+                if( std::abs( alongDist ) > track->GetLength() )
                     continue;
 
                 NEIGHBOR_SAMPLE::NEIGHBOR_INFO nb;
