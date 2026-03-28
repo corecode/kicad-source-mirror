@@ -162,27 +162,44 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
 
     double signalZ = m_copperLayers[signalIdx].zPosition;
 
+    // Helper: find the dielectric layer whose z-range overlaps the interval
+    // between two copper layer centers. Use midpoint containment — the
+    // dielectric whose center is between the two copper centers.
+    auto findDielectric = [&]( double aZUpper, double aZLower, double& aEr, double& aTanD )
+    {
+        for( const DIELECTRIC_INFO& diel : m_dielectrics )
+        {
+            double dielCenter = ( diel.zTop + diel.zBottom ) / 2.0;
+
+            if( dielCenter > aZUpper && dielCenter < aZLower )
+            {
+                aEr = diel.epsilonR;
+                aTanD = diel.lossTangent;
+                return;
+            }
+        }
+    };
+
+    // Helper: compute dielectric height between two copper layer indices
+    auto copperSpacing = [&]( int aIdxA, int aIdxB ) -> double
+    {
+        double zA = m_copperLayers[aIdxA].zPosition;
+        double zB = m_copperLayers[aIdxB].zPosition;
+        double tA = m_copperLayers[aIdxA].thickness;
+        double tB = m_copperLayers[aIdxB].thickness;
+        // Edge-to-edge distance between copper layers
+        return std::abs( zB - zA ) - tA / 2.0 - tB / 2.0;
+    };
+
     // Search upward for the nearest copper layer that is a reference plane
     for( int i = signalIdx - 1; i >= 0; i-- )
     {
         if( isReferencePlane( m_copperLayers[i].layerId, aPosition ) )
         {
-            double refZ = m_copperLayers[i].zPosition;
-            geom.hAbove = signalZ - refZ - m_copperLayers[i].thickness / 2.0
-                          - geom.traceThickness / 2.0;
+            geom.hAbove = copperSpacing( i, signalIdx );
             geom.hasRefAbove = true;
-
-            // Find the dielectric between them
-            for( const DIELECTRIC_INFO& diel : m_dielectrics )
-            {
-                if( diel.zTop >= refZ && diel.zBottom <= signalZ )
-                {
-                    geom.erAbove = diel.epsilonR;
-                    geom.tanDAbove = diel.lossTangent;
-                    break;
-                }
-            }
-
+            findDielectric( m_copperLayers[i].zPosition, signalZ,
+                            geom.erAbove, geom.tanDAbove );
             break;
         }
     }
@@ -192,61 +209,45 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
     {
         if( isReferencePlane( m_copperLayers[i].layerId, aPosition ) )
         {
-            double refZ = m_copperLayers[i].zPosition;
-            geom.hBelow = refZ - signalZ - m_copperLayers[i].thickness / 2.0
-                          - geom.traceThickness / 2.0;
+            geom.hBelow = copperSpacing( signalIdx, i );
             geom.hasRefBelow = true;
-
-            // Find the dielectric between them
-            for( const DIELECTRIC_INFO& diel : m_dielectrics )
-            {
-                if( diel.zTop >= signalZ && diel.zBottom <= refZ )
-                {
-                    geom.erBelow = diel.epsilonR;
-                    geom.tanDBelow = diel.lossTangent;
-                    break;
-                }
-            }
-
+            findDielectric( signalZ, m_copperLayers[i].zPosition,
+                            geom.erBelow, geom.tanDBelow );
             break;
         }
     }
 
-    // If no reference plane found above or below via zone check, fall back to
-    // assuming the adjacent copper layers are planes (common for inner layers)
-    if( !geom.hasRefAbove && signalIdx > 0 )
+    // Fallback: if no zone-confirmed reference plane, assume adjacent copper
+    // layers are planes. This is the common case for boards without zone fills
+    // or for inner layers where the adjacent layer is always a plane.
+    if( !geom.hasRefAbove && !geom.hasRefBelow )
     {
-        double refZ = m_copperLayers[signalIdx - 1].zPosition;
-        geom.hAbove = signalZ - refZ - m_copperLayers[signalIdx - 1].thickness / 2.0
-                      - geom.traceThickness / 2.0;
-        // Keep hasRefAbove = false so the caller knows this is assumed
-
-        for( const DIELECTRIC_INFO& diel : m_dielectrics )
+        // No zone-verified planes at all — use nearest copper layers as assumed planes
+        if( signalIdx > 0 )
         {
-            if( diel.zTop >= refZ && diel.zBottom <= signalZ )
-            {
-                geom.erAbove = diel.epsilonR;
-                geom.tanDAbove = diel.lossTangent;
-                break;
-            }
+            geom.hAbove = copperSpacing( signalIdx - 1, signalIdx );
+            findDielectric( m_copperLayers[signalIdx - 1].zPosition, signalZ,
+                            geom.erAbove, geom.tanDAbove );
+        }
+
+        if( signalIdx < (int) m_copperLayers.size() - 1 )
+        {
+            geom.hBelow = copperSpacing( signalIdx, signalIdx + 1 );
+            findDielectric( signalZ, m_copperLayers[signalIdx + 1].zPosition,
+                            geom.erBelow, geom.tanDBelow );
         }
     }
-
-    if( !geom.hasRefBelow && signalIdx < (int) m_copperLayers.size() - 1 )
+    else if( !geom.hasRefAbove && signalIdx > 0 )
     {
-        double refZ = m_copperLayers[signalIdx + 1].zPosition;
-        geom.hBelow = refZ - signalZ - m_copperLayers[signalIdx + 1].thickness / 2.0
-                      - geom.traceThickness / 2.0;
-
-        for( const DIELECTRIC_INFO& diel : m_dielectrics )
-        {
-            if( diel.zTop >= signalZ && diel.zBottom <= refZ )
-            {
-                geom.erBelow = diel.epsilonR;
-                geom.tanDBelow = diel.lossTangent;
-                break;
-            }
-        }
+        geom.hAbove = copperSpacing( signalIdx - 1, signalIdx );
+        findDielectric( m_copperLayers[signalIdx - 1].zPosition, signalZ,
+                        geom.erAbove, geom.tanDAbove );
+    }
+    else if( !geom.hasRefBelow && signalIdx < (int) m_copperLayers.size() - 1 )
+    {
+        geom.hBelow = copperSpacing( signalIdx, signalIdx + 1 );
+        findDielectric( signalZ, m_copperLayers[signalIdx + 1].zPosition,
+                        geom.erBelow, geom.tanDBelow );
     }
 
     return geom;

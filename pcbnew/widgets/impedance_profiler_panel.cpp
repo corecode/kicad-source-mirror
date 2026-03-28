@@ -43,6 +43,8 @@
 #include <set>
 
 
+
+
 IMPEDANCE_PROFILER_PANEL::IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent ) :
         WX_PANEL( aParent ),
         m_frame( aParent ),
@@ -107,24 +109,30 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
 
     wxPen tracePen( wxColour( 0, 120, 200 ), 2, wxPENSTYLE_SOLID );
 
+    m_xAxis = new mpScaleX( _( "Position (mm)" ), mpALIGN_BOTTOM, true );
+    m_yAxis = new mpScaleY( _( "Z0 (\u03A9)" ), mpALIGN_LEFT, true );
+
+    m_plotWindow->AddLayer( m_xAxis, false );
+    m_plotWindow->AddLayer( m_yAxis, false );
+
     m_impedanceTrace = new mpFXYVector( _( "Z0" ) );
     m_impedanceTrace->SetPen( tracePen );
     m_impedanceTrace->SetContinuity( true );
+    m_impedanceTrace->SetScale( m_xAxis, m_yAxis );
+    m_impedanceTrace->SetVisible( false );
+    m_plotWindow->AddLayer( m_impedanceTrace, false );
+
     wxPen targetPen( wxColour( 200, 50, 50 ), 1, wxPENSTYLE_SHORT_DASH );
 
     m_targetLine = new mpFXYVector( _( "Target" ) );
     m_targetLine->SetPen( targetPen );
     m_targetLine->SetContinuity( true );
-
-    m_xAxis = new mpScaleX( _( "Position (mm)" ), mpALIGN_BOTTOM, true );
-    m_yAxis = new mpScaleY( _( "Z0 (\u03A9)" ), mpALIGN_LEFT, true );
-
-    m_plotWindow->AddLayer( m_xAxis );
-    m_plotWindow->AddLayer( m_yAxis );
-    m_plotWindow->AddLayer( m_impedanceTrace );
-    m_plotWindow->AddLayer( m_targetLine );
+    m_targetLine->SetScale( m_xAxis, m_yAxis );
+    m_targetLine->SetVisible( false );
+    m_plotWindow->AddLayer( m_targetLine, false );
 
     m_plotWindow->SetMargins( 15, 10, 30, 50 );
+    m_plotWindow->UpdateAll();
 
     mainSizer->Add( m_plotWindow, 1, wxEXPAND | wxLEFT | wxRIGHT, 4 );
 
@@ -302,6 +310,58 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         return;
     }
 
+    // Debug: log first segment geometry for diagnosis
+    bool allZero = true;
+
+    for( double z : impedances )
+    {
+        if( z > 0.0 )
+        {
+            allZero = false;
+            break;
+        }
+    }
+
+    if( allZero )
+    {
+        // Try to diagnose why — get geometry for first segment
+        PCB_TRACK* firstTrack = nullptr;
+
+        for( const PATH_POINT& pt : path )
+        {
+            if( !pt.isVia )
+            {
+                firstTrack = static_cast<PCB_TRACK*>( pt.item );
+                break;
+            }
+        }
+
+        wxString diag;
+
+        if( firstTrack )
+        {
+            LAYER_GEOMETRY geom = stackup.GetLayerGeometry( firstTrack->GetLayer(),
+                                                            firstTrack->GetStart(),
+                                                            firstTrack->GetWidth() );
+
+            diag.Printf( _( "Z0=0: layer=%d, w=%.3fmm, hAbove=%.3fmm, hBelow=%.3fmm, "
+                            "erAbove=%.1f, erBelow=%.1f, refAbove=%d, refBelow=%d, defaults=%d" ),
+                         firstTrack->GetLayer(),
+                         geom.traceWidth * 1e3,
+                         geom.hAbove * 1e3, geom.hBelow * 1e3,
+                         geom.erAbove, geom.erBelow,
+                         geom.hasRefAbove, geom.hasRefBelow,
+                         geom.usingDefaults );
+        }
+        else
+        {
+            diag = _( "Z0=0: no track segments found" );
+        }
+
+        updateStatus( diag );
+        return;
+    }
+
     updatePlot( positions, impedances );
 
     // Build status string
@@ -318,12 +378,17 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
                        totalLen, result.segmentsVisited, result.totalSegmentsOnNet );
     }
 
-    if( !impedances.empty() )
-    {
-        double minZ = *std::min_element( impedances.begin(), impedances.end() );
-        double maxZ = *std::max_element( impedances.begin(), impedances.end() );
+    double minZ = *std::min_element( impedances.begin(), impedances.end() );
+    double maxZ = *std::max_element( impedances.begin(), impedances.end() );
 
-        status += wxString::Format( wxS( " | Z0: %.1f–%.1f \u03A9" ), minZ, maxZ );
+    status += wxString::Format( wxS( " | Z0: %.1f\u2013%.1f \u03A9" ), minZ, maxZ );
+
+    if( stackup.GetLayerGeometry( static_cast<PCB_TRACK*>( path.front().item )->GetLayer(),
+                                  path.front().position,
+                                  static_cast<PCB_TRACK*>( path.front().item )->GetWidth() )
+                .usingDefaults )
+    {
+        status += _( " (default stackup)" );
     }
 
     updateStatus( status );
@@ -334,6 +399,7 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
                                            const std::vector<double>& aImpedances )
 {
     m_impedanceTrace->SetData( aPositions, aImpedances );
+    m_impedanceTrace->SetVisible( true );
 
     // Draw target impedance line across the full range
     if( !aPositions.empty() && m_targetZ0 > 0.0 )
@@ -341,10 +407,33 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
         std::vector<double> targetX = { aPositions.front(), aPositions.back() };
         std::vector<double> targetY = { m_targetZ0, m_targetZ0 };
         m_targetLine->SetData( targetX, targetY );
+        m_targetLine->SetVisible( true );
     }
 
+    // Propagate data extents to the scale objects — this is essential for
+    // mpFXY::Plot to map data coordinates to pixels correctly.
+    m_xAxis->ResetDataRange();
+    m_yAxis->ResetDataRange();
+    m_impedanceTrace->UpdateScales();
+
+    if( m_targetLine->IsVisible() )
+        m_targetLine->UpdateScales();
+
+    // Extend Y range to include target and add padding
+    double yMin = *std::min_element( aImpedances.begin(), aImpedances.end() );
+    double yMax = *std::max_element( aImpedances.begin(), aImpedances.end() );
+
+    if( m_targetZ0 > 0.0 )
+    {
+        yMin = std::min( yMin, m_targetZ0 );
+        yMax = std::max( yMax, m_targetZ0 );
+    }
+
+    double yPad = std::max( ( yMax - yMin ) * 0.1, 5.0 );
+    m_yAxis->ExtendDataRange( yMin - yPad, yMax + yPad );
+
+    m_plotWindow->UpdateAll();
     m_plotWindow->Fit();
-    m_plotWindow->Refresh();
 }
 
 
