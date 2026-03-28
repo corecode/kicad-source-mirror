@@ -267,13 +267,62 @@ void BEM_2D_SOLVER::fillCoefficientMatrix( bool aVacuum )
     {
         for( int j = 0; j < nb; j++ )
         {
-            // Potential at panel i center due to unit charge density on panel j
-            // For constant-charge elements: phi_i = sum_j (sigma_j * L_j * G(r_i, r_j))
-            // The coefficient matrix entry is L_j * G(center_i, center_j)
-            m_coeffMatrix( i, j ) = m_panels[j].length
-                                    * greenFunction( m_panels[i].cx, m_panels[i].cy,
-                                                     m_panels[j].cx, m_panels[j].cy,
-                                                     aVacuum );
+            if( i == j )
+            {
+                // Self-interaction: evaluate greenFunction at a small normal
+                // offset from center to get all image terms correctly, then
+                // replace the singular direct term with the analytical integral.
+                //
+                // Analytical self-integral of -ln(r)/(2πε) over a panel of length L:
+                //   A_ii^{direct} = L × (-ln(L/2) + 1) / (2πε)
+
+                double L = m_panels[j].length;
+                double cx = m_panels[j].cx;
+                double cy = m_panels[j].cy;
+
+                // Offset along the panel normal (1% of panel length)
+                double offset = L * 0.01;
+                double ox = cx + m_panels[j].nx * offset;
+                double oy = cy + m_panels[j].ny * offset;
+
+                // Full Green's function at offset (includes direct + all images)
+                double gAtOffset = greenFunction( ox, oy, cx, cy, aVacuum );
+
+                // Direct term at the offset distance: -ln(r²)/(4πε) = -ln(offset²)/(4πε)
+                double localEr = 1.0;
+
+                if( !aVacuum )
+                {
+                    localEr = m_geometry.epsilonR;
+
+                    for( const XS_DIELECTRIC_REGION& reg : m_geometry.dielectrics )
+                    {
+                        if( cy >= reg.yTop && cy <= reg.yBottom )
+                        {
+                            localEr = reg.epsilonR;
+                            break;
+                        }
+                    }
+                }
+
+                double invEps = 1.0 / ( 4.0 * M_PI * EPS0 * localEr );
+                double directAtOffset = -logR2( ox - cx, oy - cy ) * invEps;
+
+                // Analytical self-integral (replaces the direct term)
+                double selfIntegral = L * ( -log( L / 2.0 ) + 1.0 ) * 2.0 * invEps;
+
+                // A_ii = L × G(offset) - L × G_direct(offset) + self_integral
+                // = L × G_images(offset) + self_integral
+                m_coeffMatrix( i, j ) = L * gAtOffset - L * directAtOffset + selfIntegral;
+            }
+            else
+            {
+                // Off-diagonal: standard center-to-center evaluation
+                m_coeffMatrix( i, j ) = m_panels[j].length
+                                        * greenFunction( m_panels[i].cx, m_panels[i].cy,
+                                                         m_panels[j].cx, m_panels[j].cy,
+                                                         aVacuum );
+            }
         }
     }
 }
