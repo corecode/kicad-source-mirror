@@ -46,15 +46,42 @@ struct XS_CONDUCTOR
  * Cross-section geometry for the BEM solver.
  * Contains signal conductors and the reference plane configuration.
  */
+/**
+ * A dielectric region in the cross-section, spanning a y-range.
+ * Regions are ordered top-to-bottom (increasing y downward).
+ */
+struct XS_DIELECTRIC_REGION
+{
+    double yTop = 0.0;        ///< Top of this region (meters, smaller y)
+    double yBottom = 0.0;     ///< Bottom of this region (meters, larger y)
+    double epsilonR = 1.0;    ///< Relative permittivity
+};
+
+
+/**
+ * Cross-section geometry for the BEM solver.
+ * Contains signal conductors, ground planes, and dielectric regions.
+ *
+ * Coordinate convention: y increases downward. Ground planes are horizontal.
+ * For microstrip: ground at y=0, dielectric from 0 to -h (above ground),
+ *                 conductor at y ≈ -h, air above.
+ */
 struct XS_GEOMETRY
 {
     std::vector<XS_CONDUCTOR> conductors;   ///< Signal conductors (1 or 2 for diff pair)
 
-    double groundY = 0.0;                   ///< Y position of the ground plane (meters)
+    double groundY = 0.0;                   ///< Y position of the lower ground plane (meters)
     bool   hasUpperGround = false;          ///< True if there's a ground plane above
     double upperGroundY = 0.0;              ///< Y position of upper ground plane
 
-    double epsilonR = 4.4;                  ///< Relative permittivity of the dielectric
+    /// Dielectric regions. If empty, a single uniform dielectric is assumed.
+    /// For microstrip: two regions — dielectric between ground and conductor,
+    /// air above the conductor. The solver uses the region boundaries to
+    /// construct the proper Green's function with dielectric images.
+    std::vector<XS_DIELECTRIC_REGION> dielectrics;
+
+    /// Fallback uniform εr used when dielectrics list is empty.
+    double epsilonR = 4.4;
 };
 
 

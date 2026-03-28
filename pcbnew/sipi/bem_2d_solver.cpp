@@ -122,90 +122,135 @@ void BEM_2D_SOLVER::buildPanels()
 }
 
 
-double BEM_2D_SOLVER::greenFunction( double x, double y, double xs, double ys,
-                                     double aEpsilonR ) const
+/**
+ * Helper: log of squared distance, clamped to avoid log(0).
+ */
+static double logR2( double dx, double dy )
 {
-    // 2D Green's function for Laplace's equation: G = -ln(r) / (2*pi*eps)
-    //
-    // With method of images for ground plane(s):
-    // - Lower ground at y = groundY: image charge at y_image = 2*groundY - ys
-    //   (reflected across the ground plane)
-    // - Upper ground at y = upperGroundY: image series converges in ~20 terms
-    //
-    // For microstrip (single ground plane below):
-    //   G = -1/(2*pi*eps) * [ln(r) - ln(r_image)]
-    //   where r is distance to source, r_image is distance to image
-
-    double eps = EPS0 * aEpsilonR;
-
-    // Distance to the real source
-    double dx = x - xs;
-    double dy = y - ys;
     double r2 = dx * dx + dy * dy;
 
-    // Avoid log(0) for self-interaction — use panel half-length as regularization
     if( r2 < 1e-30 )
         r2 = 1e-30;
 
-    double potential = -log( r2 ) / ( 4.0 * M_PI * eps );
-    // Note: log(r^2)/(4*pi) = log(r)/(2*pi)
+    return log( r2 );
+}
 
-    // Image in the lower ground plane
-    double yImage = 2.0 * m_geometry.groundY - ys;
-    double dyImage = y - yImage;
-    double rImage2 = dx * dx + dyImage * dyImage;
 
-    if( rImage2 < 1e-30 )
-        rImage2 = 1e-30;
+double BEM_2D_SOLVER::greenFunction( double x, double y, double xs, double ys,
+                                     bool aVacuum ) const
+{
+    //
+    // 2D Green's function: potential at (x,y) from unit line charge at (xs,ys).
+    //
+    // Handles:
+    // 1. PEC ground plane at y = groundY via method of images
+    // 2. Dielectric interface: image series with reflection coefficient k,
+    //    alternating between ground and interface reflections. The series
+    //    decays as k^n and converges for |k| < 1 (always true for εr > 0).
+    //
+    // The image positions for ground at y_g, interface at y_i, source at y_s:
+    //   spacing = y_g - y_i
+    //
+    //   n=0: ground image at 2*y_g - y_s, weight -1
+    //   n≥1, group A: weight  k^n at y_s - 2n*sp
+    //                 weight -k^n at 2n*sp - y_s + 2*y_g  [reflected form]
+    //   n≥1, group B: weight  k^n at -2n*sp - y_s + 2*y_g [= 2*y_g - y_s - 2n*sp]
+    //                 weight -k^n at y_s + 2n*sp
+    //
+    // where k = (ε_source_region - ε_other_region) / (ε_source + ε_other)
+    //
+    double dx = x - xs;
+    double yg = m_geometry.groundY;
 
-    // Image has opposite sign → subtract
-    potential -= -log( rImage2 ) / ( 4.0 * M_PI * eps );
+    // Determine the local εr at the source point (for the denominator).
+    // Both source and observation are on conductor surfaces, which are all
+    // in the same medium. The Green's function uses this medium's εr.
+    double localEr = 1.0;
 
-    if( m_geometry.hasUpperGround )
+    if( !aVacuum )
     {
-        // For stripline: image series between two parallel ground planes.
-        // Images alternate between reflections in upper and lower planes.
-        // The series converges quickly (20 terms is more than enough).
-        double hLower = m_geometry.groundY;
-        double hUpper = m_geometry.upperGroundY;
-        double spacing = hLower - hUpper; // Distance between planes (positive)
+        localEr = m_geometry.epsilonR; // fallback uniform
 
-        for( int n = 1; n <= 20; n++ )
+        for( const XS_DIELECTRIC_REGION& reg : m_geometry.dielectrics )
         {
-            // Images from reflections in both planes, alternating signs
-            // Even images (same sign as original): at ys + 2*n*spacing and ys - 2*n*spacing
-            // Odd images (opposite sign): reflected across each plane
+            if( ys >= reg.yTop && ys <= reg.yBottom )
+            {
+                localEr = reg.epsilonR;
+                break;
+            }
+        }
+    }
 
-            // Image in upper plane, order n
-            double yImgUp = 2.0 * n * spacing + ( 2.0 * hUpper - ys );
-            double dyUp = y - yImgUp;
-            double rUp2 = dx * dx + dyUp * dyUp;
+    double invEps = 1.0 / ( 4.0 * M_PI * EPS0 * localEr );
 
-            if( rUp2 > 1e-30 )
-                potential -= -log( rUp2 ) / ( 4.0 * M_PI * eps ); // opposite sign image
+    // Direct source + ground plane image
+    double potential = -logR2( dx, y - ys ) * invEps;                  // source
+    potential += logR2( dx, y - ( 2.0 * yg - ys ) ) * invEps;         // ground image (weight -1)
 
-            // Image in lower plane, order n
-            double yImgDown = -2.0 * n * spacing + ( 2.0 * hLower - ys );
-            double dyDown = y - yImgDown;
-            double rDown2 = dx * dx + dyDown * dyDown;
+    // Dielectric interface images: alternating reflections between ground
+    // and interface produce image charges with weights ±k^n.
+    //
+    // For a single interface between dielectrics[0] (top) and dielectrics[1] (bottom):
+    //   Interface at y = y_i = dielectrics[0].yBottom
+    //   k = (ε_top - ε_bottom) / (ε_top + ε_bottom)
+    //   spacing sp = y_g - y_i
+    //
+    //   For n = 1, 2, ...:
+    //     Group A: +k^n at y_s - 2n·sp,  -k^n at (2·y_g - y_s) + 2n·sp
+    //     Group B: +k^n at (2·y_g - y_s) - 2n·sp,  -k^n at y_s + 2n·sp
 
-            if( rDown2 > 1e-30 )
-                potential -= -log( rDown2 ) / ( 4.0 * M_PI * eps );
+    if( !aVacuum && m_geometry.dielectrics.size() >= 2 )
+    {
+        double yInterface = m_geometry.dielectrics[0].yBottom;
 
-            // Even-order images (same sign)
-            double yEvenUp = ys - 2.0 * n * spacing;
-            double dyEU = y - yEvenUp;
-            double rEU2 = dx * dx + dyEU * dyEU;
+        double erTop = m_geometry.dielectrics[0].epsilonR;
+        double erBot = m_geometry.dielectrics[1].epsilonR;
 
-            if( rEU2 > 1e-30 )
-                potential += -log( rEU2 ) / ( 4.0 * M_PI * eps );
+        double k = ( erTop - erBot ) / ( erTop + erBot );
+        double sp = yg - yInterface;
 
-            double yEvenDown = ys + 2.0 * n * spacing;
-            double dyED = y - yEvenDown;
-            double rED2 = dx * dx + dyED * dyED;
+        if( sp > 0.0 )
+        {
+            double yGndImg = 2.0 * yg - ys;
+            double kn = k;
 
-            if( rED2 > 1e-30 )
-                potential += -log( rED2 ) / ( 4.0 * M_PI * eps );
+            for( int n = 1; n <= 25; n++ )
+            {
+                double shift = 2.0 * n * sp;
+
+                // Group A
+                potential -= logR2( dx, y - ( ys - shift ) ) * invEps * kn;
+                potential += logR2( dx, y - ( yGndImg + shift ) ) * invEps * kn;
+
+                // Group B
+                potential -= logR2( dx, y - ( yGndImg - shift ) ) * invEps * kn;
+                potential += logR2( dx, y - ( ys + shift ) ) * invEps * kn;
+
+                kn *= k;
+
+                if( std::abs( kn ) < 1e-12 )
+                    break;
+            }
+        }
+    }
+
+    // Upper ground plane image series (for stripline — no dielectric interface case)
+    if( m_geometry.hasUpperGround && m_geometry.dielectrics.size() < 2 )
+    {
+        double yUpper = m_geometry.upperGroundY;
+        double spacing = yg - yUpper;
+
+        if( spacing > 0 )
+        {
+            for( int n = 1; n <= 20; n++ )
+            {
+                double shift = 2.0 * n * spacing;
+
+                potential += logR2( dx, y - ( 2.0 * yUpper - ys + shift ) ) * invEps;
+                potential += logR2( dx, y - ( 2.0 * yg - ys - shift ) ) * invEps;
+                potential -= logR2( dx, y - ( ys - shift ) ) * invEps;
+                potential -= logR2( dx, y - ( ys + shift ) ) * invEps;
+            }
         }
     }
 
@@ -213,7 +258,7 @@ double BEM_2D_SOLVER::greenFunction( double x, double y, double xs, double ys,
 }
 
 
-void BEM_2D_SOLVER::fillCoefficientMatrix( double aEpsilonR )
+void BEM_2D_SOLVER::fillCoefficientMatrix( bool aVacuum )
 {
     int nb = m_panels.size();
     m_coeffMatrix.resize( nb, nb );
@@ -228,18 +273,18 @@ void BEM_2D_SOLVER::fillCoefficientMatrix( double aEpsilonR )
             m_coeffMatrix( i, j ) = m_panels[j].length
                                     * greenFunction( m_panels[i].cx, m_panels[i].cy,
                                                      m_panels[j].cx, m_panels[j].cy,
-                                                     aEpsilonR );
+                                                     aVacuum );
         }
     }
 }
 
 
-Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitance( double aEpsilonR )
+Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitance( bool aVacuum )
 {
     int numConductors = m_geometry.conductors.size();
     int nb = m_panels.size();
 
-    fillCoefficientMatrix( aEpsilonR );
+    fillCoefficientMatrix( aVacuum );
 
     Eigen::MatrixXd C( numConductors, numConductors );
     C.setZero();
@@ -284,10 +329,11 @@ bool BEM_2D_SOLVER::Solve()
     int numConductors = m_geometry.conductors.size();
 
     // Step 1: Solve with physical dielectric → capacitance matrix C
-    Eigen::MatrixXd C = solveCapacitance( m_geometry.epsilonR );
+    Eigen::MatrixXd C = solveCapacitance( false );
 
-    // Step 2: Solve with vacuum (eps_r = 1) → C0, then L = mu0*eps0 * C0^{-1}
-    Eigen::MatrixXd C0 = solveCapacitance( 1.0 );
+    // Step 2: Solve with vacuum (eps_r = 1, no dielectric images) → C0
+    // Then L = mu0*eps0 * C0^{-1}
+    Eigen::MatrixXd C0 = solveCapacitance( true );
     Eigen::MatrixXd L = MU0 * EPS0 * C0.inverse();
 
     m_result.C = C;

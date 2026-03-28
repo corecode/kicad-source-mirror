@@ -76,14 +76,16 @@ private:
     };
 
     void buildPanels();
-    void fillCoefficientMatrix( double aEpsilonR );
-    Eigen::MatrixXd solveCapacitance( double aEpsilonR );
+    void fillCoefficientMatrix( bool aVacuum );
+    Eigen::MatrixXd solveCapacitance( bool aVacuum );
 
     /**
-     * Green's function for a line charge in the presence of ground plane(s).
-     * Returns the potential at (x,y) due to a unit line charge at (xs,ys).
+     * Green's function for a line charge in the presence of ground plane(s)
+     * and (optionally) dielectric interfaces.
+     *
+     * @param aVacuum  If true, use εr=1 everywhere (no dielectric images).
      */
-    double greenFunction( double x, double y, double xs, double ys, double aEpsilonR ) const;
+    double greenFunction( double x, double y, double xs, double ys, bool aVacuum ) const;
 
     XS_GEOMETRY             m_geometry;
     RLGC_RESULT             m_result;
