@@ -44,6 +44,46 @@
 #include <set>
 
 
+/**
+ * X axis scale that formats tick labels as "X.X mm" (position along trace).
+ */
+class PROFILER_SCALE_X : public mpScaleX
+{
+public:
+    PROFILER_SCALE_X() : mpScaleX( wxS( "mm" ), mpALIGN_BOTTOM, true ) {}
+
+protected:
+    void formatLabels() override
+    {
+        for( auto& tl : m_tickLabels )
+        {
+            if( tl.visible )
+                tl.label = wxString::Format( wxS( "%.1f" ), tl.pos );
+        }
+    }
+};
+
+
+/**
+ * Y axis scale that formats tick labels as "XX.X Ω" (impedance).
+ */
+class PROFILER_SCALE_Y : public mpScaleY
+{
+public:
+    PROFILER_SCALE_Y() : mpScaleY( wxS( "\u03A9" ), mpALIGN_LEFT, true ) {}
+
+protected:
+    void formatLabels() override
+    {
+        for( auto& tl : m_tickLabels )
+        {
+            if( tl.visible )
+                tl.label = wxString::Format( wxS( "%.1f" ), tl.pos );
+        }
+    }
+};
+
+
 
 
 IMPEDANCE_PROFILER_PANEL::IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent ) :
@@ -111,8 +151,8 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
 
     wxPen tracePen( wxColour( 0, 120, 200 ), 2, wxPENSTYLE_SOLID );
 
-    m_xAxis = new mpScaleX( _( "Position (mm)" ), mpALIGN_BOTTOM, true );
-    m_yAxis = new mpScaleY( _( "Z0 (\u03A9)" ), mpALIGN_LEFT, true );
+    m_xAxis = new PROFILER_SCALE_X();
+    m_yAxis = new PROFILER_SCALE_Y();
 
     m_plotWindow->AddLayer( m_xAxis, false );
     m_plotWindow->AddLayer( m_yAxis, false );
@@ -630,7 +670,9 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
 
     double yPad = ( yMax - yMin ) * 0.15;
 
-    // Neighbor distance overlay — scale to impedance Y range
+    // Neighbor distance overlay — scale to impedance Y range.
+    // Closer neighbor → lower on plot (matches impedance: coupling lowers Z₀).
+    // distance=0 → yMin, distance=horizon → yMax, no neighbor → yMax (top).
     if( !aNeighborDists.empty() )
     {
         double horizon = 2.0; // mm coupling horizon
@@ -641,15 +683,15 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
         {
             if( aNeighborDists[i] > 0.0 )
             {
-                // Scale: distance 0 → yMax+pad, distance=horizon → yMin-pad
                 double frac = aNeighborDists[i] / horizon;
-                scaledDist[i] = ( yMax + yPad ) - frac * ( ( yMax + yPad ) - ( yMin - yPad ) );
-                scaledDist[i] = std::max( scaledDist[i], yMin - yPad );
+                frac = std::min( frac, 1.0 );
+                // distance 0 → yMin (bottom), distance=horizon → yMax (top)
+                scaledDist[i] = ( yMin - yPad ) + frac * ( ( yMax + yPad ) - ( yMin - yPad ) );
                 anyNeighbors = true;
             }
             else
             {
-                scaledDist[i] = yMin - yPad;
+                scaledDist[i] = yMax + yPad; // no neighbor → top of plot
             }
         }
 
