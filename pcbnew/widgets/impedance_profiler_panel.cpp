@@ -567,7 +567,8 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
 
     double minZ = *std::min_element( impedances.begin(), impedances.end() );
     double maxZ = *std::max_element( impedances.begin(), impedances.end() );
-    status += wxString::Format( wxS( " | Z0: %.1f\u2013%.1f \u03A9" ), minZ, maxZ );
+    status += wxString::Format( wxS( " | Z0: %.2f\u2013%.2f \u03A9 (\u0394%.2f)" ),
+                                minZ, maxZ, maxZ - minZ );
 
     // Neighbor stats
     int samplesWithNeighbors = 0;
@@ -592,36 +593,26 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
 {
     m_impedanceTrace->SetData( aPositions, aImpedances );
     m_impedanceTrace->SetVisible( true );
+    m_targetLine->SetVisible( false );
 
-    // Draw target impedance line across the full range
-    if( !aPositions.empty() && m_targetZ0 > 0.0 )
+    // Y range: auto-scale to impedance data ONLY (no target line influence)
+    double yMin = *std::min_element( aImpedances.begin(), aImpedances.end() );
+    double yMax = *std::max_element( aImpedances.begin(), aImpedances.end() );
+
+    // Ensure some Y range even for perfectly flat traces
+    if( yMax - yMin < 0.5 )
     {
-        std::vector<double> targetX = { aPositions.front(), aPositions.back() };
-        std::vector<double> targetY = { m_targetZ0, m_targetZ0 };
-        m_targetLine->SetData( targetX, targetY );
-        m_targetLine->SetVisible( true );
+        double mid = ( yMax + yMin ) / 2.0;
+        yMin = mid - 2.0;
+        yMax = mid + 2.0;
     }
 
-    // Neighbor distance overlay: scale distance to impedance range so it's
-    // visible on the same Y axis. 0 mm distance → shown at yMax,
-    // couplingHorizon distance → shown at yMin. No neighbor → hidden (yMin).
+    double yPad = ( yMax - yMin ) * 0.15;
+
+    // Neighbor distance overlay — scale to impedance Y range
     if( !aNeighborDists.empty() )
     {
-        double yMin = *std::min_element( aImpedances.begin(), aImpedances.end() );
-        double yMax = *std::max_element( aImpedances.begin(), aImpedances.end() );
-
-        if( m_targetZ0 > 0.0 )
-        {
-            yMin = std::min( yMin, m_targetZ0 );
-            yMax = std::max( yMax, m_targetZ0 );
-        }
-
-        double yPad = std::max( ( yMax - yMin ) * 0.1, 5.0 );
-        double yBottom = yMin - yPad;
-        double yTop = yMax + yPad;
-
-        // Scale: distance 0 → yTop, distance 2mm (horizon) → yBottom
-        double horizon = 2.0; // mm
+        double horizon = 2.0; // mm coupling horizon
         std::vector<double> scaledDist( aNeighborDists.size() );
         bool anyNeighbors = false;
 
@@ -629,13 +620,15 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
         {
             if( aNeighborDists[i] > 0.0 )
             {
-                scaledDist[i] = yTop - ( aNeighborDists[i] / horizon ) * ( yTop - yBottom );
-                scaledDist[i] = std::max( scaledDist[i], yBottom );
+                // Scale: distance 0 → yMax+pad, distance=horizon → yMin-pad
+                double frac = aNeighborDists[i] / horizon;
+                scaledDist[i] = ( yMax + yPad ) - frac * ( ( yMax + yPad ) - ( yMin - yPad ) );
+                scaledDist[i] = std::max( scaledDist[i], yMin - yPad );
                 anyNeighbors = true;
             }
             else
             {
-                scaledDist[i] = yBottom; // no neighbor → bottom of plot
+                scaledDist[i] = yMin - yPad;
             }
         }
 
@@ -649,29 +642,19 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
             m_neighborTrace->SetVisible( false );
         }
     }
+    else
+    {
+        m_neighborTrace->SetVisible( false );
+    }
 
     // Propagate data extents to the scale objects
     m_xAxis->ResetDataRange();
     m_yAxis->ResetDataRange();
     m_impedanceTrace->UpdateScales();
 
-    if( m_targetLine->IsVisible() )
-        m_targetLine->UpdateScales();
-
     if( m_neighborTrace->IsVisible() )
         m_neighborTrace->UpdateScales();
 
-    // Extend Y range to include target and add padding
-    double yMin = *std::min_element( aImpedances.begin(), aImpedances.end() );
-    double yMax = *std::max_element( aImpedances.begin(), aImpedances.end() );
-
-    if( m_targetZ0 > 0.0 )
-    {
-        yMin = std::min( yMin, m_targetZ0 );
-        yMax = std::max( yMax, m_targetZ0 );
-    }
-
-    double yPad = std::max( ( yMax - yMin ) * 0.1, 5.0 );
     m_yAxis->ExtendDataRange( yMin - yPad, yMax + yPad );
 
     m_plotWindow->UpdateAll();
