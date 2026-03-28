@@ -56,6 +56,7 @@ set( QA_PCBNEW_SRCS
     test_zone_filler.cpp
     test_analytical_impedance.cpp
     test_bem_2d_solver.cpp
+    test_impedance_profiler.cpp
     test_trace_path_walker.cpp
 
     drc/test_custom_rule_severities.cpp
