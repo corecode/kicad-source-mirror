@@ -295,8 +295,9 @@ BOOST_AUTO_TEST_CASE( NeighborDetectionDiag )
     if( sameNetNeighbors > 0 )
         BOOST_TEST_MESSAGE( "  Min same-net distance: " << minSameNetDist << " mm" );
 
-    // Key assertion: no neighbor should be within the trace width
-    // (that would mean overlapping segments, which is a detection bug)
+    // REGRESSION: no neighbor should overlap (edge-to-edge < 0).
+    // This catches the bug where endpoint-connected segments show up as
+    // neighbors at 0.03mm distance.
     for( const auto& s : samples )
     {
         double halfTraceWidth = s.traceWidth / 2e6; // mm
@@ -305,21 +306,17 @@ BOOST_AUTO_TEST_CASE( NeighborDetectionDiag )
         {
             double d = std::abs( nb.distNm ) / 1e6; // mm
             double halfNbWidth = nb.widthNm / 2e6;
-            double minPhysical = halfTraceWidth + halfNbWidth;
+            double edgeToEdge = d - halfTraceWidth - halfNbWidth;
 
-            // Edge-to-edge distance should be non-negative
-            // (center-to-center minus half-widths)
-            double edgeToEdge = d - minPhysical;
-
-            if( edgeToEdge < -0.01 ) // allow 10µm tolerance
-            {
-                wxString warn;
-                warn.Printf( wxS( "WARNING: Overlapping neighbor detected at "
-                                   "dist=%.3fmm (edge-to-edge=%.3fmm), net=%d (%s)" ),
-                              d, edgeToEdge, nb.netCode, nb.netName );
-                BOOST_TEST_MESSAGE( warn );
-            }
+            BOOST_CHECK_GE( edgeToEdge, -0.01 ); // no overlapping neighbors
         }
+    }
+
+    // REGRESSION: minimum neighbor distance should be physically realistic
+    // (> trace width, i.e., > ~0.1mm for typical traces)
+    if( minDist < 1e9 )
+    {
+        BOOST_CHECK_GT( minDist, 0.1 );
     }
 }
 

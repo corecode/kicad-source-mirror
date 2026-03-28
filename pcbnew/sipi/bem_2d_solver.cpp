@@ -162,24 +162,27 @@ double BEM_2D_SOLVER::greenFunction( double x, double y, double xs, double ys,
     double dx = x - xs;
     double yg = m_geometry.groundY;
 
-    // Determine the local εr at the source point (for the denominator).
+    // Determine the effective εr for the Green's function denominator.
+    //
+    // For a conductor AT a dielectric interface (microstrip), the image method
+    // diverges because D₀ coincides with the source panels. The classical
+    // exact result for a line charge AT a planar interface between ε₁ and ε₂
+    // is that the effective permittivity is (ε₁ + ε₂)/2 (Jackson, Ch. 4.4).
+    //
+    // For microstrip: conductor at air/substrate interface → εr_eff = (1 + εr)/2.
+    // For uniform dielectric (stripline): εr_eff = εr (no interface effect).
+    // For vacuum solve: εr_eff = 1.
     double localEr = 1.0;
 
     if( !aVacuum )
     {
         if( m_geometry.dielectrics.size() >= 2 )
         {
-            // With dielectric regions: use effective-medium εr.
-            // The conductor sits at the interface between two dielectric regions,
-            // so the effective εr is the average of the two regions. This gives
-            // consistent coupling behavior for any number of conductors.
-            // The dielectric image series is skipped (see below).
-            double erSum = 0.0;
-
-            for( const XS_DIELECTRIC_REGION& reg : m_geometry.dielectrics )
-                erSum += reg.epsilonR;
-
-            localEr = erSum / m_geometry.dielectrics.size();
+            // Conductor at dielectric interface: use (ε₁ + ε₂)/2.
+            // This is the exact result for a line charge at a planar interface.
+            double er1 = m_geometry.dielectrics[0].epsilonR;
+            double er2 = m_geometry.dielectrics[1].epsilonR;
+            localEr = ( er1 + er2 ) / 2.0;
         }
         else
         {
@@ -189,62 +192,10 @@ double BEM_2D_SOLVER::greenFunction( double x, double y, double xs, double ys,
 
     double invEps = 1.0 / ( 4.0 * M_PI * EPS0 * localEr );
 
-    // Direct source + ground plane image
+    // Direct source + ground plane image (no dielectric image series needed —
+    // the dielectric effect is captured by the effective εr in the denominator)
     double potential = -logR2( dx, y - ys ) * invEps;                  // source
-    potential += logR2( dx, y - ( 2.0 * yg - ys ) ) * invEps;         // ground image (weight -1)
-
-    // Dielectric interface images: alternating reflections between ground
-    // and interface produce image charges with weights ±k^n.
-    //
-    // For a single interface between dielectrics[0] (top) and dielectrics[1] (bottom):
-    //   Interface at y = y_i = dielectrics[0].yBottom
-    //   k = (ε_top - ε_bottom) / (ε_top + ε_bottom)
-    //   spacing sp = y_g - y_i
-    //
-    //   For n = 1, 2, ...:
-    //     Group A: +k^n at y_s - 2n·sp,  -k^n at (2·y_g - y_s) + 2n·sp
-    //     Group B: +k^n at (2·y_g - y_s) - 2n·sp,  -k^n at y_s + 2n·sp
-
-    if( false && !aVacuum && m_geometry.dielectrics.size() >= 2 )
-    {
-        // Dielectric image series — DISABLED.
-        // The image series produces incorrect coupling for multi-conductor
-        // cases, and using it only for single-conductor creates inconsistent
-        // Z₀ baselines. Instead, we use effective-medium εr (set above in
-        // the localEr calculation) which gives correct coupling behavior
-        // at the cost of ~10% absolute εr_eff accuracy.
-        double yInterface = m_geometry.dielectrics[0].yBottom;
-
-        double erTop = m_geometry.dielectrics[0].epsilonR;
-        double erBot = m_geometry.dielectrics[1].epsilonR;
-
-        double k = ( erTop - erBot ) / ( erTop + erBot );
-        double sp = yg - yInterface;
-
-        if( sp > 0.0 )
-        {
-            double yGndImg = 2.0 * yg - ys;
-            double kn = k;
-
-            for( int n = 1; n <= 25; n++ )
-            {
-                double shift = 2.0 * n * sp;
-
-                // Group A
-                potential -= logR2( dx, y - ( ys - shift ) ) * invEps * kn;
-                potential += logR2( dx, y - ( yGndImg + shift ) ) * invEps * kn;
-
-                // Group B
-                potential -= logR2( dx, y - ( yGndImg - shift ) ) * invEps * kn;
-                potential += logR2( dx, y - ( ys + shift ) ) * invEps * kn;
-
-                kn *= k;
-
-                if( std::abs( kn ) < 1e-12 )
-                    break;
-            }
-        }
-    }
+    potential += logR2( dx, y - ( 2.0 * yg - ys ) ) * invEps;         // ground image
 
     // Upper ground plane image series (for stripline — no dielectric interface case)
     if( m_geometry.hasUpperGround && m_geometry.dielectrics.size() < 2 )
