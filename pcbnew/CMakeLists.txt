@@ -428,6 +428,8 @@ set( PCBNEW_CLASS_SRCS
     widgets/net_inspector_panel.cpp
     widgets/pcb_net_inspector_panel.cpp
 
+    sipi/analytical_impedance.cpp
+    sipi/stackup_reader.cpp
     sipi/trace_path_walker.cpp
 
     )
