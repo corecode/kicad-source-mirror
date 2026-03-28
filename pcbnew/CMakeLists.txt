@@ -428,6 +428,8 @@ set( PCBNEW_CLASS_SRCS
     widgets/net_inspector_panel.cpp
     widgets/pcb_net_inspector_panel.cpp
 
+    sipi/trace_path_walker.cpp
+
     )
 
 set( PCBNEW_GIT_SRCS
