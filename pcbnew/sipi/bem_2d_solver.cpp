@@ -388,23 +388,19 @@ bool BEM_2D_SOLVER::Solve()
     m_result.C = C;
     m_result.L = L;
 
-    // Derive impedance
-    if( numConductors == 1 )
+    // Derive impedance.
+    // Z₀ of conductor 0 is always sqrt(L₀₀/C₀₀). The self-terms L₀₀ and C₀₀
+    // already account for the presence of all other conductors (grounded in the
+    // BEM solve), so this works for any number of conductors.
+    if( C( 0, 0 ) > 0.0 && L( 0, 0 ) > 0.0 )
     {
-        // Single-ended impedance: Z0 = sqrt(L/C)
-        double Lval = L( 0, 0 );
-        double Cval = C( 0, 0 );
-
-        if( Cval > 0.0 && Lval > 0.0 )
-        {
-            m_result.Z0 = sqrt( Lval / Cval );
-            m_result.erEff = C( 0, 0 ) / C0( 0, 0 );
-        }
+        m_result.Z0 = sqrt( L( 0, 0 ) / C( 0, 0 ) );
+        m_result.erEff = C( 0, 0 ) / C0( 0, 0 );
     }
-    else if( numConductors == 2 )
+
+    if( numConductors >= 2 )
     {
         // Differential impedance from odd-mode:
-        // Z_odd = sqrt(L_odd / C_odd)
         // In the Maxwell capacitance matrix, C12 < 0 (= -C_mutual).
         // Odd-mode: C_odd = C11 - C12 = C11 + |C12|  (coupling adds capacitance)
         // Odd-mode: L_odd = L11 - L12  (opposing currents reduce inductance)
@@ -415,13 +411,6 @@ bool BEM_2D_SOLVER::Solve()
         {
             double Z_odd = sqrt( L_odd / C_odd );
             m_result.Zdiff = 2.0 * Z_odd;
-        }
-
-        // Single-ended Z0 from self terms
-        if( C( 0, 0 ) > 0.0 && L( 0, 0 ) > 0.0 )
-        {
-            m_result.Z0 = sqrt( L( 0, 0 ) / C( 0, 0 ) );
-            m_result.erEff = C( 0, 0 ) / C0( 0, 0 );
         }
     }
 
