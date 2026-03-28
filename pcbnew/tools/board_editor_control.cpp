@@ -709,6 +709,13 @@ int BOARD_EDITOR_CONTROL::ToggleNetInspector( const TOOL_EVENT& aEvent )
 }
 
 
+int BOARD_EDITOR_CONTROL::ToggleImpedanceProfiler( const TOOL_EVENT& aEvent )
+{
+    getEditFrame<PCB_EDIT_FRAME>()->ToggleImpedanceProfiler();
+    return 0;
+}
+
+
 int BOARD_EDITOR_CONTROL::ToggleSearch( const TOOL_EVENT& aEvent )
 {
     getEditFrame<PCB_EDIT_FRAME>()->ToggleSearch();
@@ -1755,6 +1762,7 @@ void BOARD_EDITOR_CONTROL::setTransitions()
     Go( &BOARD_EDITOR_CONTROL::ToggleLayersManager,    PCB_ACTIONS::showLayersManager.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ToggleProperties,       ACTIONS::showProperties.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ToggleNetInspector,     PCB_ACTIONS::showNetInspector.MakeEvent() );
+    Go( &BOARD_EDITOR_CONTROL::ToggleImpedanceProfiler, PCB_ACTIONS::showImpedanceProfiler.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ToggleSearch,           PCB_ACTIONS::showSearch.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::TogglePythonConsole,    PCB_ACTIONS::showPythonConsole.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::RepairBoard,            PCB_ACTIONS::repairBoard.MakeEvent() );

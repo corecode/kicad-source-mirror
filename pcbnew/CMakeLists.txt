@@ -427,6 +427,7 @@ set( PCBNEW_CLASS_SRCS
     widgets/search_handlers.cpp
     widgets/net_inspector_panel.cpp
     widgets/pcb_net_inspector_panel.cpp
+    widgets/impedance_profiler_panel.cpp
 
     sipi/analytical_impedance.cpp
     sipi/stackup_reader.cpp

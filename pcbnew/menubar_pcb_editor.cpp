@@ -234,6 +234,7 @@ void PCB_EDIT_FRAME::doReCreateMenuBar()
     showHidePanels->Add( PCB_ACTIONS::showSearch,                 ACTION_MENU::CHECK );
     showHidePanels->Add( PCB_ACTIONS::showLayersManager,          ACTION_MENU::CHECK );
     showHidePanels->Add( PCB_ACTIONS::showNetInspector,           ACTION_MENU::CHECK );
+    showHidePanels->Add( PCB_ACTIONS::showImpedanceProfiler,     ACTION_MENU::CHECK );
     viewMenu->Add( showHidePanels );
 
     viewMenu->AppendSeparator();

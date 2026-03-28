@@ -57,6 +57,7 @@ class IO_ERROR;
 class FP_LIB_TABLE;
 class BOARD_NETLIST_UPDATER;
 class ACTION_MENU;
+class IMPEDANCE_PROFILER_PANEL;
 class TOOL_ACTION;
 class DIALOG_BOARD_SETUP;
 
@@ -321,6 +322,8 @@ public:
     void ToggleLayersManager();
 
     void ToggleNetInspector();
+
+    void ToggleImpedanceProfiler();
 
     void ToggleSearch();
 
@@ -862,6 +865,8 @@ public:
     bool m_show_layer_manager_tools;
     bool m_show_search;
     bool m_show_net_inspector;
+    bool m_show_impedance_profiler;
+    IMPEDANCE_PROFILER_PANEL* m_impedanceProfilerPanel;
 
     bool m_ZoneFillsDirty;          // Board has been modified since last zone fill.
 

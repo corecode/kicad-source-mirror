@@ -80,6 +80,7 @@ public:
     int ToggleLayersManager( const TOOL_EVENT& aEvent );
     int ToggleProperties( const TOOL_EVENT& aEvent );
     int ToggleNetInspector( const TOOL_EVENT& aEvent );
+    int ToggleImpedanceProfiler( const TOOL_EVENT& aEvent );
     int ToggleSearch( const TOOL_EVENT& aEvent );
     int TogglePythonConsole( const TOOL_EVENT& aEvent );
 

@@ -109,6 +109,7 @@
 #include <widgets/panel_selection_filter.h>
 #include <widgets/pcb_properties_panel.h>
 #include <widgets/pcb_net_inspector_panel.h>
+#include <widgets/impedance_profiler_panel.h>
 #include <widgets/wx_aui_utils.h>
 #include <kiplatform/app.h>
 #include <core/profile.h>
@@ -221,6 +222,8 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_probingSchToPcb = false;
     m_show_search = false;
     m_show_net_inspector = false;
+    m_show_impedance_profiler = false;
+    m_impedanceProfilerPanel = nullptr;
 
     // We don't know what state board was in when it was last saved, so we have to
     // assume dirty
@@ -295,6 +298,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_appearancePanel = new APPEARANCE_CONTROLS( this, GetCanvas() );
     m_searchPane = new PCB_SEARCH_PANE( this );
     m_netInspectorPanel = new PCB_NET_INSPECTOR_PANEL( this, this );
+    m_impedanceProfilerPanel = new IMPEDANCE_PROFILER_PANEL( this );
 
     m_auimgr.SetManagedWindow( this );
 
@@ -366,6 +370,16 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                                                    .FloatingSize( wxSize( 300, 200 ) )
                                                    .CloseButton( true ) );
 
+    m_auimgr.AddPane( m_impedanceProfilerPanel, EDA_PANE()
+                                                   .Name( wxS( "ImpedanceProfiler" ) )
+                                                   .Bottom()
+                                                   .Caption( _( "Impedance Profiler" ) )
+                                                   .PaneBorder( false )
+                                                   .MinSize( FromDIP( wxSize( 300, 150 ) ) )
+                                                   .BestSize( FromDIP( wxSize( 400, 250 ) ) )
+                                                   .FloatingSize( wxSize( 500, 300 ) )
+                                                   .CloseButton( true ) );
+
     m_auimgr.AddPane( m_searchPane, EDA_PANE().Name( SearchPaneName() )
                       .Bottom()
                       .Caption( _( "Search" ) ).PaneBorder( false )
@@ -380,6 +394,7 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_auimgr.GetPane( "SelectionFilter" ).Show( m_show_layer_manager_tools );
     m_auimgr.GetPane( PropertiesPaneName() ).Show( GetPcbNewSettings()->m_AuiPanels.show_properties );
     m_auimgr.GetPane( NetInspectorPanelName() ).Show( m_show_net_inspector );
+    m_auimgr.GetPane( wxS( "ImpedanceProfiler" ) ).Show( m_show_impedance_profiler );
     m_auimgr.GetPane( SearchPaneName() ).Show( m_show_search );
 
     // The selection filter doesn't need to grow in the vertical direction when docked

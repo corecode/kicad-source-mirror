@@ -36,6 +36,7 @@
 #include <macros.h>
 #include <pcb_edit_frame.h>
 #include <pcb_layer_box_selector.h>
+#include <widgets/impedance_profiler_panel.h>
 #include <pcbnew_id.h>
 #include <pcbnew_settings.h>
 #include <pgm_base.h>
@@ -753,6 +754,21 @@ void PCB_EDIT_FRAME::ToggleNetInspector()
         settings->m_AuiPanels.net_inspector_width = m_netInspectorPanel->GetSize().x;
         m_auimgr.Update();
     }
+}
+
+
+void PCB_EDIT_FRAME::ToggleImpedanceProfiler()
+{
+    wxAuiPaneInfo& pane = m_auimgr.GetPane( wxS( "ImpedanceProfiler" ) );
+
+    m_show_impedance_profiler = !pane.IsShown();
+
+    pane.Show( m_show_impedance_profiler );
+
+    if( m_show_impedance_profiler && m_impedanceProfilerPanel )
+        m_impedanceProfilerPanel->OnShowPanel();
+
+    m_auimgr.Update();
 }
 
 

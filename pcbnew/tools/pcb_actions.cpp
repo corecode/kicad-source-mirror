@@ -1347,6 +1347,13 @@ TOOL_ACTION PCB_ACTIONS::showNetInspector( TOOL_ACTION_ARGS()
         .Tooltip( _( "Show/hide the net inspector" ) )
         .Icon( BITMAPS::tools ) );
 
+TOOL_ACTION PCB_ACTIONS::showImpedanceProfiler( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.Control.showImpedanceProfiler" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Impedance Profiler" ) )
+        .Tooltip( _( "Show/hide the impedance profiler panel" ) )
+        .Icon( BITMAPS::tools ) );
+
 TOOL_ACTION PCB_ACTIONS::zonesManager( "pcbnew.Control.zonesManager",
         AS_GLOBAL, 0, "",
         _( "Zone Manager" ),
