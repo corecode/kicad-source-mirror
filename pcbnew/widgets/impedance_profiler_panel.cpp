@@ -32,6 +32,7 @@
 #include <sipi/trace_path_walker.h>
 #include <sipi/stackup_reader.h>
 #include <sipi/analytical_impedance.h>
+#include <sipi/bem_2d_solver.h>
 
 #include <wx/button.h>
 #include <wx/choice.h>
@@ -268,13 +269,26 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     const auto& path = walker.GetPath();
     const WALK_RESULT& result = walker.GetResult();
 
-    // Build impedance profile
+    // Build impedance profile using BEM solver with cache
     STACKUP_READER stackup( board );
 
     std::vector<double> positions;
     std::vector<double> impedances;
 
-    // Track which segment we're on to avoid redundant Z0 computation
+    // Cache: avoid re-solving identical cross-sections.
+    // Key = (layer, width) since stackup is constant along the board.
+    struct XS_KEY
+    {
+        PCB_LAYER_ID layer;
+        int          width;
+        bool operator<( const XS_KEY& o ) const
+        {
+            return std::tie( layer, width ) < std::tie( o.layer, o.width );
+        }
+    };
+
+    std::map<XS_KEY, double> z0Cache;
+
     BOARD_CONNECTED_ITEM* lastItem = nullptr;
     double                lastZ0 = 0.0;
 
@@ -283,7 +297,7 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         if( pt.isVia )
             continue;
 
-        double z0;
+        double z0 = 0.0;
 
         if( pt.item == lastItem )
         {
@@ -292,10 +306,120 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         else
         {
             PCB_TRACK* track = static_cast<PCB_TRACK*>( pt.item );
-            LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
-                                                            pt.position,
-                                                            track->GetWidth() );
-            z0 = STACKUP_READER::ComputeZ0( geom );
+            XS_KEY key = { track->GetLayer(), track->GetWidth() };
+
+            auto cacheIt = z0Cache.find( key );
+
+            if( cacheIt != z0Cache.end() )
+            {
+                z0 = cacheIt->second;
+            }
+            else
+            {
+                LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
+                                                                pt.position,
+                                                                track->GetWidth() );
+
+                // Build BEM cross-section from LAYER_GEOMETRY
+                XS_GEOMETRY xs;
+
+                XS_CONDUCTOR cond;
+                cond.centerX = 0.0;
+                cond.width = geom.traceWidth;
+                cond.thickness = geom.traceThickness;
+
+                bool hasAbove = ( geom.hAbove > 0.0 );
+                bool hasBelow = ( geom.hBelow > 0.0 );
+
+                if( hasAbove && hasBelow )
+                {
+                    // Stripline: conductor between two ground planes
+                    // Ground below at y=0, conductor centered between planes
+                    xs.groundY = 0.0;
+                    xs.hasUpperGround = true;
+                    xs.upperGroundY = -( geom.hAbove + geom.hBelow );
+
+                    cond.centerY = -geom.hBelow;
+                    xs.epsilonR = ( geom.erAbove + geom.erBelow ) / 2.0;
+
+                    // If εr differs significantly, add dielectric regions
+                    if( std::abs( geom.erAbove - geom.erBelow ) > 0.5 )
+                    {
+                        XS_DIELECTRIC_REGION regAbove;
+                        regAbove.yTop = xs.upperGroundY;
+                        regAbove.yBottom = cond.centerY;
+                        regAbove.epsilonR = geom.erAbove;
+
+                        XS_DIELECTRIC_REGION regBelow;
+                        regBelow.yTop = cond.centerY;
+                        regBelow.yBottom = 0.0;
+                        regBelow.epsilonR = geom.erBelow;
+
+                        xs.dielectrics.push_back( regAbove );
+                        xs.dielectrics.push_back( regBelow );
+                    }
+                }
+                else if( hasBelow )
+                {
+                    // Microstrip: conductor above ground, dielectric below, air above
+                    xs.groundY = 0.0;
+                    cond.centerY = -( geom.hBelow + geom.traceThickness / 2.0 );
+                    xs.epsilonR = geom.erBelow;
+
+                    XS_DIELECTRIC_REGION air;
+                    air.yTop = -10e-3; // far above
+                    air.yBottom = -geom.hBelow;
+                    air.epsilonR = 1.0;
+
+                    XS_DIELECTRIC_REGION diel;
+                    diel.yTop = -geom.hBelow;
+                    diel.yBottom = 0.0;
+                    diel.epsilonR = geom.erBelow;
+
+                    xs.dielectrics.push_back( air );
+                    xs.dielectrics.push_back( diel );
+                }
+                else if( hasAbove )
+                {
+                    // Inverted microstrip: ground above, dielectric above, air below
+                    xs.groundY = -( geom.hAbove + geom.traceThickness );
+                    cond.centerY = -geom.traceThickness / 2.0;
+                    xs.epsilonR = geom.erAbove;
+
+                    XS_DIELECTRIC_REGION diel;
+                    diel.yTop = xs.groundY;
+                    diel.yBottom = -geom.traceThickness;
+                    diel.epsilonR = geom.erAbove;
+
+                    XS_DIELECTRIC_REGION air;
+                    air.yTop = -geom.traceThickness;
+                    air.yBottom = 10e-3;
+                    air.epsilonR = 1.0;
+
+                    xs.dielectrics.push_back( diel );
+                    xs.dielectrics.push_back( air );
+                }
+
+                xs.conductors.push_back( cond );
+
+                // Solve
+                BEM_2D_SOLVER solver;
+                solver.SetGeometry( xs );
+                solver.SetPanelsPerEdge( 15 );
+
+                if( solver.Solve() && solver.GetResult().Z0 > 0.0 )
+                {
+                    z0 = solver.GetResult().Z0;
+                }
+                else
+                {
+                    // Fallback to analytical
+                    z0 = STACKUP_READER::ComputeZ0( geom );
+                }
+
+                z0Cache[key] = z0;
+            }
+
             lastItem = pt.item;
             lastZ0 = z0;
         }
