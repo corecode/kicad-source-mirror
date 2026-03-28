@@ -579,9 +579,30 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
             samplesWithNeighbors++;
     }
 
-    status += wxString::Format( wxS( " | %d/%d pts have neighbors, %d unique XS" ),
-                                samplesWithNeighbors, (int) positions.size(),
-                                (int) z0Cache.size() );
+    // Neighbor distance stats
+    double minNbDist = 1e9, maxNbDist = 0.0;
+
+    for( double d : neighborDists )
+    {
+        if( d > 0.0 )
+        {
+            minNbDist = std::min( minNbDist, d );
+            maxNbDist = std::max( maxNbDist, d );
+        }
+    }
+
+    if( samplesWithNeighbors > 0 )
+    {
+        status += wxString::Format(
+                wxS( " | nb: %d/%d pts, dist %.2f\u2013%.2fmm, %d unique XS" ),
+                samplesWithNeighbors, (int) positions.size(),
+                minNbDist, maxNbDist, (int) z0Cache.size() );
+    }
+    else
+    {
+        status += wxString::Format( wxS( " | no neighbors, %d unique XS" ),
+                                    (int) z0Cache.size() );
+    }
 
     updateStatus( status );
 }
