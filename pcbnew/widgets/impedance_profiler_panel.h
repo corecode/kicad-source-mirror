@@ -70,7 +70,8 @@ private:
     void onNetSelected( wxCommandEvent& aEvent );
     void runAnalysis( int aNetCode );
     void updatePlot( const std::vector<double>& aPositions,
-                     const std::vector<double>& aImpedances );
+                     const std::vector<double>& aImpedances,
+                     const std::vector<double>& aNeighborDists );
     void updateStatus( const wxString& aText );
 
     PCB_EDIT_FRAME* m_frame;
@@ -84,6 +85,7 @@ private:
     mpWindow*       m_plotWindow;
     mpFXYVector*    m_impedanceTrace;
     mpFXYVector*    m_targetLine;
+    mpFXYVector*    m_neighborTrace;    ///< Nearest neighbor distance overlay
     mpScaleX*       m_xAxis;
     mpScaleY*       m_yAxis;
 

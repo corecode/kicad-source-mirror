@@ -55,6 +55,7 @@ IMPEDANCE_PROFILER_PANEL::IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent ) :
         m_plotWindow( nullptr ),
         m_impedanceTrace( nullptr ),
         m_targetLine( nullptr ),
+        m_neighborTrace( nullptr ),
         m_xAxis( nullptr ),
         m_yAxis( nullptr ),
         m_currentNetCode( -1 ),
@@ -131,6 +132,18 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
     m_targetLine->SetScale( m_xAxis, m_yAxis );
     m_targetLine->SetVisible( false );
     m_plotWindow->AddLayer( m_targetLine, false );
+
+    // Neighbor distance overlay (shown in Ohm-scaled units for same Y axis).
+    // We scale the distance so it's visible alongside impedance values:
+    // 0 mm neighbor distance maps to max Y, closer neighbors shown as higher values.
+    wxPen neighborPen( wxColour( 100, 180, 100 ), 1, wxPENSTYLE_DOT );
+
+    m_neighborTrace = new mpFXYVector( _( "Neighbor dist" ) );
+    m_neighborTrace->SetPen( neighborPen );
+    m_neighborTrace->SetContinuity( true );
+    m_neighborTrace->SetScale( m_xAxis, m_yAxis );
+    m_neighborTrace->SetVisible( false );
+    m_plotWindow->AddLayer( m_neighborTrace, false );
 
     m_plotWindow->SetMargins( 15, 10, 30, 50 );
     m_plotWindow->UpdateAll();
@@ -277,6 +290,8 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
 
     std::vector<double> positions;
     std::vector<double> impedances;
+    std::vector<double> neighborDists;   // nearest neighbor distance (mm) at each sample
+    std::vector<int>    neighborCounts;  // number of neighbors at each sample
 
     // Coupling horizon: ignore traces farther than this (nm).
     // 3× the max dielectric height is the standard rule of thumb.
@@ -521,8 +536,15 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
             z0Cache[key] = z0;
         }
 
+        double nearestNbDist = 0.0;
+
+        if( !neighbors.empty() )
+            nearestNbDist = std::abs( neighbors[0].distNm ) / 1e6; // nm → mm
+
         positions.push_back( pt.distFromStart / 1e6 ); // nm → mm
         impedances.push_back( z0 );
+        neighborDists.push_back( nearestNbDist );
+        neighborCounts.push_back( (int) neighbors.size() );
     }
 
     if( positions.empty() )
@@ -531,93 +553,42 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         return;
     }
 
-    // Debug: log first segment geometry for diagnosis
-    bool allZero = true;
+    updatePlot( positions, impedances, neighborDists );
 
-    for( double z : impedances )
-    {
-        if( z > 0.0 )
-        {
-            allZero = false;
-            break;
-        }
-    }
-
-    if( allZero )
-    {
-        // Try to diagnose why — get geometry for first segment
-        PCB_TRACK* firstTrack = nullptr;
-
-        for( const PATH_POINT& pt : path )
-        {
-            if( !pt.isVia )
-            {
-                firstTrack = static_cast<PCB_TRACK*>( pt.item );
-                break;
-            }
-        }
-
-        wxString diag;
-
-        if( firstTrack )
-        {
-            LAYER_GEOMETRY geom = stackup.GetLayerGeometry( firstTrack->GetLayer(),
-                                                            firstTrack->GetStart(),
-                                                            firstTrack->GetWidth() );
-
-            diag.Printf( _( "Z0=0: layer=%d, w=%.3fmm, hAbove=%.3fmm, hBelow=%.3fmm, "
-                            "erAbove=%.1f, erBelow=%.1f, refAbove=%d, refBelow=%d, defaults=%d" ),
-                         firstTrack->GetLayer(),
-                         geom.traceWidth * 1e3,
-                         geom.hAbove * 1e3, geom.hBelow * 1e3,
-                         geom.erAbove, geom.erBelow,
-                         geom.hasRefAbove, geom.hasRefBelow,
-                         geom.usingDefaults );
-        }
-        else
-        {
-            diag = _( "Z0=0: no track segments found" );
-        }
-
-        updateStatus( diag );
-        return;
-    }
-
-    updatePlot( positions, impedances );
-
-    // Build status string
+    // Build status string with diagnostics
     wxString status;
     double   totalLen = walker.GetTotalLength() / 1e6; // mm
 
     if( result.isComplete() )
-    {
-        status.Printf( _( "%.1f mm, %d segments" ), totalLen, result.segmentsVisited );
-    }
+        status.Printf( _( "%.1f mm, %d segs" ), totalLen, result.segmentsVisited );
     else
-    {
-        status.Printf( _( "%.1f mm, %d/%d segments (stopped at branch)" ),
+        status.Printf( _( "%.1f mm, %d/%d segs" ),
                        totalLen, result.segmentsVisited, result.totalSegmentsOnNet );
-    }
 
     double minZ = *std::min_element( impedances.begin(), impedances.end() );
     double maxZ = *std::max_element( impedances.begin(), impedances.end() );
-
     status += wxString::Format( wxS( " | Z0: %.1f\u2013%.1f \u03A9" ), minZ, maxZ );
 
-    if( stackup.GetLayerGeometry( static_cast<PCB_TRACK*>( path.front().item )->GetLayer(),
-                                  path.front().position,
-                                  static_cast<PCB_TRACK*>( path.front().item )->GetWidth() )
-                .usingDefaults )
+    // Neighbor stats
+    int samplesWithNeighbors = 0;
+
+    for( int nc : neighborCounts )
     {
-        status += _( " (default stackup)" );
+        if( nc > 0 )
+            samplesWithNeighbors++;
     }
+
+    status += wxString::Format( wxS( " | %d/%d pts have neighbors, %d unique XS" ),
+                                samplesWithNeighbors, (int) positions.size(),
+                                (int) z0Cache.size() );
 
     updateStatus( status );
 }
 
 
 void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions,
-                                           const std::vector<double>& aImpedances )
+                                           const std::vector<double>& aImpedances,
+                                           const std::vector<double>& aNeighborDists )
 {
     m_impedanceTrace->SetData( aPositions, aImpedances );
     m_impedanceTrace->SetVisible( true );
@@ -631,14 +602,64 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
         m_targetLine->SetVisible( true );
     }
 
-    // Propagate data extents to the scale objects — this is essential for
-    // mpFXY::Plot to map data coordinates to pixels correctly.
+    // Neighbor distance overlay: scale distance to impedance range so it's
+    // visible on the same Y axis. 0 mm distance → shown at yMax,
+    // couplingHorizon distance → shown at yMin. No neighbor → hidden (yMin).
+    if( !aNeighborDists.empty() )
+    {
+        double yMin = *std::min_element( aImpedances.begin(), aImpedances.end() );
+        double yMax = *std::max_element( aImpedances.begin(), aImpedances.end() );
+
+        if( m_targetZ0 > 0.0 )
+        {
+            yMin = std::min( yMin, m_targetZ0 );
+            yMax = std::max( yMax, m_targetZ0 );
+        }
+
+        double yPad = std::max( ( yMax - yMin ) * 0.1, 5.0 );
+        double yBottom = yMin - yPad;
+        double yTop = yMax + yPad;
+
+        // Scale: distance 0 → yTop, distance 2mm (horizon) → yBottom
+        double horizon = 2.0; // mm
+        std::vector<double> scaledDist( aNeighborDists.size() );
+        bool anyNeighbors = false;
+
+        for( size_t i = 0; i < aNeighborDists.size(); i++ )
+        {
+            if( aNeighborDists[i] > 0.0 )
+            {
+                scaledDist[i] = yTop - ( aNeighborDists[i] / horizon ) * ( yTop - yBottom );
+                scaledDist[i] = std::max( scaledDist[i], yBottom );
+                anyNeighbors = true;
+            }
+            else
+            {
+                scaledDist[i] = yBottom; // no neighbor → bottom of plot
+            }
+        }
+
+        if( anyNeighbors )
+        {
+            m_neighborTrace->SetData( aPositions, scaledDist );
+            m_neighborTrace->SetVisible( true );
+        }
+        else
+        {
+            m_neighborTrace->SetVisible( false );
+        }
+    }
+
+    // Propagate data extents to the scale objects
     m_xAxis->ResetDataRange();
     m_yAxis->ResetDataRange();
     m_impedanceTrace->UpdateScales();
 
     if( m_targetLine->IsVisible() )
         m_targetLine->UpdateScales();
+
+    if( m_neighborTrace->IsVisible() )
+        m_neighborTrace->UpdateScales();
 
     // Extend Y range to include target and add padding
     double yMin = *std::min_element( aImpedances.begin(), aImpedances.end() );
