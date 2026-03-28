@@ -362,19 +362,77 @@ BOOST_AUTO_TEST_CASE( BEMCouplingEffect )
     double z0_close = solverClose.GetResult().Z0;
     double z0_far = solverFar.GetResult().Z0;
 
-    BOOST_TEST_MESSAGE( "Z0 isolated:       " << z0_iso << " Ohm" );
-    BOOST_TEST_MESSAGE( "Z0 neighbor 0.3mm: " << z0_close << " Ohm (delta "
-                        << ( z0_close - z0_iso ) << ")" );
-    BOOST_TEST_MESSAGE( "Z0 neighbor 1.0mm: " << z0_far << " Ohm (delta "
-                        << ( z0_far - z0_iso ) << ")" );
+    BOOST_TEST_MESSAGE( "--- Isolated (1 conductor, with dielectric) ---" );
+    BOOST_TEST_MESSAGE( "Z0 = " << z0_iso );
+    BOOST_TEST_MESSAGE( "C  =\n" << solverIsolated.GetResult().C );
+    BOOST_TEST_MESSAGE( "C0 =\n" << solverIsolated.GetResult().C0 );
+    BOOST_TEST_MESSAGE( "L  =\n" << solverIsolated.GetResult().L );
+    BOOST_TEST_MESSAGE( "erEff = " << solverIsolated.GetResult().erEff );
 
-    // Close neighbor should lower Z₀ more than far neighbor
+    BOOST_TEST_MESSAGE( "--- Neighbor at 0.3mm (2 conductors, with dielectric) ---" );
+    BOOST_TEST_MESSAGE( "Z0 = " << z0_close );
+    BOOST_TEST_MESSAGE( "C  =\n" << solverClose.GetResult().C );
+    BOOST_TEST_MESSAGE( "C0 =\n" << solverClose.GetResult().C0 );
+    BOOST_TEST_MESSAGE( "L  =\n" << solverClose.GetResult().L );
+    BOOST_TEST_MESSAGE( "erEff = " << solverClose.GetResult().erEff );
+
+    BOOST_TEST_MESSAGE( "--- Neighbor at 1.0mm (2 conductors, with dielectric) ---" );
+    BOOST_TEST_MESSAGE( "Z0 = " << z0_far );
+    BOOST_TEST_MESSAGE( "C  =\n" << solverFar.GetResult().C );
+    BOOST_TEST_MESSAGE( "C0 =\n" << solverFar.GetResult().C0 );
+    BOOST_TEST_MESSAGE( "L  =\n" << solverFar.GetResult().L );
+    BOOST_TEST_MESSAGE( "erEff = " << solverFar.GetResult().erEff );
+
+    // Also test WITHOUT dielectric regions (uniform er) for comparison
+    auto makeGeomUniform = [&]( double neighborDist ) -> XS_GEOMETRY
+    {
+        XS_GEOMETRY xs;
+        xs.groundY = 0.0;
+        xs.epsilonR = 4.4;
+
+        XS_CONDUCTOR cond;
+        cond.centerX = 0.0;
+        cond.centerY = -( h + t / 2.0 );
+        cond.width = w;
+        cond.thickness = t;
+        xs.conductors.push_back( cond );
+
+        if( neighborDist > 0.0 )
+        {
+            XS_CONDUCTOR nbCond;
+            nbCond.centerX = neighborDist;
+            nbCond.centerY = -( h + t / 2.0 );
+            nbCond.width = w;
+            nbCond.thickness = t;
+            xs.conductors.push_back( nbCond );
+        }
+
+        return xs;
+    };
+
+    BEM_2D_SOLVER solverUniIso;
+    solverUniIso.SetGeometry( makeGeomUniform( 0.0 ) );
+    solverUniIso.SetPanelsPerEdge( 15 );
+    solverUniIso.Solve();
+
+    BEM_2D_SOLVER solverUniClose;
+    solverUniClose.SetGeometry( makeGeomUniform( 0.3e-3 ) );
+    solverUniClose.SetPanelsPerEdge( 10 );
+    solverUniClose.Solve();
+
+    BOOST_TEST_MESSAGE( "--- Uniform dielectric (no regions) ---" );
+    BOOST_TEST_MESSAGE( "Isolated Z0 = " << solverUniIso.GetResult().Z0 );
+    BOOST_TEST_MESSAGE( "Neighbor 0.3mm Z0 = " << solverUniClose.GetResult().Z0 );
+    BOOST_TEST_MESSAGE( "C isolated =\n" << solverUniIso.GetResult().C );
+    BOOST_TEST_MESSAGE( "C with neighbor =\n" << solverUniClose.GetResult().C );
+
+    // Coupling should lower Z₀ in both dielectric and uniform cases
     BOOST_CHECK_LT( z0_close, z0_iso );
     BOOST_CHECK_LT( z0_far, z0_iso );
-    BOOST_CHECK_LT( z0_close, z0_far );
+    BOOST_CHECK_LT( z0_close, z0_far ); // closer = more coupling = lower Z₀
+    BOOST_CHECK_GT( z0_iso - z0_close, 0.5 ); // measurable effect
 
-    // The effect should be measurable (at least 0.5Ω for 0.3mm spacing)
-    BOOST_CHECK_GT( z0_iso - z0_close, 0.5 );
+    BOOST_CHECK_LT( solverUniClose.GetResult().Z0, solverUniIso.GetResult().Z0 );
 }
 
 

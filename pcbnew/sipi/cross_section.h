@@ -92,6 +92,7 @@ struct XS_GEOMETRY
 struct RLGC_RESULT
 {
     Eigen::MatrixXd C;      ///< Capacitance per unit length (F/m)
+    Eigen::MatrixXd C0;     ///< Vacuum capacitance per unit length (F/m)
     Eigen::MatrixXd L;      ///< Inductance per unit length (H/m)
     double          Z0 = 0.0;     ///< Characteristic impedance (Ohms) — single-ended
     double          Zdiff = 0.0;  ///< Differential impedance (Ohms) — for 2-conductor

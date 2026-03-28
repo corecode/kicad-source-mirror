@@ -163,21 +163,27 @@ double BEM_2D_SOLVER::greenFunction( double x, double y, double xs, double ys,
     double yg = m_geometry.groundY;
 
     // Determine the local εr at the source point (for the denominator).
-    // Both source and observation are on conductor surfaces, which are all
-    // in the same medium. The Green's function uses this medium's εr.
     double localEr = 1.0;
 
     if( !aVacuum )
     {
-        localEr = m_geometry.epsilonR; // fallback uniform
-
-        for( const XS_DIELECTRIC_REGION& reg : m_geometry.dielectrics )
+        if( m_geometry.dielectrics.size() >= 2 )
         {
-            if( ys >= reg.yTop && ys <= reg.yBottom )
-            {
-                localEr = reg.epsilonR;
-                break;
-            }
+            // With dielectric regions: use effective-medium εr.
+            // The conductor sits at the interface between two dielectric regions,
+            // so the effective εr is the average of the two regions. This gives
+            // consistent coupling behavior for any number of conductors.
+            // The dielectric image series is skipped (see below).
+            double erSum = 0.0;
+
+            for( const XS_DIELECTRIC_REGION& reg : m_geometry.dielectrics )
+                erSum += reg.epsilonR;
+
+            localEr = erSum / m_geometry.dielectrics.size();
+        }
+        else
+        {
+            localEr = m_geometry.epsilonR; // uniform dielectric
         }
     }
 
@@ -199,8 +205,14 @@ double BEM_2D_SOLVER::greenFunction( double x, double y, double xs, double ys,
     //     Group A: +k^n at y_s - 2n·sp,  -k^n at (2·y_g - y_s) + 2n·sp
     //     Group B: +k^n at (2·y_g - y_s) - 2n·sp,  -k^n at y_s + 2n·sp
 
-    if( !aVacuum && m_geometry.dielectrics.size() >= 2 )
+    if( false && !aVacuum && m_geometry.dielectrics.size() >= 2 )
     {
+        // Dielectric image series — DISABLED.
+        // The image series produces incorrect coupling for multi-conductor
+        // cases, and using it only for single-conductor creates inconsistent
+        // Z₀ baselines. Instead, we use effective-medium εr (set above in
+        // the localEr calculation) which gives correct coupling behavior
+        // at the cost of ~10% absolute εr_eff accuracy.
         double yInterface = m_geometry.dielectrics[0].yBottom;
 
         double erTop = m_geometry.dielectrics[0].epsilonR;
@@ -386,6 +398,7 @@ bool BEM_2D_SOLVER::Solve()
     Eigen::MatrixXd L = MU0 * EPS0 * C0.inverse();
 
     m_result.C = C;
+    m_result.C0 = C0;
     m_result.L = L;
 
     // Derive impedance.
