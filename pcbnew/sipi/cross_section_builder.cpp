@@ -210,47 +210,59 @@ void CROSS_SECTION_BUILDER::findShapeNeighbors( const XS_BUILD_PARAMS& aParams,
         if( !shape )
             continue;
 
-        VECTOR2I nearestOnCut;
-        int      actualDist = 0;
+        VECTOR2I nearest;
 
-        if( shape->Collide( aCutSeg, aParams.couplingHorizon, &actualDist, &nearestOnCut ) )
+        // Zero clearance: pad must actually intersect the cut line.
+        // This prevents detecting pads that are nearby in board space
+        // but offset along the trace direction (not at the cross-section).
+        if( !shape->Collide( aCutSeg, 0, nullptr, &nearest ) )
+            continue;
+
+        // Project nearest point onto the normal for lateral distance.
+        VECTOR2D delta( nearest.x - aParams.samplePos.x,
+                        nearest.y - aParams.samplePos.y );
+        double lateralDist = delta.x * aNormal.x + delta.y * aNormal.y;
+
+        // Estimate pad width along the cut from the bounding box.
+        BOX2I bbox = item->GetBoundingBox();
+        double minProj = 1e18, maxProj = -1e18;
+        VECTOR2I corners[4] = {
+            bbox.GetOrigin(),
+            bbox.GetOrigin() + VECTOR2I( bbox.GetWidth(), 0 ),
+            bbox.GetOrigin() + VECTOR2I( 0, bbox.GetHeight() ),
+            bbox.GetEnd()
+        };
+
+        for( const VECTOR2I& c : corners )
         {
-            // Get the item's bounding box to estimate its width along the cut line.
-            BOX2I bbox = item->GetBoundingBox();
+            VECTOR2D d( c.x - aParams.samplePos.x, c.y - aParams.samplePos.y );
+            double proj = d.x * aNormal.x + d.y * aNormal.y;
+            minProj = std::min( minProj, proj );
+            maxProj = std::max( maxProj, proj );
+        }
 
-            // Project bbox corners onto the normal to get the item's extent
-            // along the cut direction (perpendicular to trace).
-            double minProj = 1e18, maxProj = -1e18;
-            VECTOR2I corners[4] = {
-                bbox.GetOrigin(),
-                bbox.GetOrigin() + VECTOR2I( bbox.GetWidth(), 0 ),
-                bbox.GetOrigin() + VECTOR2I( 0, bbox.GetHeight() ),
-                bbox.GetEnd()
-            };
+        int itemWidth = (int) ( maxProj - minProj );
 
-            for( const VECTOR2I& c : corners )
-            {
-                VECTOR2D d( c.x - aParams.samplePos.x, c.y - aParams.samplePos.y );
-                double proj = d.x * aNormal.x + d.y * aNormal.y;
-                minProj = std::min( minProj, proj );
-                maxProj = std::max( maxProj, proj );
-            }
+        if( itemWidth < 50000 )
+            itemWidth = 50000;
 
-            int itemWidth = (int) ( maxProj - minProj );
+        // Use nearest-point lateral distance, adjusted to center
+        double centerDist = lateralDist;
 
-            if( itemWidth < 50000 )
-                itemWidth = 50000; // min 50µm
+        // The nearest point is on the pad edge. Shift to approximate center
+        // by adding half the item width in the sign direction.
+        if( lateralDist > 0 )
+            centerDist = lateralDist + itemWidth / 2.0;
+        else
+            centerDist = lateralDist - itemWidth / 2.0;
 
-            // Center distance = midpoint of the item's extent along normal
-            double centerDist = ( minProj + maxProj ) / 2.0;
-            double edgeToEdge = std::abs( centerDist )
-                                - aParams.signalWidth / 2.0
-                                - itemWidth / 2.0;
+        double edgeToEdge = std::abs( centerDist )
+                            - aParams.signalWidth / 2.0
+                            - itemWidth / 2.0;
 
-            if( edgeToEdge < aParams.couplingHorizon && edgeToEdge > MIN_EDGE_TO_EDGE )
-            {
-                aNeighbors.push_back( { static_cast<int>( centerDist ), itemWidth } );
-            }
+        if( edgeToEdge < aParams.couplingHorizon && edgeToEdge > MIN_EDGE_TO_EDGE )
+        {
+            aNeighbors.push_back( { static_cast<int>( centerDist ), itemWidth } );
         }
     }
 }
