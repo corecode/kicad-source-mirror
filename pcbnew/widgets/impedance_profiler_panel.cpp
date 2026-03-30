@@ -25,6 +25,7 @@
 
 #include <board.h>
 #include <netinfo.h>
+#include <footprint.h>
 #include <pad.h>
 #include <pcb_track.h>
 #include <zone.h>
@@ -714,27 +715,25 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     struct XS_CACHED { double z0; double erEff; };
     std::map<XS_KEY, XS_CACHED> z0Cache;
 
-    // Build spatial index for neighbor search.  Use the board's DRC cache if
-    // available; otherwise build a temporary one from all track segments.
-    std::unique_ptr<DRC_RTREE> tempRtree;
-    DRC_RTREE* rtree = nullptr;
+    // Build spatial index for neighbor search with tracks and pads.
+    DRC_RTREE tempRtree;
 
-    if( board->m_CopperItemRTreeCache )
+    for( PCB_TRACK* t : board->Tracks() )
     {
-        rtree = board->m_CopperItemRTreeCache.get();
+        if( t->Type() != PCB_VIA_T )
+            tempRtree.Insert( t, t->GetLayer() );
     }
-    else
-    {
-        tempRtree = std::make_unique<DRC_RTREE>();
 
-        for( PCB_TRACK* t : board->Tracks() )
+    for( FOOTPRINT* fp : board->Footprints() )
+    {
+        for( PAD* pad : fp->Pads() )
         {
-            if( t->Type() != PCB_VIA_T )
-                tempRtree->Insert( t, t->GetLayer() );
+            for( PCB_LAYER_ID layer : pad->GetLayerSet().CuStack() )
+                tempRtree.Insert( pad, layer );
         }
-
-        rtree = tempRtree.get();
     }
+
+    DRC_RTREE* rtree = &tempRtree;
 
     // Sample at uniform distance intervals along the path, interpolating
     // position between path points.  Interpolation along straight segments

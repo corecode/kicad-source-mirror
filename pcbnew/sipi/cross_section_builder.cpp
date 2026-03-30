@@ -215,15 +215,41 @@ void CROSS_SECTION_BUILDER::findShapeNeighbors( const XS_BUILD_PARAMS& aParams,
 
         if( shape->Collide( aCutSeg, aParams.couplingHorizon, &actualDist, &nearestOnCut ) )
         {
-            VECTOR2D delta( nearestOnCut.x - aParams.samplePos.x,
-                            nearestOnCut.y - aParams.samplePos.y );
-            double lateralDist = delta.x * aNormal.x + delta.y * aNormal.y;
-            double edgeToEdge = std::abs( lateralDist ) - aParams.signalWidth / 2.0;
+            // Get the item's bounding box to estimate its width along the cut line.
+            BOX2I bbox = item->GetBoundingBox();
+
+            // Project bbox corners onto the normal to get the item's extent
+            // along the cut direction (perpendicular to trace).
+            double minProj = 1e18, maxProj = -1e18;
+            VECTOR2I corners[4] = {
+                bbox.GetOrigin(),
+                bbox.GetOrigin() + VECTOR2I( bbox.GetWidth(), 0 ),
+                bbox.GetOrigin() + VECTOR2I( 0, bbox.GetHeight() ),
+                bbox.GetEnd()
+            };
+
+            for( const VECTOR2I& c : corners )
+            {
+                VECTOR2D d( c.x - aParams.samplePos.x, c.y - aParams.samplePos.y );
+                double proj = d.x * aNormal.x + d.y * aNormal.y;
+                minProj = std::min( minProj, proj );
+                maxProj = std::max( maxProj, proj );
+            }
+
+            int itemWidth = (int) ( maxProj - minProj );
+
+            if( itemWidth < 50000 )
+                itemWidth = 50000; // min 50µm
+
+            // Center distance = midpoint of the item's extent along normal
+            double centerDist = ( minProj + maxProj ) / 2.0;
+            double edgeToEdge = std::abs( centerDist )
+                                - aParams.signalWidth / 2.0
+                                - itemWidth / 2.0;
 
             if( edgeToEdge < aParams.couplingHorizon && edgeToEdge > MIN_EDGE_TO_EDGE )
             {
-                int itemWidth = 200000; // approximate 200µm
-                aNeighbors.push_back( { static_cast<int>( lateralDist ), itemWidth } );
+                aNeighbors.push_back( { static_cast<int>( centerDist ), itemWidth } );
             }
         }
     }
