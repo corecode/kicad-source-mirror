@@ -368,28 +368,6 @@ void CROSS_SECTION_BUILDER::deduplicateNeighbors( std::vector<XS_NEIGHBOR>& aNei
             i++;
     }
 
-    // Keep only the closest neighbor on each side (+/-).  The BEM with
-    // multiple same-side conductors introduces interface-panel artifacts
-    // that degrade the self-capacitance accuracy; using only the nearest
-    // per side avoids this while capturing the dominant coupling.
-    {
-        bool hasPos = false, hasNeg = false;
-        size_t i = 0;
-
-        while( i < aNeighbors.size() )
-        {
-            bool& seen = ( aNeighbors[i].distNm > 0 ) ? hasPos : hasNeg;
-
-            if( seen )
-                aNeighbors.erase( aNeighbors.begin() + (int) i );
-            else
-            {
-                seen = true;
-                i++;
-            }
-        }
-    }
-
     if( (int) aNeighbors.size() > aMaxNeighbors )
         aNeighbors.resize( aMaxNeighbors );
 }

@@ -333,4 +333,95 @@ BOOST_AUTO_TEST_CASE( BEMCouplingEffect )
 }
 
 
+/**
+ * Verify that adding same-side grounded neighbors monotonically decreases Z₀.
+ * This is the regression test for the multi-conductor coupling bug.
+ */
+BOOST_AUTO_TEST_CASE( SameSideNeighborDecreasesZ0 )
+{
+    double w = 0.15e-3;
+    double t = 35e-6;
+    double h = 0.1e-3;
+    int panels = 12;
+
+    auto makeGeom = [&]( std::vector<double> neighborDists ) -> XS_GEOMETRY
+    {
+        XS_GEOMETRY xs;
+        xs.groundY = 0.0;
+        xs.epsilonR = 4.4;
+
+        XS_DIELECTRIC_REGION air, diel;
+        air.yTop = -10e-3;
+        air.yBottom = -h;
+        air.epsilonR = 1.0;
+        diel.yTop = -h;
+        diel.yBottom = 0.0;
+        diel.epsilonR = 4.4;
+        xs.dielectrics.push_back( air );
+        xs.dielectrics.push_back( diel );
+
+        XS_CONDUCTOR cond;
+        cond.centerX = 0.0;
+        cond.centerY = -( h + t / 2.0 );
+        cond.width = w;
+        cond.thickness = t;
+        xs.conductors.push_back( cond );
+
+        for( double d : neighborDists )
+        {
+            XS_CONDUCTOR nb;
+            nb.centerX = d;
+            nb.centerY = -( h + t / 2.0 );
+            nb.width = w;
+            nb.thickness = t;
+            xs.conductors.push_back( nb );
+        }
+
+        return xs;
+    };
+
+    // Isolated
+    BEM_2D_SOLVER solverIso;
+    solverIso.SetGeometry( makeGeom( {} ) );
+    solverIso.SetPanelsPerEdge( panels );
+    BOOST_REQUIRE( solverIso.Solve() );
+    double z0_iso = solverIso.GetResult().Z0;
+
+    // 1 same-side neighbor at -0.29mm
+    BEM_2D_SOLVER solver1;
+    solver1.SetGeometry( makeGeom( { -0.29e-3 } ) );
+    solver1.SetPanelsPerEdge( panels );
+    BOOST_REQUIRE( solver1.Solve() );
+    double z0_1 = solver1.GetResult().Z0;
+
+    // 2 same-side neighbors at -0.29mm and -0.58mm
+    BEM_2D_SOLVER solver2;
+    solver2.SetGeometry( makeGeom( { -0.29e-3, -0.58e-3 } ) );
+    solver2.SetPanelsPerEdge( panels );
+    BOOST_REQUIRE( solver2.Solve() );
+    double z0_2 = solver2.GetResult().Z0;
+
+    BOOST_TEST_MESSAGE( "Isolated:    Z0 = " << z0_iso );
+    BOOST_TEST_MESSAGE( "1 neighbor:  Z0 = " << z0_1 );
+    BOOST_TEST_MESSAGE( "2 neighbors: Z0 = " << z0_2 );
+
+    // Each additional grounded conductor must lower Z₀
+    BOOST_CHECK_LT( z0_1, z0_iso );
+    BOOST_CHECK_LT( z0_2, z0_1 );
+    BOOST_CHECK_LT( z0_2, z0_iso );
+
+    // C₁₁ must monotonically increase
+    double c_iso = solverIso.GetResult().C( 0, 0 );
+    double c_1   = solver1.GetResult().C( 0, 0 );
+    double c_2   = solver2.GetResult().C( 0, 0 );
+
+    BOOST_TEST_MESSAGE( "C₁₁ isolated: " << c_iso );
+    BOOST_TEST_MESSAGE( "C₁₁ 1 nb:     " << c_1 );
+    BOOST_TEST_MESSAGE( "C₁₁ 2 nb:     " << c_2 );
+
+    BOOST_CHECK_GT( c_1, c_iso );
+    BOOST_CHECK_GT( c_2, c_1 );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()
