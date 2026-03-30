@@ -31,21 +31,21 @@
 
 
 /**
- * 2D sub-region BEM solver for per-unit-length capacitance and impedance
- * of PCB microstrip cross-sections.
+ * 2D Galerkin BEM solver for per-unit-length capacitance and impedance
+ * of PCB cross-sections with dielectric interfaces.
  *
- * Uses the vacuum+ground-image Green's function with explicit interface
- * panels that enforce D-normal continuity at the dielectric boundary.
- * The dielectric effect emerges from bound charge on the interface —
- * no dielectric images are used.
+ * Follows the NMMTL (Numerical Multiconductor Transmission Line) formulation:
+ * - Quadratic (3-node) boundary elements with Lagrangian shape functions
+ * - Galerkin weighted-residual method (double integration)
+ * - Vacuum Green's function with ground-plane image (no ε₀ in kernel)
+ * - Interface panels enforce D-normal continuity via flux equation
+ * - Charge extraction with local εr weighting (NMMTL convention)
+ * - Edge singularity handling at conductor corners (ν-exponent)
  *
- * Follows the formulation in subregion_bem_spec_rev4.md.
- *
- * Coordinate system (matching the spec):
- *   y = 0: dielectric interface
- *   y = -h: ground plane (Φ = 0)
- *   y > 0: air (εr = 1), conductors sit here with bottom face at y = 0
- *   y < 0: substrate (εr configurable)
+ * Coordinate system:
+ *   y = 0: ground plane (Φ = 0)
+ *   Conductors and dielectric interfaces at y > 0
+ *   Image charges at y < 0
  */
 class BEM_2D_SOLVER
 {
@@ -60,69 +60,102 @@ public:
     const RLGC_RESULT& GetResult() const { return m_result; }
 
 private:
-    enum PANEL_TYPE
+    /// A quadratic boundary element with 3 nodes.
+    struct ELEMENT
     {
-        CONDUCTOR,
-        INTERFACE
+        double xpts[3];         ///< Global x-coordinates of the 3 nodes
+        double ypts[3];         ///< Global y-coordinates of the 3 nodes
+        int    nodeIdx[3];      ///< Global node indices into the system matrix
+        int    conductorIdx;    ///< Which conductor (>=0), or -1 for interface
+        double epsilonR;        ///< CONDUCTOR: local relative permittivity
+        double epsPlus;         ///< INTERFACE: εr on the +normal side
+        double epsMinus;        ///< INTERFACE: εr on the -normal side
+        double normalX;         ///< INTERFACE: outward normal x-component
+        double normalY;         ///< INTERFACE: outward normal y-component
     };
 
-    struct PANEL
-    {
-        double     cx, cy;        ///< Midpoint
-        double     length;        ///< Panel length
-        double     nx, ny;        ///< Outward normal
-        int        conductorIdx;  ///< Which conductor (-1 for interface)
-        PANEL_TYPE type;
+    // --- Shape functions and geometry ---
 
-        // Per-panel dielectric properties (following NMMTL convention)
-        double     epsilonR;      ///< CONDUCTOR panels: εr of medium this face sees
-        double     epsPlus;       ///< INTERFACE panels: εr on the +n̂ side (above)
-        double     epsMinus;      ///< INTERFACE panels: εr on the -n̂ side (below)
-    };
+    /// Evaluate quadratic Lagrangian shape functions at local coordinate ξ ∈ [0,1].
+    /// Returns N[0], N[1], N[2] for start, middle, end nodes.
+    static void shapeFunctions( double aXi, double aN[3] );
 
-    /// Build conductor and interface panels per the spec
-    void buildPanels();
+    /// Evaluate derivatives of shape functions at local coordinate ξ.
+    static void shapeDerivatives( double aXi, double aDN[3] );
 
-    /// Vacuum Green's function with ground-plane image: G(r, r')
-    double greenG( double x, double y, double xs, double ys ) const;
+    /// Compute the Jacobian |dl/dξ| at local coordinate ξ for an element.
+    static double jacobian( double aXi, const ELEMENT& aElem );
 
-    /// Normal derivative ∂G/∂n at (x, y) due to source at (xs, ys), with n̂ = (0, +1)
-    double greenDGDn( double x, double y, double xs, double ys ) const;
+    /// Interpolate global (x,y) position at local coordinate ξ.
+    static void interpolate( double aXi, const ELEMENT& aElem, double& aX, double& aY );
 
-    /// Assemble and solve the full system (conductor + interface panels).
-    /// Returns the NxN Maxwell capacitance matrix (N = number of conductors).
+    // --- Green's function kernels (no ε₀) ---
+
+    /// Potential kernel: G(r, r') = ln(d_image / d_direct)
+    /// where d_image uses the ground-plane image at (X, -Y).
+    double greenPotential( double x, double y, double X, double Y ) const;
+
+    /// Normal-derivative kernel: ∂G/∂n evaluated at (x,y) from source at (X,Y)
+    /// with interface normal (nx, ny).
+    double greenFlux( double x, double y, double X, double Y,
+                      double nx, double ny ) const;
+
+    // --- Element generation ---
+
+    /// Build all conductor and interface elements from the input geometry.
+    void buildElements();
+
+    // --- Assembly and solve ---
+
+    /// Assemble and solve the full system (conductor + interface elements).
+    /// Returns NxN Maxwell capacitance matrix.
     Eigen::MatrixXd solveCapacitanceFull();
 
-    /// Assemble and solve the air-only system (conductor panels only, no interface).
-    /// Returns the NxN vacuum capacitance matrix.
+    /// Assemble and solve the conductor-only (free-space) system.
+    /// Returns NxN vacuum capacitance matrix.
     Eigen::MatrixXd solveCapacitanceAir();
 
-    /// Analytic self-integral of the direct Green's function over a panel of length L
-    double selfIntegralG( double aLength ) const;
+    /// Integrate the potential kernel G over an inner element, evaluated
+    /// at observation point (x,y).  Returns value[3] for each node.
+    void intervalConductor( double x, double y, const ELEMENT& aInner,
+                            double aValue[3] ) const;
 
-    /// Look up the relative permittivity of the dielectric region at position y,
-    /// on the side indicated by normalY (> 0 means look above y, < 0 means below).
-    /// Returns 1.0 (air) if no dielectric region is found.
-    double getEpsilonR( double aY, double aNormalY ) const;
+    /// Self-element integration with singularity splitting.
+    void intervalSelfConductor( double x, double y, const ELEMENT& aElem,
+                                double aValue[3], double aXiOuter ) const;
 
-    XS_GEOMETRY        m_geometry;
-    RLGC_RESULT        m_result;
-    int                m_panelsPerEdge;
+    /// Integrate the flux kernel ∂G/∂n over an inner element.
+    void intervalFlux( double x, double y, const ELEMENT& aInner,
+                       double aValue[3], double nx, double ny ) const;
 
-    double             m_h;           ///< Distance from lowest interface to ground plane
+    /// Self-element integration for interface flux kernel.
+    void intervalSelfFlux( double x, double y, const ELEMENT& aElem,
+                           double aValue[3], double aXiOuter,
+                           double nx, double ny ) const;
 
-    /// Dielectric boundaries in spec coordinates, sorted by y.
-    /// Each entry: { y-level, εr above, εr below }.
-    struct DIELECTRIC_BOUNDARY
-    {
-        double y;
-        double epsAbove;    ///< εr of region above this boundary
-        double epsBelow;    ///< εr of region below this boundary
-    };
-    std::vector<DIELECTRIC_BOUNDARY> m_dielectricBoundaries;
+    /// Build and solve the load vector for a given active conductor.
+    void buildLoadVector( Eigen::VectorXd& aB, int aActiveConductor ) const;
 
-    std::vector<PANEL> m_conductorPanels;
-    std::vector<PANEL> m_interfacePanels;
+    /// Extract charge on each conductor from the solved σ vector.
+    void extractCharge( const Eigen::VectorXd& aSigma, double aEpsFactor,
+                        Eigen::VectorXd& aQ ) const;
+
+    // --- Data ---
+
+    XS_GEOMETRY   m_geometry;
+    RLGC_RESULT   m_result;
+    int           m_panelsPerEdge;
+
+    double        m_lengthScale;    ///< NMMTL length_scale = half_minimum_dimension
+
+    /// All conductor elements, grouped by conductor index.
+    std::vector<ELEMENT> m_condElements;
+    /// All interface elements.
+    std::vector<ELEMENT> m_intfElements;
+
+    int m_numCondNodes;     ///< Total conductor nodes
+    int m_numIntfNodes;     ///< Total interface nodes
+    int m_numConductors;    ///< Number of distinct conductors
 };
 
 #endif // BEM_2D_SOLVER_H

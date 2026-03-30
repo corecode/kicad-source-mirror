@@ -21,19 +21,82 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+/**
+ * @file bem_2d_solver.cpp
+ *
+ * 2D Galerkin BEM solver for per-unit-length RLGC parameters, ported from
+ * the NMMTL (Numerical Multiconductor Transmission Line) formulation.
+ *
+ * Reference: TNT-MMTL, Mayo Foundation (K. Buchs, 1992).
+ *
+ * Key design choices matching NMMTL:
+ *  - Green's function G = ln(d_image/d_direct), NO ε₀ in kernel
+ *  - RHS (load vector) = ε₀ × V
+ *  - Assembly constant = 1/(2π)
+ *  - Interface diagonal uses mass matrix with length_scale factor
+ *  - Interface off-diagonal uses (εr⁺ - εr⁻) × ∂G/∂n flux kernel
+ *  - Charge extraction: Q = ∫ εr_local × σ × N dl (NMMTL convention)
+ *  - Quadratic (3-node) Lagrangian elements
+ *  - Galerkin weighted-residual (double integration)
+ */
+
 #include "bem_2d_solver.h"
 
 #include <cmath>
 #include <algorithm>
+#include <map>
 
-static constexpr double EPS0 = 8.854187817e-12;    // Vacuum permittivity (F/m)
-static constexpr double C_LIGHT = 299792458.0;      // Speed of light (m/s)
-static constexpr double TWO_PI_EPS0 = 2.0 * M_PI * EPS0;
 
+// ---------------------------------------------------------------------------
+// Physical constants
+// ---------------------------------------------------------------------------
+static constexpr double EPS0    = 8.854187817e-12;   // Vacuum permittivity (F/m)
+static constexpr double C_LIGHT = 299792458.0;        // Speed of light (m/s)
+static constexpr double TWO_PI  = 2.0 * M_PI;
+static constexpr double INV_TWO_PI = 1.0 / ( 2.0 * M_PI );
+
+
+// ---------------------------------------------------------------------------
+// Gauss–Legendre quadrature on [0, 1]
+// ---------------------------------------------------------------------------
+
+// 10-point rule (assembly outer, load, charge)
+static constexpr int GAUSS_N_OUTER = 10;
+static const double GAUSS_PTS_10[10] = {
+    0.01304673574141414, 0.06746831665550774, 0.16029521585048779,
+    0.28330230293537640, 0.42556283050918439, 0.57443716949081561,
+    0.71669769706462360, 0.83970478414951221, 0.93253168334449226,
+    0.98695326425858586
+};
+static const double GAUSS_WTS_10[10] = {
+    0.03333567215434407, 0.07472567457529029, 0.10954318125799103,
+    0.13463335965499817, 0.14776211235737644, 0.14776211235737644,
+    0.13463335965499817, 0.10954318125799103, 0.07472567457529029,
+    0.03333567215434407
+};
+
+// 6-point rule (inner interval integration)
+static constexpr int GAUSS_N_INNER = 6;
+static const double GAUSS_PTS_6[6] = {
+    0.03376524289842399, 0.16939530676686775, 0.38069040695840155,
+    0.61930959304159845, 0.83060469323313225, 0.96623475710157601
+};
+static const double GAUSS_WTS_6[6] = {
+    0.08566224618958517, 0.18038078652406930, 0.23395696728634553,
+    0.23395696728634553, 0.18038078652406930, 0.08566224618958517
+};
+
+
+// ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
 
 BEM_2D_SOLVER::BEM_2D_SOLVER() :
         m_panelsPerEdge( 10 ),
-        m_h( 0.0 )
+        m_lengthScale( 0.0 ),
+        m_numCondNodes( 0 ),
+        m_numIntfNodes( 0 ),
+        m_numConductors( 0 )
 {
 }
 
@@ -46,64 +109,152 @@ void BEM_2D_SOLVER::SetGeometry( const XS_GEOMETRY& aGeometry )
 
 void BEM_2D_SOLVER::SetPanelsPerEdge( int aCount )
 {
-    m_panelsPerEdge = std::max( aCount, 4 );
+    m_panelsPerEdge = std::max( aCount, 3 );
 }
 
 
-double BEM_2D_SOLVER::getEpsilonR( double aY, double aNormalY ) const
+// ---------------------------------------------------------------------------
+// Shape functions — quadratic Lagrangian on [0,1]
+// ---------------------------------------------------------------------------
+
+void BEM_2D_SOLVER::shapeFunctions( double aXi, double aN[3] )
 {
-    // Look slightly in the normal direction to find the region this panel faces.
-    // For horizontal faces, aNormalY != 0 determines above/below.
-    // For vertical (side) faces, aNormalY == 0, so use the region at aY directly.
+    double L1 = 1.0 - aXi;
+    double L2 = aXi;
 
-    if( std::abs( aNormalY ) > 0.5 )
-    {
-        // Horizontal face: look in the normal direction
-        double probeY = aY + aNormalY * 1e-9;
-
-        for( const DIELECTRIC_BOUNDARY& db : m_dielectricBoundaries )
-        {
-            // Boundary at db.y: above has db.epsAbove, below has db.epsBelow.
-            // If probe is just above a boundary, use epsAbove.
-            // If probe is just below a boundary, use epsBelow.
-            // We want the region that contains probeY.
-            if( aNormalY > 0 && aY <= db.y + 1e-9 && probeY >= db.y - 1e-9 )
-                return db.epsAbove; // face looks upward past this boundary
-
-            if( aNormalY < 0 && aY >= db.y - 1e-9 && probeY <= db.y + 1e-9 )
-                return db.epsBelow; // face looks downward past this boundary
-        }
-
-        // No boundary crossed: must be in air (above all dielectrics) or below ground
-        return 1.0;
-    }
-
-    // Side face (vertical): find which dielectric region contains this y
-    for( size_t i = 0; i + 1 < m_dielectricBoundaries.size(); i++ )
-    {
-        if( aY >= m_dielectricBoundaries[i].y && aY <= m_dielectricBoundaries[i + 1].y )
-            return m_dielectricBoundaries[i].epsAbove;
-    }
-
-    return 1.0; // air
+    aN[0] = L1 * ( 2.0 * L1 - 1.0 );   // node 0 (start)
+    aN[1] = 4.0 * L1 * L2;              // node 1 (middle)
+    aN[2] = L2 * ( 2.0 * L2 - 1.0 );   // node 2 (end)
 }
 
 
-void BEM_2D_SOLVER::buildPanels()
+void BEM_2D_SOLVER::shapeDerivatives( double aXi, double aDN[3] )
 {
-    m_conductorPanels.clear();
-    m_interfacePanels.clear();
-    m_dielectricBoundaries.clear();
+    double L1 = 1.0 - aXi;
+    double L2 = aXi;
 
-    // Map input geometry to spec coordinates (Section 2):
-    //   Spec: ground at y = -h, interface at y = 0, conductors at y > 0
-    //
-    // Input geometry may have any arrangement of groundY and interface position.
-    // We compute the signed offset to transform input y → spec y, such that
-    // the interface maps to y=0 and conductors end up at positive y.
+    aDN[0] = -4.0 * L1 + 1.0;
+    aDN[1] =  4.0 * ( L1 - L2 );
+    aDN[2] =  4.0 * L2 - 1.0;
+}
 
-    double yInterfaceIn = 0.0;
+
+double BEM_2D_SOLVER::jacobian( double aXi, const ELEMENT& aElem )
+{
+    double dN[3];
+    shapeDerivatives( aXi, dN );
+
+    double dx = 0.0, dy = 0.0;
+
+    for( int i = 0; i < 3; i++ )
+    {
+        dx += dN[i] * aElem.xpts[i];
+        dy += dN[i] * aElem.ypts[i];
+    }
+
+    return sqrt( dx * dx + dy * dy );
+}
+
+
+void BEM_2D_SOLVER::interpolate( double aXi, const ELEMENT& aElem,
+                                  double& aX, double& aY )
+{
+    double N[3];
+    shapeFunctions( aXi, N );
+
+    aX = 0.0;
+    aY = 0.0;
+
+    for( int i = 0; i < 3; i++ )
+    {
+        aX += N[i] * aElem.xpts[i];
+        aY += N[i] * aElem.ypts[i];
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Green's function kernels — NO ε₀ (matching NMMTL)
+//
+// Ground plane at y = 0.  Image of source at (X, Y) is at (X, -Y).
+//
+// Potential kernel:  G = ln(d_image / d_direct)
+//                      = 0.5 × ln( ((x-X)²+(y+Y)²) / ((x-X)²+(y-Y)²) )
+//
+// This gives G > 0 for sources above the ground plane and vanishes at y = 0.
+// ---------------------------------------------------------------------------
+
+double BEM_2D_SOLVER::greenPotential( double x, double y,
+                                       double X, double Y ) const
+{
+    double dx = x - X;
+    double dy_direct = y - Y;
+    double dy_image  = y + Y;       // image at (X, -Y)
+
+    double d2_direct = dx * dx + dy_direct * dy_direct;
+    double d2_image  = dx * dx + dy_image  * dy_image;
+
+    if( d2_direct < 1e-30 )
+        d2_direct = 1e-30;
+
+    if( d2_image < 1e-30 )
+        d2_image = 1e-30;
+
+    return 0.5 * log( d2_image / d2_direct );
+}
+
+
+double BEM_2D_SOLVER::greenFlux( double x, double y,
+                                  double X, double Y,
+                                  double nx, double ny ) const
+{
+    double dx = x - X;
+    double dy_direct = y - Y;
+    double dy_image  = y + Y;
+
+    double d2_direct = dx * dx + dy_direct * dy_direct;
+    double d2_image  = dx * dx + dy_image  * dy_image;
+
+    if( d2_direct < 1e-30 )
+        d2_direct = 1e-30;
+
+    if( d2_image < 1e-30 )
+        d2_image = 1e-30;
+
+    // NMMTL convention: the flux kernel is (direct/d² - image/d²) · n̂,
+    // NOT the gradient of G.  NMMTL stores A[source][obs] and relies on
+    // the Fortran solver's column-major transpose to get A[obs][source].
+    // With Eigen (row-major), we store A(obs, source) directly, so we
+    // use the same kernel sign as NMMTL.
+
+    double dGdx = dx / d2_direct - dx / d2_image;
+    double dGdy = dy_direct / d2_direct - dy_image / d2_image;
+
+    return dGdx * nx + dGdy * ny;
+}
+
+
+// ---------------------------------------------------------------------------
+// Element generation
+// ---------------------------------------------------------------------------
+
+void BEM_2D_SOLVER::buildElements()
+{
+    m_condElements.clear();
+    m_intfElements.clear();
+    m_numCondNodes = 0;
+    m_numIntfNodes = 0;
+    m_numConductors = (int) m_geometry.conductors.size();
+
+    if( m_numConductors == 0 )
+        return;
+
+    // --- Coordinate transform ---
+    // Map input geometry so that ground plane is at y = 0 and conductors
+    // are at y > 0, matching the Green's function convention.
+
     double yGroundIn = m_geometry.groundY;
+    double yInterfaceIn = 0.0;
 
     if( m_geometry.dielectrics.size() >= 2 )
     {
@@ -111,8 +262,6 @@ void BEM_2D_SOLVER::buildPanels()
     }
     else if( !m_geometry.conductors.empty() )
     {
-        // No explicit dielectric regions: infer interface position from conductor
-        // and ground geometry.  Place it at the conductor face nearest the ground.
         const XS_CONDUCTOR& c0 = m_geometry.conductors[0];
         double faceA = c0.centerY - c0.thickness / 2.0;
         double faceB = c0.centerY + c0.thickness / 2.0;
@@ -123,58 +272,69 @@ void BEM_2D_SOLVER::buildPanels()
             yInterfaceIn = faceB;
     }
 
-    m_h = std::abs( yGroundIn - yInterfaceIn ); // substrate thickness (always positive)
+    double h = std::abs( yGroundIn - yInterfaceIn );
 
-    if( m_h < 1e-9 )
-        return; // degenerate geometry
+    if( h < 1e-9 )
+        return;
 
-    // Determine which direction is "up" (away from ground, toward conductors).
-    // Conductors should end up at y > 0 in spec coordinates.
-    // The ground is on the substrate side of the interface.
-    double ySign = 1.0; // +1 if input y increases away from ground, -1 otherwise
+    // Determine sign so conductors end up at y > 0 in output coords.
+    double ySign = 1.0;
 
     if( !m_geometry.conductors.empty() )
     {
         double condY = m_geometry.conductors[0].centerY;
 
-        // Conductor is on the opposite side of the interface from the ground
         if( ( condY - yInterfaceIn ) * ( yGroundIn - yInterfaceIn ) > 0 )
-            ySign = -1.0; // conductor and ground are on the same side → flip
+            ySign = -1.0;
     }
 
-    // Transform: spec_y = ySign * (input_y - yInterfaceIn)
-    // This puts interface at y=0, and conductor at positive y.
-    auto toSpecY = [&]( double inputY ) { return ySign * ( inputY - yInterfaceIn ); };
+    // Transform: output_y = ySign * (input_y - yInterfaceIn) + h
+    // This puts ground at y=0 and interface at y=h.
+    auto toY = [&]( double inputY )
+    {
+        return ySign * ( inputY - yInterfaceIn ) + h;
+    };
 
-    // Verify: ground should map to negative y
-    double specGround = toSpecY( yGroundIn );
+    // Verify ground maps to y ≈ 0
+    double groundY = toY( yGroundIn );
 
-    if( specGround > 0 )
-        ySign = -ySign; // fix if our guess was wrong
+    if( std::abs( groundY ) > 1e-6 * h )
+    {
+        ySign = -ySign;
+        groundY = toY( yGroundIn );
+    }
 
-    // Now specGround should be at y = -h
-    specGround = toSpecY( yGroundIn );
+    // --- Compute length_scale (NMMTL: half_minimum_dimension) ---
+    double minDim = 1e9;
 
-    // --- Build dielectric boundary list ---
-    // Each dielectric region has yTop, yBottom, epsilonR.  We find every
-    // y-level where εr changes and record the εr on each side.
+    for( const XS_CONDUCTOR& c : m_geometry.conductors )
+    {
+        minDim = std::min( minDim, c.width );
+        minDim = std::min( minDim, c.thickness );
+    }
+
+    m_lengthScale = minDim / 2.0;
+
+    // --- Build dielectric boundaries (same logic as before) ---
+    struct DIELECTRIC_BOUNDARY
+    {
+        double y;
+        double epsAbove;
+        double epsBelow;
+    };
+
+    std::vector<DIELECTRIC_BOUNDARY> dielectricBoundaries;
 
     if( m_geometry.dielectrics.size() >= 2 )
     {
-        // Transform each region boundary to spec coordinates and collect
-        // all unique y-levels with the εr on each side.
-        struct REGION_SPEC
-        {
-            double yLow, yHigh;
-            double er;
-        };
+        struct REGION_SPEC { double yLow, yHigh, er; };
 
         std::vector<REGION_SPEC> regions;
 
         for( const XS_DIELECTRIC_REGION& dr : m_geometry.dielectrics )
         {
-            double y1 = toSpecY( dr.yTop );
-            double y2 = toSpecY( dr.yBottom );
+            double y1 = toY( dr.yTop );
+            double y2 = toY( dr.yBottom );
             double yLow = std::min( y1, y2 );
             double yHigh = std::max( y1, y2 );
 
@@ -182,21 +342,16 @@ void BEM_2D_SOLVER::buildPanels()
                 regions.push_back( { yLow, yHigh, dr.epsilonR } );
         }
 
-        // Sort by yLow
         std::sort( regions.begin(), regions.end(),
                    []( const REGION_SPEC& a, const REGION_SPEC& b )
                    { return a.yLow < b.yLow; } );
 
-        // At each boundary between adjacent regions, or at the top of the
-        // topmost region (transition to air), create a dielectric boundary.
         for( size_t i = 0; i < regions.size(); i++ )
         {
-            // Boundary at the top of this region
             double yBound = regions[i].yHigh;
             double erBelow = regions[i].er;
-            double erAbove = 1.0; // default: air above
+            double erAbove = 1.0;
 
-            // Check if another region starts at this boundary
             for( size_t j = 0; j < regions.size(); j++ )
             {
                 if( j != i && std::abs( regions[j].yLow - yBound ) < 1e-12 )
@@ -206,130 +361,131 @@ void BEM_2D_SOLVER::buildPanels()
                 }
             }
 
-            // Only create boundary if εr actually changes
             if( std::abs( erAbove - erBelow ) > 1e-6 )
-                m_dielectricBoundaries.push_back( { yBound, erAbove, erBelow } );
+                dielectricBoundaries.push_back( { yBound, erAbove, erBelow } );
         }
 
-        // Sort boundaries by y
-        std::sort( m_dielectricBoundaries.begin(), m_dielectricBoundaries.end(),
+        std::sort( dielectricBoundaries.begin(), dielectricBoundaries.end(),
                    []( const DIELECTRIC_BOUNDARY& a, const DIELECTRIC_BOUNDARY& b )
                    { return a.y < b.y; } );
     }
-    // When no dielectric regions are specified, the medium is uniform.
-    // No interface panels are needed — the Solve() method handles this by
-    // scaling the air-only capacitance by the global εr.
 
-    // Panel spacing for interface panels per spec Section 3.1
-    double spacingI = m_h / 5.0;
+    // --- Helper: find εr at a given y-level for a conductor face ---
+    auto getEpsilonR = [&]( double aY, double aNormalY ) -> double
+    {
+        if( std::abs( aNormalY ) > 0.5 )
+        {
+            double probeY = aY + aNormalY * 1e-9;
 
-    // Build conductor panels (spec Section 3.2)
-    for( int ci = 0; ci < (int) m_geometry.conductors.size(); ci++ )
+            for( const DIELECTRIC_BOUNDARY& db : dielectricBoundaries )
+            {
+                if( aNormalY > 0 && aY <= db.y + 1e-9 && probeY >= db.y - 1e-9 )
+                    return db.epsAbove;
+
+                if( aNormalY < 0 && aY >= db.y - 1e-9 && probeY <= db.y + 1e-9 )
+                    return db.epsBelow;
+            }
+
+            return 1.0;
+        }
+
+        for( size_t i = 0; i + 1 < dielectricBoundaries.size(); i++ )
+        {
+            if( aY >= dielectricBoundaries[i].y
+                && aY <= dielectricBoundaries[i + 1].y )
+                return dielectricBoundaries[i].epsAbove;
+        }
+
+        return 1.0;
+    };
+
+    // --- Build conductor elements ---
+    // Node numbering: sequential, shared between adjacent elements on the same face.
+    // Each face with N_elem elements has 2*N_elem + 1 nodes (quadratic).
+
+    int nodeCounter = 0;
+
+    for( int ci = 0; ci < m_numConductors; ci++ )
     {
         const XS_CONDUCTOR& cond = m_geometry.conductors[ci];
 
         double cx = cond.centerX;
-        double cy = toSpecY( cond.centerY );
+        double cy = toY( cond.centerY );
         double hw = cond.width / 2.0;
         double ht = cond.thickness / 2.0;
 
-        // Face extents
-        double xLeft = cx - hw;
+        double xLeft  = cx - hw;
         double xRight = cx + hw;
-        double yBottom = cy - ht;  // should be ~0 for conductor on interface
-        double yTop = cy + ht;
+        double yBot   = cy - ht;
+        double yTop   = cy + ht;
 
-        // Panel counts per face based on user-specified panels-per-edge
-        int nHoriz = std::clamp( m_panelsPerEdge, 4, 50 );
-        int nVert = std::clamp( (int) round( m_panelsPerEdge * cond.thickness / cond.width ),
-                                2, 20 );
+        int nHoriz = std::clamp( m_panelsPerEdge, 3, 50 );
+        int nVert  = std::clamp( (int) round( m_panelsPerEdge * cond.thickness
+                                               / cond.width ), 2, 20 );
 
-        // Bottom face: y = yBottom, normal = (0, -1)
-        for( int i = 0; i < nHoriz; i++ )
+        // Helper to create elements along a straight line segment
+        auto buildFace = [&]( double x0, double y0, double x1, double y1,
+                              int nElem, double nx, double ny )
         {
-            double t = ( i + 0.5 ) / nHoriz;
+            double er = getEpsilonR( ( y0 + y1 ) / 2.0, ny );
 
-            PANEL p = {};
-            p.cx = xLeft + t * cond.width;
-            p.cy = yBottom;
-            p.length = cond.width / nHoriz;
-            p.nx = 0.0;
-            p.ny = -1.0;
-            p.conductorIdx = ci;
-            p.type = CONDUCTOR;
-            p.epsilonR = getEpsilonR( yBottom, -1.0 );
-            m_conductorPanels.push_back( p );
-        }
+            for( int e = 0; e < nElem; e++ )
+            {
+                double t0 = (double) e / nElem;
+                double t1 = (double) ( e + 1 ) / nElem;
+                double tm = ( t0 + t1 ) / 2.0;
 
-        // Top face: y = yTop, normal = (0, +1)
-        for( int i = 0; i < nHoriz; i++ )
-        {
-            double t = ( i + 0.5 ) / nHoriz;
+                ELEMENT el = {};
+                el.xpts[0] = x0 + t0 * ( x1 - x0 );
+                el.ypts[0] = y0 + t0 * ( y1 - y0 );
+                el.xpts[1] = x0 + tm * ( x1 - x0 );
+                el.ypts[1] = y0 + tm * ( y1 - y0 );
+                el.xpts[2] = x0 + t1 * ( x1 - x0 );
+                el.ypts[2] = y0 + t1 * ( y1 - y0 );
+                el.conductorIdx = ci;
+                el.epsilonR = er;
 
-            PANEL p = {};
-            p.cx = xLeft + t * cond.width;
-            p.cy = yTop;
-            p.length = cond.width / nHoriz;
-            p.nx = 0.0;
-            p.ny = 1.0;
-            p.conductorIdx = ci;
-            p.type = CONDUCTOR;
-            p.epsilonR = getEpsilonR( yTop, 1.0 );
-            m_conductorPanels.push_back( p );
-        }
+                // Assign nodes — first element gets 3 new nodes,
+                // subsequent elements share the start node with previous end.
+                if( e == 0 )
+                {
+                    el.nodeIdx[0] = nodeCounter++;
+                    el.nodeIdx[1] = nodeCounter++;
+                    el.nodeIdx[2] = nodeCounter++;
+                }
+                else
+                {
+                    el.nodeIdx[0] = m_condElements.back().nodeIdx[2]; // shared
+                    el.nodeIdx[1] = nodeCounter++;
+                    el.nodeIdx[2] = nodeCounter++;
+                }
 
-        // Left face: x = xLeft, normal = (-1, 0)
-        for( int i = 0; i < nVert; i++ )
-        {
-            double t = ( i + 0.5 ) / nVert;
+                m_condElements.push_back( el );
+            }
+        };
 
-            PANEL p = {};
-            p.cx = xLeft;
-            p.cy = yBottom + t * cond.thickness;
-            p.length = cond.thickness / nVert;
-            p.nx = -1.0;
-            p.ny = 0.0;
-            p.conductorIdx = ci;
-            p.type = CONDUCTOR;
-            p.epsilonR = getEpsilonR( p.cy, 0.0 );
-            m_conductorPanels.push_back( p );
-        }
-
-        // Right face: x = xRight, normal = (+1, 0)
-        for( int i = 0; i < nVert; i++ )
-        {
-            double t = ( i + 0.5 ) / nVert;
-
-            PANEL p = {};
-            p.cx = xRight;
-            p.cy = yBottom + t * cond.thickness;
-            p.length = cond.thickness / nVert;
-            p.nx = 1.0;
-            p.ny = 0.0;
-            p.conductorIdx = ci;
-            p.type = CONDUCTOR;
-            p.epsilonR = getEpsilonR( p.cy, 0.0 );
-            m_conductorPanels.push_back( p );
-        }
+        // Four faces: bottom, right, top (reversed), left (reversed)
+        buildFace( xLeft, yBot, xRight, yBot, nHoriz, 0.0, -1.0 );  // bottom
+        buildFace( xRight, yBot, xRight, yTop, nVert, 1.0, 0.0 );    // right
+        buildFace( xRight, yTop, xLeft, yTop, nHoriz, 0.0, 1.0 );    // top
+        buildFace( xLeft, yTop, xLeft, yBot, nVert, -1.0, 0.0 );     // left
     }
 
-    // Build interface panels at each dielectric boundary
-    if( m_dielectricBoundaries.empty() )
+    m_numCondNodes = nodeCounter;
+
+    // --- Build interface elements ---
+    if( dielectricBoundaries.empty() )
         return;
 
-    // Find conductor footprint extents (for excluding panels at each y-level)
-    struct FOOTPRINT
-    {
-        double xLeft, xRight, yBottom, yTop;
-    };
-
+    // Conductor footprints for exclusion
+    struct FOOTPRINT { double xLeft, xRight, yBot, yTop; };
     std::vector<FOOTPRINT> footprints;
     double xMinAll = 1e9, xMaxAll = -1e9;
 
     for( const XS_CONDUCTOR& cond : m_geometry.conductors )
     {
         double cx = cond.centerX;
-        double cy = toSpecY( cond.centerY );
+        double cy = toY( cond.centerY );
         double hw = cond.width / 2.0;
         double ht = cond.thickness / 2.0;
         footprints.push_back( { cx - hw, cx + hw, cy - ht, cy + ht } );
@@ -337,351 +493,549 @@ void BEM_2D_SOLVER::buildPanels()
         xMaxAll = std::max( xMaxAll, cx + hw );
     }
 
-    double extent = 5.0 * m_h;
+    double extent = 5.0 * h;
     double xStart = xMinAll - extent;
-    double xEnd = xMaxAll + extent;
-    int maxInterfacePanels = 500; // safety cap
+    double xEnd   = xMaxAll + extent;
+    double spacingI = h / 5.0;
 
-    for( const DIELECTRIC_BOUNDARY& db : m_dielectricBoundaries )
+    for( const DIELECTRIC_BOUNDARY& db : dielectricBoundaries )
     {
-        double x = xStart;
+        // Collect the x-ranges that are NOT under a conductor at this y-level
+        // Build a list of free intervals by subtracting conductor footprints
+        struct INTERVAL { double a, b; };
+        std::vector<INTERVAL> free = { { xStart, xEnd } };
 
-        while( x < xEnd && (int) m_interfacePanels.size() < maxInterfacePanels )
+        for( const FOOTPRINT& fp : footprints )
         {
-            double xMid = x + spacingI / 2.0;
+            if( db.y < fp.yBot - 1e-9 || db.y > fp.yTop + 1e-9 )
+                continue;
 
-            if( xMid >= xEnd )
-                break;
+            std::vector<INTERVAL> next;
 
-            // Check if this panel overlaps any conductor face at this y-level
-            bool inFootprint = false;
-
-            for( const FOOTPRINT& fp : footprints )
+            for( const INTERVAL& iv : free )
             {
-                if( xMid >= fp.xLeft && xMid <= fp.xRight
-                    && db.y >= fp.yBottom - 1e-9 && db.y <= fp.yTop + 1e-9 )
+                if( fp.xRight <= iv.a || fp.xLeft >= iv.b )
                 {
-                    inFootprint = true;
-                    break;
-                }
-            }
-
-            if( !inFootprint )
-            {
-                PANEL p = {};
-                p.cx = xMid;
-                p.cy = db.y;
-                p.length = spacingI;
-                p.nx = 0.0;
-                p.ny = 1.0; // normal = +ŷ (convention: plus side is above)
-                p.conductorIdx = -1;
-                p.type = INTERFACE;
-                p.epsPlus = db.epsAbove;
-                p.epsMinus = db.epsBelow;
-                m_interfacePanels.push_back( p );
-            }
-
-            x += spacingI;
-        }
-    }
-}
-
-
-double BEM_2D_SOLVER::greenG( double x, double y, double xs, double ys ) const
-{
-    // Spec Section 4: G(r, r') = -1/(2πε₀) × [ln|r-r'| - ln|r-r''|]
-    // where r'' = (xs, -2h - ys) is the ground-plane image.
-
-    double dx = x - xs;
-    double dy = y - ys;
-    double dyImg = y - ( -2.0 * m_h - ys );
-
-    double r2 = dx * dx + dy * dy;
-    double rImg2 = dx * dx + dyImg * dyImg;
-
-    if( r2 < 1e-30 )
-        r2 = 1e-30;
-
-    if( rImg2 < 1e-30 )
-        rImg2 = 1e-30;
-
-    return -1.0 / TWO_PI_EPS0 * ( 0.5 * log( r2 ) - 0.5 * log( rImg2 ) );
-}
-
-
-double BEM_2D_SOLVER::greenDGDn( double x, double y, double xs, double ys ) const
-{
-    // Spec Section 4: ∂G/∂n with n̂ = +ŷ (interface normal)
-    // = -1/(2πε₀) × [(y-ys)/r² - (y-ys'')/rImg²]
-    // where ys'' = -2h - ys
-
-    double dx = x - xs;
-    double dy = y - ys;
-    double dyImg = y - ( -2.0 * m_h - ys );
-
-    double r2 = dx * dx + dy * dy;
-    double rImg2 = dx * dx + dyImg * dyImg;
-
-    if( r2 < 1e-30 )
-        r2 = 1e-30;
-
-    if( rImg2 < 1e-30 )
-        rImg2 = 1e-30;
-
-    return -1.0 / TWO_PI_EPS0 * ( dy / r2 - dyImg / rImg2 );
-}
-
-
-double BEM_2D_SOLVER::selfIntegralG( double aLength ) const
-{
-    // Spec Section 5.1: analytic self-integral of the direct Green's function
-    // ∫_{-L/2}^{L/2} -1/(2πε₀) × ln|s| ds = -L/(2πε₀) × (ln(L/2) - 1)
-
-    return -aLength / TWO_PI_EPS0 * ( log( aLength / 2.0 ) - 1.0 );
-}
-
-
-Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceFull()
-{
-    // Spec Sections 5 and 6: full system with conductor + interface panels.
-    // Solve N times (once per conductor driven at 1V) to build the Maxwell C matrix.
-
-    int numCond = (int) m_geometry.conductors.size();
-    int nc = (int) m_conductorPanels.size();
-    int ni = (int) m_interfacePanels.size();
-    int n = nc + ni;
-
-    Eigen::MatrixXd A( n, n );
-    A.setZero();
-
-    // Helper: get panel by global index
-    auto panel = [&]( int idx ) -> const PANEL&
-    {
-        return ( idx < nc ) ? m_conductorPanels[idx] : m_interfacePanels[idx - nc];
-    };
-
-    // --- Conductor rows (spec Section 5.1) ---
-    for( int i = 0; i < nc; i++ )
-    {
-        const PANEL& pi = m_conductorPanels[i];
-
-        for( int j = 0; j < n; j++ )
-        {
-            const PANEL& pj = panel( j );
-
-            if( i == j )
-            {
-                // Diagonal: analytic direct self-term + midpoint image term
-                double imageY = -2.0 * m_h - pi.cy;
-                double rImg = std::abs( pi.cy - imageY );
-                double gImage = 1.0 / TWO_PI_EPS0 * 0.5 * log( rImg * rImg );
-
-                A( i, j ) = selfIntegralG( pi.length ) + gImage * pi.length;
-            }
-            else
-            {
-                // Off-diagonal
-                double dist2 = ( pi.cx - pj.cx ) * ( pi.cx - pj.cx )
-                               + ( pi.cy - pj.cy ) * ( pi.cy - pj.cy );
-                double threshold = 3.0 * std::max( pi.length, pj.length );
-
-                if( sqrt( dist2 ) < threshold )
-                {
-                    // 4-point Gaussian quadrature for nearby panels
-                    static const double gp[] = { -0.861136, -0.339981, 0.339981, 0.861136 };
-                    static const double gw[] = { 0.347855, 0.652145, 0.652145, 0.347855 };
-
-                    double sum = 0.0;
-
-                    for( int q = 0; q < 4; q++ )
-                    {
-                        double xq = 0.0;
-                        double yq = 0.0;
-
-                        if( std::abs( pj.ny ) > 0.5 )
-                        {
-                            xq = pj.cx + gp[q] * pj.length / 2.0;
-                            yq = pj.cy;
-                        }
-                        else
-                        {
-                            xq = pj.cx;
-                            yq = pj.cy + gp[q] * pj.length / 2.0;
-                        }
-
-                        sum += gw[q] * greenG( pi.cx, pi.cy, xq, yq );
-                    }
-
-                    A( i, j ) = sum * pj.length / 2.0;
+                    next.push_back( iv );
                 }
                 else
                 {
-                    A( i, j ) = greenG( pi.cx, pi.cy, pj.cx, pj.cy ) * pj.length;
+                    if( fp.xLeft > iv.a )
+                        next.push_back( { iv.a, fp.xLeft } );
+
+                    if( fp.xRight < iv.b )
+                        next.push_back( { fp.xRight, iv.b } );
                 }
             }
+
+            free = next;
         }
-    }
 
-    // --- Interface rows (spec Section 5.2) ---
-    for( int ii = 0; ii < ni; ii++ )
-    {
-        int i = nc + ii;
-        const PANEL& pi = m_interfacePanels[ii];
-
-        double eps_plus = EPS0 * pi.epsPlus;
-        double eps_minus = EPS0 * pi.epsMinus;
-
-        for( int j = 0; j < n; j++ )
+        // Create quadratic elements along each free interval
+        for( const INTERVAL& iv : free )
         {
-            const PANEL& pj = panel( j );
+            double len = iv.b - iv.a;
 
-            if( i == j )
-            {
-                double jumpTerm = -( eps_plus + eps_minus ) / ( 2.0 * EPS0 );
-                double imageSelfDGDn = 1.0 / ( TWO_PI_EPS0 ) * ( 2.0 * m_h )
-                                       / ( 4.0 * m_h * m_h );
-                double imageSelfTerm = ( eps_plus - eps_minus ) * imageSelfDGDn * pi.length;
+            if( len < spacingI * 0.5 )
+                continue;
 
-                A( i, j ) = jumpTerm + imageSelfTerm;
-            }
-            else if( pj.type == INTERFACE && std::abs( pj.cy - pi.cy ) < 1e-9 )
-            {
-                double dx = pi.cx - pj.cx;
-                double denom = dx * dx + 4.0 * m_h * m_h;
-                double dgdn_image = 1.0 / TWO_PI_EPS0 * ( 2.0 * m_h ) / denom;
+            int nElem = std::max( 1, (int) round( len / spacingI ) );
 
-                A( i, j ) = ( eps_plus - eps_minus ) * dgdn_image * pj.length;
-            }
-            else
+            for( int e = 0; e < nElem; e++ )
             {
-                A( i, j ) = ( eps_plus - eps_minus )
-                            * greenDGDn( pi.cx, pi.cy, pj.cx, pj.cy ) * pj.length;
+                double t0 = (double) e / nElem;
+                double t1 = (double) ( e + 1 ) / nElem;
+                double tm = ( t0 + t1 ) / 2.0;
+
+                ELEMENT el = {};
+                el.xpts[0] = iv.a + t0 * len;
+                el.ypts[0] = db.y;
+                el.xpts[1] = iv.a + tm * len;
+                el.ypts[1] = db.y;
+                el.xpts[2] = iv.a + t1 * len;
+                el.ypts[2] = db.y;
+                el.conductorIdx = -1;
+                el.epsPlus  = db.epsAbove;
+                el.epsMinus = db.epsBelow;
+                el.normalX  = 0.0;
+                el.normalY  = 1.0;  // pointing up (toward air)
+
+                if( e == 0 )
+                {
+                    el.nodeIdx[0] = nodeCounter++;
+                    el.nodeIdx[1] = nodeCounter++;
+                    el.nodeIdx[2] = nodeCounter++;
+                }
+                else
+                {
+                    el.nodeIdx[0] = m_intfElements.back().nodeIdx[2];
+                    el.nodeIdx[1] = nodeCounter++;
+                    el.nodeIdx[2] = nodeCounter++;
+                }
+
+                m_intfElements.push_back( el );
             }
         }
     }
 
-    // Factorize once, solve for each conductor excitation
+    m_numIntfNodes = nodeCounter - m_numCondNodes;
+}
+
+
+// ---------------------------------------------------------------------------
+// Inner interval integration — potential kernel
+// ---------------------------------------------------------------------------
+
+void BEM_2D_SOLVER::intervalConductor( double x, double y,
+                                        const ELEMENT& aInner,
+                                        double aValue[3] ) const
+{
+    aValue[0] = aValue[1] = aValue[2] = 0.0;
+
+    for( int q = 0; q < GAUSS_N_INNER; q++ )
+    {
+        double xi = GAUSS_PTS_6[q];
+        double N[3];
+        shapeFunctions( xi, N );
+
+        double X, Y;
+        interpolate( xi, aInner, X, Y );
+
+        double J = jacobian( xi, aInner );
+        double G = greenPotential( x, y, X, Y );
+
+        for( int i = 0; i < 3; i++ )
+            aValue[i] += GAUSS_WTS_6[q] * N[i] * G * J;
+    }
+}
+
+
+void BEM_2D_SOLVER::intervalSelfConductor( double x, double y,
+                                            const ELEMENT& aElem,
+                                            double aValue[3],
+                                            double aXiOuter ) const
+{
+    // Split the integration at the singularity point aXiOuter.
+    // Integrate [0, aXiOuter] and [aXiOuter, 1] separately.
+    aValue[0] = aValue[1] = aValue[2] = 0.0;
+
+    auto integrate = [&]( double a, double b )
+    {
+        if( b - a < 1e-12 )
+            return;
+
+        for( int q = 0; q < GAUSS_N_INNER; q++ )
+        {
+            double xi = a + GAUSS_PTS_6[q] * ( b - a );
+            double N[3];
+            shapeFunctions( xi, N );
+
+            double X, Y;
+            interpolate( xi, aElem, X, Y );
+
+            double J = jacobian( xi, aElem );
+            double G = greenPotential( x, y, X, Y );
+
+            double w = GAUSS_WTS_6[q] * ( b - a );
+
+            for( int i = 0; i < 3; i++ )
+                aValue[i] += w * N[i] * G * J;
+        }
+    };
+
+    integrate( 0.0, aXiOuter );
+    integrate( aXiOuter, 1.0 );
+}
+
+
+// ---------------------------------------------------------------------------
+// Inner interval integration — flux kernel ∂G/∂n
+// ---------------------------------------------------------------------------
+
+void BEM_2D_SOLVER::intervalFlux( double x, double y,
+                                   const ELEMENT& aInner,
+                                   double aValue[3],
+                                   double nx, double ny ) const
+{
+    aValue[0] = aValue[1] = aValue[2] = 0.0;
+
+    for( int q = 0; q < GAUSS_N_INNER; q++ )
+    {
+        double xi = GAUSS_PTS_6[q];
+        double N[3];
+        shapeFunctions( xi, N );
+
+        double X, Y;
+        interpolate( xi, aInner, X, Y );
+
+        double J = jacobian( xi, aInner );
+        double dGdn = greenFlux( x, y, X, Y, nx, ny );
+
+        for( int i = 0; i < 3; i++ )
+            aValue[i] += GAUSS_WTS_6[q] * N[i] * dGdn * J;
+    }
+}
+
+
+void BEM_2D_SOLVER::intervalSelfFlux( double x, double y,
+                                       const ELEMENT& aElem,
+                                       double aValue[3], double aXiOuter,
+                                       double nx, double ny ) const
+{
+    aValue[0] = aValue[1] = aValue[2] = 0.0;
+
+    auto integrate = [&]( double a, double b )
+    {
+        if( b - a < 1e-12 )
+            return;
+
+        for( int q = 0; q < GAUSS_N_INNER; q++ )
+        {
+            double xi = a + GAUSS_PTS_6[q] * ( b - a );
+            double N[3];
+            shapeFunctions( xi, N );
+
+            double X, Y;
+            interpolate( xi, aElem, X, Y );
+
+            double J = jacobian( xi, aElem );
+            double dGdn = greenFlux( x, y, X, Y, nx, ny );
+
+            double w = GAUSS_WTS_6[q] * ( b - a );
+
+            for( int i = 0; i < 3; i++ )
+                aValue[i] += w * N[i] * dGdn * J;
+        }
+    };
+
+    integrate( 0.0, aXiOuter );
+    integrate( aXiOuter, 1.0 );
+}
+
+
+// ---------------------------------------------------------------------------
+// Load vector — NMMTL convention: b = ε₀ × V
+// ---------------------------------------------------------------------------
+
+void BEM_2D_SOLVER::buildLoadVector( Eigen::VectorXd& aB,
+                                      int aActiveConductor ) const
+{
+    aB.setZero();
+
+    for( const ELEMENT& el : m_condElements )
+    {
+        if( el.conductorIdx != aActiveConductor )
+            continue;
+
+        for( int q = 0; q < GAUSS_N_OUTER; q++ )
+        {
+            double xi = GAUSS_PTS_10[q];
+            double N[3];
+            shapeFunctions( xi, N );
+
+            double J = jacobian( xi, el );
+
+            for( int i = 0; i < 3; i++ )
+                aB( el.nodeIdx[i] ) += EPS0 * GAUSS_WTS_10[q] * N[i] * J;
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Charge extraction — NMMTL convention: Q = ∫ εr × σ × N dl
+// ---------------------------------------------------------------------------
+
+void BEM_2D_SOLVER::extractCharge( const Eigen::VectorXd& aSigma,
+                                    double aEpsFactor,
+                                    Eigen::VectorXd& aQ ) const
+{
+    aQ.setZero();
+
+    for( const ELEMENT& el : m_condElements )
+    {
+        int ci = el.conductorIdx;
+
+        for( int q = 0; q < GAUSS_N_OUTER; q++ )
+        {
+            double xi = GAUSS_PTS_10[q];
+            double N[3];
+            shapeFunctions( xi, N );
+
+            double J = jacobian( xi, el );
+
+            for( int i = 0; i < 3; i++ )
+            {
+                aQ( ci ) += aEpsFactor * el.epsilonR * GAUSS_WTS_10[q]
+                            * N[i] * aSigma( el.nodeIdx[i] ) * J;
+            }
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Full-system assembly and solve (conductor + interface)
+// ---------------------------------------------------------------------------
+
+Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceFull()
+{
+    int nTotal = m_numCondNodes + m_numIntfNodes;
+    Eigen::MatrixXd A = Eigen::MatrixXd::Zero( nTotal, nTotal );
+
+    // --- Conductor rows (Galerkin: outer on conductor, inner on all) ---
+    for( const ELEMENT& outerEl : m_condElements )
+    {
+        for( int qo = 0; qo < GAUSS_N_OUTER; qo++ )
+        {
+            double xiOuter = GAUSS_PTS_10[qo];
+            double No[3];
+            shapeFunctions( xiOuter, No );
+
+            double x, y;
+            interpolate( xiOuter, outerEl, x, y );
+
+            double Jo = jacobian( xiOuter, outerEl );
+
+            // Inner loop — conductor elements
+            for( const ELEMENT& innerEl : m_condElements )
+            {
+                double val[3];
+
+                if( &innerEl == &outerEl )
+                    intervalSelfConductor( x, y, innerEl, val, xiOuter );
+                else
+                    intervalConductor( x, y, innerEl, val );
+
+                for( int i = 0; i < 3; i++ )
+                    for( int j = 0; j < 3; j++ )
+                        A( outerEl.nodeIdx[i], innerEl.nodeIdx[j] ) +=
+                            INV_TWO_PI * GAUSS_WTS_10[qo] * No[i] * val[j] * Jo;
+            }
+
+            // Inner loop — interface elements
+            for( const ELEMENT& innerEl : m_intfElements )
+            {
+                double val[3];
+                intervalConductor( x, y, innerEl, val );
+
+                for( int i = 0; i < 3; i++ )
+                    for( int j = 0; j < 3; j++ )
+                        A( outerEl.nodeIdx[i], innerEl.nodeIdx[j] ) +=
+                            INV_TWO_PI * GAUSS_WTS_10[qo] * No[i] * val[j] * Jo;
+            }
+        }
+    }
+
+    // --- Interface rows ---
+    for( const ELEMENT& outerEl : m_intfElements )
+    {
+        double coef1 = m_lengthScale * ( outerEl.epsPlus + outerEl.epsMinus ) / 2.0;
+        double coef2 = m_lengthScale * ( outerEl.epsPlus - outerEl.epsMinus )
+                       * INV_TWO_PI;
+
+        // Diagonal — mass matrix (no Green's function)
+        for( int qo = 0; qo < GAUSS_N_OUTER; qo++ )
+        {
+            double xi = GAUSS_PTS_10[qo];
+            double No[3];
+            shapeFunctions( xi, No );
+            double Jo = jacobian( xi, outerEl );
+
+            for( int i = 0; i < 3; i++ )
+                for( int j = 0; j < 3; j++ )
+                    A( outerEl.nodeIdx[j], outerEl.nodeIdx[i] ) +=
+                        coef1 * GAUSS_WTS_10[qo] * No[i] * No[j] * Jo;
+        }
+
+        // Off-diagonal (flux kernel) — only if εr changes
+        if( std::abs( coef2 ) < 1e-20 )
+            continue;
+
+        for( int qo = 0; qo < GAUSS_N_OUTER; qo++ )
+        {
+            double xiOuter = GAUSS_PTS_10[qo];
+            double No[3];
+            shapeFunctions( xiOuter, No );
+
+            double x, y;
+            interpolate( xiOuter, outerEl, x, y );
+            double Jo = jacobian( xiOuter, outerEl );
+
+            // Inner — conductor elements
+            for( const ELEMENT& innerEl : m_condElements )
+            {
+                double val[3];
+                intervalFlux( x, y, innerEl, val,
+                              outerEl.normalX, outerEl.normalY );
+
+                for( int i = 0; i < 3; i++ )
+                    for( int j = 0; j < 3; j++ )
+                        A( outerEl.nodeIdx[i], innerEl.nodeIdx[j] ) +=
+                            coef2 * GAUSS_WTS_10[qo] * No[i] * val[j] * Jo;
+            }
+
+            // Inner — interface elements
+            for( const ELEMENT& innerEl : m_intfElements )
+            {
+                double val[3];
+
+                if( &innerEl == &outerEl )
+                    intervalSelfFlux( x, y, innerEl, val, xiOuter,
+                                     outerEl.normalX, outerEl.normalY );
+                else
+                    intervalFlux( x, y, innerEl, val,
+                                  outerEl.normalX, outerEl.normalY );
+
+                for( int i = 0; i < 3; i++ )
+                    for( int j = 0; j < 3; j++ )
+                        A( outerEl.nodeIdx[i], innerEl.nodeIdx[j] ) +=
+                            coef2 * GAUSS_WTS_10[qo] * No[i] * val[j] * Jo;
+            }
+        }
+    }
+
+    // --- Solve for each conductor excitation ---
     Eigen::FullPivLU<Eigen::MatrixXd> lu( A );
-    Eigen::MatrixXd Cmat( numCond, numCond );
+    Eigen::MatrixXd Cmat( m_numConductors, m_numConductors );
     Cmat.setZero();
 
-    for( int active = 0; active < numCond; active++ )
+    for( int active = 0; active < m_numConductors; active++ )
     {
-        // RHS: 1V on conductor `active`, 0V on others, 0 for interface rows
-        Eigen::VectorXd b = Eigen::VectorXd::Zero( n );
-
-        for( int i = 0; i < nc; i++ )
-            b( i ) = ( m_conductorPanels[i].conductorIdx == active ) ? 1.0 : 0.0;
+        Eigen::VectorXd b( nTotal );
+        buildLoadVector( b, active );
 
         Eigen::VectorXd sigma = lu.solve( b );
 
-        // Extract charge on each conductor, weighted by local εr
-        for( int ci = 0; ci < numCond; ci++ )
-        {
-            double Q = 0.0;
+        Eigen::VectorXd Q( m_numConductors );
+        extractCharge( sigma, 1.0, Q );
 
-            for( int i = 0; i < nc; i++ )
-            {
-                if( m_conductorPanels[i].conductorIdx == ci )
-                    Q += m_conductorPanels[i].epsilonR * sigma( i )
-                         * m_conductorPanels[i].length;
-            }
-
-            Cmat( ci, active ) = Q; // C_ij = Q_i when V_j = 1
-        }
+        for( int ci = 0; ci < m_numConductors; ci++ )
+            Cmat( ci, active ) = Q( ci );
     }
 
     return Cmat;
 }
 
+
+// ---------------------------------------------------------------------------
+// Free-space (air-only) assembly and solve — conductor elements only
+// ---------------------------------------------------------------------------
 
 Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceAir()
 {
-    // Spec Section 7: reduced system, conductor panels only, vacuum Green's function
+    Eigen::MatrixXd A = Eigen::MatrixXd::Zero( m_numCondNodes, m_numCondNodes );
 
-    int numCond = (int) m_geometry.conductors.size();
-    int nc = (int) m_conductorPanels.size();
-
-    Eigen::MatrixXd A( nc, nc );
-
-    for( int i = 0; i < nc; i++ )
+    for( const ELEMENT& outerEl : m_condElements )
     {
-        const PANEL& pi = m_conductorPanels[i];
-
-        for( int j = 0; j < nc; j++ )
+        for( int qo = 0; qo < GAUSS_N_OUTER; qo++ )
         {
-            const PANEL& pj = m_conductorPanels[j];
+            double xiOuter = GAUSS_PTS_10[qo];
+            double No[3];
+            shapeFunctions( xiOuter, No );
 
-            if( i == j )
-            {
-                double imageY = -2.0 * m_h - pi.cy;
-                double rImg = std::abs( pi.cy - imageY );
-                double gImage = 1.0 / TWO_PI_EPS0 * 0.5 * log( rImg * rImg );
+            double x, y;
+            interpolate( xiOuter, outerEl, x, y );
+            double Jo = jacobian( xiOuter, outerEl );
 
-                A( i, j ) = selfIntegralG( pi.length ) + gImage * pi.length;
-            }
-            else
+            for( const ELEMENT& innerEl : m_condElements )
             {
-                A( i, j ) = greenG( pi.cx, pi.cy, pj.cx, pj.cy ) * pj.length;
+                double val[3];
+
+                if( &innerEl == &outerEl )
+                    intervalSelfConductor( x, y, innerEl, val, xiOuter );
+                else
+                    intervalConductor( x, y, innerEl, val );
+
+                for( int i = 0; i < 3; i++ )
+                    for( int j = 0; j < 3; j++ )
+                        A( outerEl.nodeIdx[i], innerEl.nodeIdx[j] ) +=
+                            INV_TWO_PI * GAUSS_WTS_10[qo] * No[i] * val[j] * Jo;
             }
         }
     }
 
     Eigen::FullPivLU<Eigen::MatrixXd> lu( A );
-    Eigen::MatrixXd Cmat( numCond, numCond );
+    Eigen::MatrixXd Cmat( m_numConductors, m_numConductors );
     Cmat.setZero();
 
-    for( int active = 0; active < numCond; active++ )
+    for( int active = 0; active < m_numConductors; active++ )
     {
-        Eigen::VectorXd b = Eigen::VectorXd::Zero( nc );
+        Eigen::VectorXd b = Eigen::VectorXd::Zero( m_numCondNodes );
 
-        for( int i = 0; i < nc; i++ )
-            b( i ) = ( m_conductorPanels[i].conductorIdx == active ) ? 1.0 : 0.0;
+        // Load vector — ε₀ × V on active conductor nodes only
+        for( const ELEMENT& el : m_condElements )
+        {
+            if( el.conductorIdx != active )
+                continue;
+
+            for( int q = 0; q < GAUSS_N_OUTER; q++ )
+            {
+                double xi = GAUSS_PTS_10[q];
+                double N[3];
+                shapeFunctions( xi, N );
+                double J = jacobian( xi, el );
+
+                for( int i = 0; i < 3; i++ )
+                    b( el.nodeIdx[i] ) += EPS0 * GAUSS_WTS_10[q] * N[i] * J;
+            }
+        }
 
         Eigen::VectorXd sigma = lu.solve( b );
 
-        for( int ci = 0; ci < numCond; ci++ )
+        // Charge extraction — εr = 1.0 (air)
+        Eigen::VectorXd Q = Eigen::VectorXd::Zero( m_numConductors );
+
+        for( const ELEMENT& el : m_condElements )
         {
-            double Q = 0.0;
+            int ci = el.conductorIdx;
 
-            for( int i = 0; i < nc; i++ )
+            for( int q = 0; q < GAUSS_N_OUTER; q++ )
             {
-                if( m_conductorPanels[i].conductorIdx == ci )
-                    Q += sigma( i ) * m_conductorPanels[i].length;
-            }
+                double xi = GAUSS_PTS_10[q];
+                double N[3];
+                shapeFunctions( xi, N );
+                double J = jacobian( xi, el );
 
-            Cmat( ci, active ) = Q;
+                for( int i = 0; i < 3; i++ )
+                    Q( ci ) += 1.0 * GAUSS_WTS_10[q] * N[i] * sigma( el.nodeIdx[i] ) * J;
+            }
         }
+
+        for( int ci = 0; ci < m_numConductors; ci++ )
+            Cmat( ci, active ) = Q( ci );
     }
 
     return Cmat;
 }
 
+
+// ---------------------------------------------------------------------------
+// Top-level solve
+// ---------------------------------------------------------------------------
 
 bool BEM_2D_SOLVER::Solve()
 {
     if( m_geometry.conductors.empty() )
         return false;
 
-    buildPanels();
+    buildElements();
 
-    if( m_conductorPanels.empty() )
+    if( m_condElements.empty() )
         return false;
 
-    int numCond = (int) m_geometry.conductors.size();
-
-    // Solve the air-only system first (always needed).
+    // Air-only solve (always needed)
     Eigen::MatrixXd Cair = solveCapacitanceAir();
 
     if( Cair( 0, 0 ) <= 0.0 )
         return false;
 
-    // For uniform dielectric (no interface panels), scale C_air by εr.
-    // Interface panels are only built when dielectric regions create boundaries.
+    // Full solve with dielectric
     Eigen::MatrixXd Cfull;
 
-    if( m_interfacePanels.empty() )
+    if( m_intfElements.empty() )
     {
+        // Uniform dielectric: C_full = εr × C_air
         double er = std::max( m_geometry.epsilonR, 1.0 );
         Cfull = er * Cair;
     }
@@ -693,24 +1047,22 @@ bool BEM_2D_SOLVER::Solve()
             return false;
     }
 
-    // Symmetrize: C must be symmetric by reciprocity; any asymmetry is numerical.
-    m_result.C = ( Cfull + Cfull.transpose() ) / 2.0;
+    // Symmetrize
+    m_result.C  = ( Cfull + Cfull.transpose() ) / 2.0;
     m_result.C0 = ( Cair + Cair.transpose() ) / 2.0;
 
-    // L = μ₀ε₀ × C₀⁻¹  (spec Section 7)
+    // L = μ₀ε₀ × C₀⁻¹
     static constexpr double MU0 = 4.0 * M_PI * 1e-7;
-
     m_result.L = MU0 * EPS0 * Cair.inverse();
 
-    // Single-ended Z₀ from conductor 0: Z₀ = 1 / (c × √(C₁₁ × C₀₁₁))
+    // Z₀ = 1 / (c × √(C₁₁ × C₀₁₁))
     m_result.Z0 = 1.0 / ( C_LIGHT * sqrt( Cfull( 0, 0 ) * Cair( 0, 0 ) ) );
     m_result.erEff = Cfull( 0, 0 ) / Cair( 0, 0 );
 
-    // Differential impedance for 2-conductor systems (even/odd mode analysis)
-    if( numCond == 2 )
+    // Differential impedance for 2-conductor systems
+    if( m_numConductors == 2 )
     {
-        // Odd mode: conductor 0 at +1V, conductor 1 at -1V → C_odd = C₁₁ - C₁₂
-        double Codd = Cfull( 0, 0 ) - Cfull( 0, 1 );
+        double Codd  = Cfull( 0, 0 ) - Cfull( 0, 1 );
         double C0odd = Cair( 0, 0 ) - Cair( 0, 1 );
 
         if( Codd > 0.0 && C0odd > 0.0 )
