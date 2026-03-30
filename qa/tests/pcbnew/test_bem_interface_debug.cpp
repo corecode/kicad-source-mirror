@@ -212,10 +212,16 @@ BOOST_AUTO_TEST_CASE( MinimalSystem )
         BOOST_TEST_MESSAGE( buf );
     }
 
+    // Charge extraction weighted by local εr (NMMTL convention).
+    // Bottom face panels (y ≈ 0) face substrate → εr = er.
+    // Top/side panels face air → εr = 1.
     double Q = 0.0;
 
     for( int i = 0; i < nc; i++ )
-        Q += sigma( i ) * p[i].dl;
+    {
+        double localEr = ( p[i].y < 1e-9 ) ? er : 1.0; // bottom face at y=0
+        Q += localEr * sigma( i ) * p[i].dl;
+    }
 
     // Air solve (no interface)
     Eigen::MatrixXd Aa( nc, nc );

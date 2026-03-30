@@ -25,10 +25,14 @@
 
 #include <board.h>
 #include <netinfo.h>
+#include <pad.h>
 #include <pcb_track.h>
+#include <zone.h>
 #include <pcb_edit_frame.h>
 #include <widgets/mathplot.h>
 
+#include <drc/drc_rtree.h>
+#include <sipi/cross_section_builder.h>
 #include <sipi/trace_path_walker.h>
 #include <sipi/stackup_reader.h>
 #include <sipi/analytical_impedance.h>
@@ -36,6 +40,7 @@
 
 #include <wx/button.h>
 #include <wx/choice.h>
+#include <wx/dcbuffer.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
@@ -44,9 +49,10 @@
 #include <set>
 
 
-/**
- * X axis scale that formats tick labels as "X.X mm" (position along trace).
- */
+// ============================================================================
+// X/Y axis scale classes
+// ============================================================================
+
 class PROFILER_SCALE_X : public mpScaleX
 {
 public:
@@ -64,9 +70,6 @@ protected:
 };
 
 
-/**
- * Y axis scale that formats tick labels as "XX.X Ω" (impedance).
- */
 class PROFILER_SCALE_Y : public mpScaleY
 {
 public:
@@ -84,34 +87,290 @@ protected:
 };
 
 
+// ============================================================================
+// XS_VIEW_PANEL — cross-section rendering
+// ============================================================================
 
+XS_VIEW_PANEL::XS_VIEW_PANEL( wxWindow* aParent ) :
+        wxPanel( aParent, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                 wxFULL_REPAINT_ON_RESIZE ),
+        m_sample( nullptr ),
+        m_xExtent( 0.0 )
+{
+    SetBackgroundStyle( wxBG_STYLE_PAINT );
+    SetMinSize( wxSize( -1, 120 ) );
+    Bind( wxEVT_PAINT, &XS_VIEW_PANEL::onPaint, this );
+}
+
+
+void XS_VIEW_PANEL::SetSample( const XS_SAMPLE* aSample )
+{
+    m_sample = aSample;
+    Refresh();
+}
+
+
+void XS_VIEW_PANEL::onPaint( wxPaintEvent& aEvent )
+{
+    wxAutoBufferedPaintDC dc( this );
+    wxRect rect = GetClientRect();
+
+    dc.SetBackground( wxBrush( wxColour( 40, 40, 45 ) ) );
+    dc.Clear();
+
+    if( m_sample && !m_sample->geometry.conductors.empty() )
+        drawCrossSection( dc, rect );
+    else
+    {
+        dc.SetTextForeground( wxColour( 140, 140, 140 ) );
+        dc.DrawText( _( "Click on the impedance plot to view cross-section" ),
+                     rect.x + 10, rect.y + rect.height / 2 - 8 );
+    }
+}
+
+
+void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
+{
+    const XS_GEOMETRY& geom = m_sample->geometry;
+    const XS_CONDUCTOR& sig = geom.conductors[0];
+
+    // --- Compute Y extent from conductors + ground planes ---
+    double yMin = sig.centerY - sig.thickness / 2.0;
+    double yMax = sig.centerY + sig.thickness / 2.0;
+
+    yMin = std::min( yMin, geom.groundY );
+    yMax = std::max( yMax, geom.groundY );
+
+    if( geom.hasUpperGround )
+    {
+        yMin = std::min( yMin, geom.upperGroundY );
+        yMax = std::max( yMax, geom.upperGroundY );
+    }
+
+    // Include dielectric regions that are near the geometry (skip far-away air)
+    double ySpan = yMax - yMin;
+
+    for( const XS_DIELECTRIC_REGION& dr : geom.dielectrics )
+    {
+        double drLo = std::min( dr.yTop, dr.yBottom );
+        double drHi = std::max( dr.yTop, dr.yBottom );
+
+        if( drLo > yMin - ySpan * 3.0 && drHi < yMax + ySpan * 3.0 )
+        {
+            yMin = std::min( yMin, drLo );
+            yMax = std::max( yMax, drHi );
+        }
+    }
+
+    double yPad = ( yMax - yMin ) * 0.2;
+    yMin -= yPad;
+    yMax += yPad;
+
+    // --- X extent: fixed across all samples for comparability ---
+    double xHalf = m_xExtent;
+
+    if( xHalf < 1e-9 )
+    {
+        // Fallback: auto from geometry
+        for( const XS_CONDUCTOR& c : geom.conductors )
+            xHalf = std::max( xHalf, std::abs( c.centerX ) + c.width );
+
+        xHalf *= 1.5;
+    }
+
+    double xMin = -xHalf;
+    double xMax = xHalf;
+
+    // --- Mapping ---
+    int margin = 8;
+    int topMargin = 20; // room for info text
+    int drawW = aRect.width - 2 * margin;
+    int drawH = aRect.height - margin - topMargin;
+
+    if( drawW < 20 || drawH < 20 )
+        return;
+
+    double sX = drawW / ( xMax - xMin );
+    double sY = drawH / ( yMax - yMin );
+
+    int offX = margin;
+    int offY = topMargin;
+
+    auto toPixX = [&]( double x ) -> int { return offX + (int) ( ( x - xMin ) * sX ); };
+    auto toPixY = [&]( double y ) -> int { return offY + (int) ( ( y - yMin ) * sY ); };
+
+    // --- Dielectric regions ---
+    for( const XS_DIELECTRIC_REGION& dr : geom.dielectrics )
+    {
+        double drLo = std::min( dr.yTop, dr.yBottom );
+        double drHi = std::max( dr.yTop, dr.yBottom );
+
+        if( drLo < yMin || drHi > yMax )
+            continue;
+
+        int shade = 60 + (int) ( dr.epsilonR * 12 );
+        shade = std::min( shade, 140 );
+
+        aDC.SetBrush( wxBrush( wxColour( shade, shade + 10, shade - 10 ) ) );
+        aDC.SetPen( wxPen( wxColour( 80, 80, 80 ), 1 ) );
+
+        int py1 = toPixY( drHi );
+        int py2 = toPixY( drLo );
+        aDC.DrawRectangle( toPixX( xMin ), py1, drawW, py2 - py1 );
+
+        wxString erLabel = wxString::Format( wxS( "\u03B5r=%.1f" ), dr.epsilonR );
+        aDC.SetTextForeground( wxColour( 160, 160, 140 ) );
+        wxSize ts = aDC.GetTextExtent( erLabel );
+        aDC.DrawText( erLabel, toPixX( xMin ) + 4, ( py1 + py2 - ts.GetHeight() ) / 2 );
+    }
+
+    // --- Ground plane(s) ---
+    aDC.SetPen( wxPen( wxColour( 200, 180, 60 ), 3 ) );
+    int gndPy = toPixY( geom.groundY );
+    aDC.DrawLine( toPixX( xMin ), gndPy, toPixX( xMax ), gndPy );
+
+    // "GND" label
+    aDC.SetTextForeground( wxColour( 200, 180, 60 ) );
+    aDC.DrawText( wxS( "GND" ), toPixX( xMax ) - 30, gndPy - 14 );
+
+    if( geom.hasUpperGround )
+    {
+        int ugPy = toPixY( geom.upperGroundY );
+        aDC.DrawLine( toPixX( xMin ), ugPy, toPixX( xMax ), ugPy );
+        aDC.DrawText( wxS( "GND" ), toPixX( xMax ) - 30, ugPy + 2 );
+    }
+
+    // --- Conductors ---
+    for( int ci = 0; ci < (int) geom.conductors.size(); ci++ )
+    {
+        const XS_CONDUCTOR& c = geom.conductors[ci];
+
+        int px = toPixX( c.centerX - c.width / 2.0 );
+        int py = toPixY( c.centerY + c.thickness / 2.0 );
+        int pw = std::max( toPixX( c.centerX + c.width / 2.0 ) - px, 3 );
+        int ph = std::max( toPixY( c.centerY - c.thickness / 2.0 ) - py, 2 );
+
+        if( ci == 0 )
+        {
+            aDC.SetBrush( wxBrush( wxColour( 220, 140, 40 ) ) );
+            aDC.SetPen( wxPen( wxColour( 255, 180, 60 ), 2 ) );
+        }
+        else
+        {
+            aDC.SetBrush( wxBrush( wxColour( 160, 120, 60 ) ) );
+            aDC.SetPen( wxPen( wxColour( 180, 140, 70 ), 1 ) );
+        }
+
+        aDC.DrawRectangle( px, py, pw, ph );
+
+        // Width label below conductor
+        wxString wLabel = wxString::Format( wxS( "w=%.0f\u00B5m" ), c.width * 1e6 );
+        aDC.SetTextForeground( ci == 0 ? wxColour( 255, 200, 100 ) : wxColour( 180, 160, 120 ) );
+        wxSize ws = aDC.GetTextExtent( wLabel );
+        aDC.DrawText( wLabel, px + pw / 2 - ws.GetWidth() / 2, py + ph + 2 );
+
+        // Edge-to-edge distance dimension line from signal to neighbor
+        if( ci > 0 )
+        {
+            double sigRight = sig.centerX + sig.width / 2.0;
+            double sigLeft = sig.centerX - sig.width / 2.0;
+            double nbRight = c.centerX + c.width / 2.0;
+            double nbLeft = c.centerX - c.width / 2.0;
+
+            // Pick the facing edges
+            double edgeA, edgeB;
+
+            if( c.centerX > sig.centerX )
+            {
+                edgeA = sigRight;
+                edgeB = nbLeft;
+            }
+            else
+            {
+                edgeA = sigLeft;
+                edgeB = nbRight;
+            }
+
+            double edgeDist = std::abs( edgeB - edgeA );
+
+            // Draw dimension line at conductor mid-height
+            int dimY = py + ph / 2;
+            int dimX1 = toPixX( edgeA );
+            int dimX2 = toPixX( edgeB );
+
+            aDC.SetPen( wxPen( wxColour( 140, 200, 140 ), 1, wxPENSTYLE_SHORT_DASH ) );
+            aDC.DrawLine( dimX1, dimY, dimX2, dimY );
+            // End ticks
+            aDC.DrawLine( dimX1, dimY - 4, dimX1, dimY + 4 );
+            aDC.DrawLine( dimX2, dimY - 4, dimX2, dimY + 4 );
+
+            wxString dLabel = wxString::Format( wxS( "%.0f\u00B5m" ), edgeDist * 1e6 );
+            aDC.SetTextForeground( wxColour( 140, 200, 140 ) );
+            wxSize ds = aDC.GetTextExtent( dLabel );
+            aDC.DrawText( dLabel, ( dimX1 + dimX2 - ds.GetWidth() ) / 2, dimY - ds.GetHeight() - 2 );
+        }
+    }
+
+    // --- Info text ---
+    wxString info = wxString::Format( wxS( "Z\u2080=%.1f\u03A9 @ %.2fmm" ),
+                                      m_sample->z0, m_sample->distMm );
+
+    if( geom.conductors.size() > 1 )
+        info += wxString::Format( wxS( " %dnb" ), (int) geom.conductors.size() - 1 );
+
+    // Reference plane diagnostics
+    wxString refInfo;
+
+    if( m_sample->hasRefAbove )
+        refInfo += wxString::Format( wxS( " h\u2191%.0f\u00B5m" ), m_sample->hAbove * 1e6 );
+
+    if( m_sample->hasRefBelow )
+        refInfo += wxString::Format( wxS( " h\u2193%.0f\u00B5m" ), m_sample->hBelow * 1e6 );
+
+    if( !m_sample->hasRefAbove && !m_sample->hasRefBelow )
+        refInfo = wxS( " NO REF PLANES" );
+
+    aDC.SetTextForeground( wxColour( 220, 220, 220 ) );
+    aDC.DrawText( info + refInfo, aRect.x + 6, aRect.y + 4 );
+}
+
+
+// ============================================================================
+// IMPEDANCE_PROFILER_PANEL
+// ============================================================================
 
 IMPEDANCE_PROFILER_PANEL::IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent ) :
         WX_PANEL( aParent ),
         m_frame( aParent ),
+        m_initialized( false ),
         m_netSelector( nullptr ),
         m_targetZ0Input( nullptr ),
         m_statusText( nullptr ),
         m_plotWindow( nullptr ),
         m_impedanceTrace( nullptr ),
         m_targetLine( nullptr ),
-        m_neighborTrace( nullptr ),
+        m_cursorLine( nullptr ),
         m_xAxis( nullptr ),
         m_yAxis( nullptr ),
+        m_xsView( nullptr ),
+        m_selectedSample( -1 ),
         m_currentNetCode( -1 ),
         m_targetZ0( 50.0 )
 {
-    buildUI();
-
-    if( BOARD* board = m_frame->GetBoard() )
-        board->AddListener( this );
+    // Defer buildUI() and listener registration to OnShowPanel() so that
+    // pcbnew startup doesn't pay for mpWindow / plot-layer construction
+    // when the panel is hidden.
 }
 
 
 IMPEDANCE_PROFILER_PANEL::~IMPEDANCE_PROFILER_PANEL()
 {
-    if( m_frame && m_frame->GetBoard() )
-        m_frame->GetBoard()->RemoveListener( this );
+    // If we never initialized, no listener was registered — nothing to clean up.
+    // If we did initialize, the board listener is already removed by
+    // PCB_EDIT_FRAME::~PCB_EDIT_FRAME() calling RemoveAllListeners() before
+    // m_pcb is deleted.  Don't call GetBoard() here — m_pcb may already be
+    // null (assert) since wxAuiManager destroys child panels after
+    // ~PCB_BASE_FRAME deletes m_pcb.
 }
 
 
@@ -173,22 +432,24 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
     m_targetLine->SetVisible( false );
     m_plotWindow->AddLayer( m_targetLine, false );
 
-    // Neighbor distance overlay (shown in Ohm-scaled units for same Y axis).
-    // We scale the distance so it's visible alongside impedance values:
-    // 0 mm neighbor distance maps to max Y, closer neighbors shown as higher values.
-    wxPen neighborPen( wxColour( 100, 180, 100 ), 1, wxPENSTYLE_DOT );
+    // Cursor line (vertical marker at selected sample)
+    wxPen cursorPen( wxColour( 255, 200, 60 ), 1, wxPENSTYLE_LONG_DASH );
 
-    m_neighborTrace = new mpFXYVector( _( "Neighbor dist" ) );
-    m_neighborTrace->SetPen( neighborPen );
-    m_neighborTrace->SetContinuity( true );
-    m_neighborTrace->SetScale( m_xAxis, m_yAxis );
-    m_neighborTrace->SetVisible( false );
-    m_plotWindow->AddLayer( m_neighborTrace, false );
+    m_cursorLine = new mpFXYVector( _( "Cursor" ) );
+    m_cursorLine->SetPen( cursorPen );
+    m_cursorLine->SetContinuity( true );
+    m_cursorLine->SetScale( m_xAxis, m_yAxis );
+    m_cursorLine->SetVisible( false );
+    m_plotWindow->AddLayer( m_cursorLine, false );
 
     m_plotWindow->SetMargins( 15, 10, 30, 50 );
     m_plotWindow->UpdateAll();
 
-    mainSizer->Add( m_plotWindow, 1, wxEXPAND | wxLEFT | wxRIGHT, 4 );
+    mainSizer->Add( m_plotWindow, 3, wxEXPAND | wxLEFT | wxRIGHT, 4 );
+
+    // Cross-section view
+    m_xsView = new XS_VIEW_PANEL( this );
+    mainSizer->Add( m_xsView, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4 );
 
     // Status bar
     m_statusText = new wxStaticText( this, wxID_ANY, _( "Select a net and click Analyse." ) );
@@ -199,11 +460,22 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
     // Bind events
     analyseBtn->Bind( wxEVT_BUTTON, &IMPEDANCE_PROFILER_PANEL::onAnalyseClicked, this );
     m_netSelector->Bind( wxEVT_CHOICE, &IMPEDANCE_PROFILER_PANEL::onNetSelected, this );
+    m_plotWindow->Bind( wxEVT_MOTION, &IMPEDANCE_PROFILER_PANEL::onPlotClick, this );
 }
 
 
 void IMPEDANCE_PROFILER_PANEL::OnShowPanel()
 {
+    if( !m_initialized )
+    {
+        buildUI();
+
+        if( BOARD* board = m_frame->GetBoard() )
+            board->AddListener( this );
+
+        m_initialized = true;
+    }
+
     populateNetList();
 }
 
@@ -226,7 +498,6 @@ void IMPEDANCE_PROFILER_PANEL::populateNetList()
             routedNets.insert( track->GetNetCode() );
     }
 
-    // Add them sorted by name
     struct NET_ENTRY
     {
         int      netCode;
@@ -284,7 +555,6 @@ void IMPEDANCE_PROFILER_PANEL::onAnalyseClicked( wxCommandEvent& aEvent )
 
     intptr_t netCode = reinterpret_cast<intptr_t>( m_netSelector->GetClientData( sel ) );
 
-    // Parse target impedance
     double target = 50.0;
     m_targetZ0Input->GetValue().ToDouble( &target );
     m_targetZ0 = target;
@@ -295,22 +565,92 @@ void IMPEDANCE_PROFILER_PANEL::onAnalyseClicked( wxCommandEvent& aEvent )
 
 void IMPEDANCE_PROFILER_PANEL::onNetSelected( wxCommandEvent& aEvent )
 {
-    // Auto-analyse on net change
     wxCommandEvent dummy;
     onAnalyseClicked( dummy );
+}
+
+
+void IMPEDANCE_PROFILER_PANEL::onPlotClick( wxMouseEvent& aEvent )
+{
+    if( m_samples.empty() )
+    {
+        aEvent.Skip();
+        return;
+    }
+
+    // Convert pixel X → normalized plot coord → data coord (mm along trace).
+    double normX = m_plotWindow->p2x( aEvent.GetX() );
+    double plotX = m_xAxis->TransformFromPlot( normX );
+
+    // Find the nearest sample
+    int bestIdx = 0;
+    double bestDist = 1e9;
+
+    for( int i = 0; i < (int) m_samples.size(); i++ )
+    {
+        double d = std::abs( m_samples[i].distMm - plotX );
+
+        if( d < bestDist )
+        {
+            bestDist = d;
+            bestIdx = i;
+        }
+    }
+
+    selectSample( bestIdx );
+    aEvent.Skip();
+}
+
+
+void IMPEDANCE_PROFILER_PANEL::selectSample( int aIndex )
+{
+    if( aIndex < 0 || aIndex >= (int) m_samples.size() )
+        return;
+
+    m_selectedSample = aIndex;
+    m_xsView->SetSample( &m_samples[aIndex] );
+
+    // Update cursor line on the plot (vertical line at the sample position)
+    if( !m_samples.empty() )
+    {
+        double xPos = m_samples[aIndex].distMm;
+
+        // Find Y range from impedance data
+        double yMin = 1e9, yMax = -1e9;
+
+        for( const XS_SAMPLE& s : m_samples )
+        {
+            yMin = std::min( yMin, s.z0 );
+            yMax = std::max( yMax, s.z0 );
+        }
+
+        double yPad = ( yMax - yMin ) * 0.15;
+        std::vector<double> cx = { xPos, xPos };
+        std::vector<double> cy = { yMin - yPad, yMax + yPad };
+
+        m_cursorLine->SetData( cx, cy );
+        m_cursorLine->SetVisible( true );
+        m_plotWindow->UpdateAll();
+        m_plotWindow->Refresh();
+    }
+
+    // Highlight the sample location on the board
+    m_frame->FocusOnLocation( m_samples[aIndex].boardPos );
+    m_frame->GetCanvas()->Refresh();
 }
 
 
 void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
 {
     m_currentNetCode = aNetCode;
+    m_samples.clear();
+    m_selectedSample = -1;
 
     BOARD* board = m_frame->GetBoard();
 
     if( !board )
         return;
 
-    // Walk the trace
     TRACE_PATH_WALKER walker( board );
 
     if( !walker.WalkNet( aNetCode ) )
@@ -322,30 +662,16 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     const auto& path = walker.GetPath();
     const WALK_RESULT& result = walker.GetResult();
 
-    // Build impedance profile using BEM solver with neighbor detection.
-    // At each sample point, find nearby traces on the same layer and include
-    // them in the BEM cross-section. This makes Z₀ vary along the route as
-    // the trace passes through areas with different coupling.
     STACKUP_READER stackup( board );
 
-    std::vector<double> positions;
-    std::vector<double> impedances;
-    std::vector<double> neighborDists;   // nearest neighbor distance (mm) at each sample
-    std::vector<int>    neighborCounts;  // number of neighbors at each sample
-
-    // Coupling horizon: ignore traces farther than this (nm).
-    // 3× the max dielectric height is the standard rule of thumb.
-    int couplingHorizon = 2000000; // 2mm default
-
-    // Cache keyed on quantized neighbor configuration to avoid redundant BEM solves.
-    // Key: (layer, width, refAbove, refBelow, quantized neighbor distances)
+    // Cache keyed on quantized cross-section to avoid redundant BEM solves.
     struct XS_KEY
     {
         PCB_LAYER_ID       layer;
         int                width;
         bool               refAbove;
         bool               refBelow;
-        std::vector<int>   neighborKeys; // quantized (distance_um, width_nm) pairs
+        std::vector<int>   neighborKeys;
 
         bool operator<( const XS_KEY& o ) const
         {
@@ -359,157 +685,200 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
 
     std::map<XS_KEY, double> z0Cache;
 
-    // Collect all track segments on the board (for neighbor search)
-    // grouped by layer for efficiency.
-    std::map<PCB_LAYER_ID, std::vector<PCB_TRACK*>> tracksByLayer;
+    // Build spatial index for neighbor search.  Use the board's DRC cache if
+    // available; otherwise build a temporary one from all track segments.
+    std::unique_ptr<DRC_RTREE> tempRtree;
+    DRC_RTREE* rtree = nullptr;
 
-    for( PCB_TRACK* t : board->Tracks() )
+    if( board->m_CopperItemRTreeCache )
     {
-        if( t->Type() == PCB_VIA_T )
-            continue;
+        rtree = board->m_CopperItemRTreeCache.get();
+    }
+    else
+    {
+        tempRtree = std::make_unique<DRC_RTREE>();
 
-        tracksByLayer[t->GetLayer()].push_back( t );
+        for( PCB_TRACK* t : board->Tracks() )
+        {
+            if( t->Type() != PCB_VIA_T )
+                tempRtree->Insert( t, t->GetLayer() );
+        }
+
+        rtree = tempRtree.get();
     }
 
-    // Sample at each path point (not just per-segment) since neighbors vary
-    int  sampleInterval = std::max( 1, (int) path.size() / 200 ); // limit to ~200 samples
-    bool lastWasVia = false;
+    // Sample at uniform distance intervals along the path, interpolating
+    // position between path points.  Interpolation along straight segments
+    // is exact (linear between endpoints).
+    double totalLen = walker.GetTotalLength(); // nm
 
-    for( int pi = 0; pi < (int) path.size(); pi++ )
+    if( totalLen < 1.0 )
     {
-        const PATH_POINT& pt = path[pi];
+        updateStatus( _( "Trace has zero length." ) );
+        return;
+    }
 
-        if( pt.isVia )
-        {
-            lastWasVia = true;
+    double sampleStep = std::max( totalLen / 500.0, 50000.0 ); // ~500 samples, min 50µm
+    int    numSamples = std::max( 2, (int) ceil( totalLen / sampleStep ) + 1 );
+
+    // Build non-via path index for interpolation
+    struct PATH_SEG
+    {
+        double       dist;     ///< Path distance at this point
+        VECTOR2I     pos;      ///< Board position
+        VECTOR2D     tangent;  ///< Unit tangent
+        PCB_TRACK*   track;    ///< Source track segment
+    };
+
+    std::vector<PATH_SEG> segs;
+
+    for( const PATH_POINT& pp : path )
+    {
+        if( pp.isVia )
             continue;
+
+        segs.push_back( { pp.distFromStart, pp.position, pp.tangent,
+                          static_cast<PCB_TRACK*>( pp.item ) } );
+    }
+
+    if( segs.empty() )
+    {
+        updateStatus( _( "No impedance data — trace has no non-via segments." ) );
+        return;
+    }
+
+    // Map path items → path distance for topological neighbor exclusion.
+    std::map<BOARD_CONNECTED_ITEM*, double> pathItemDist;
+
+    for( const PATH_POINT& pp : path )
+    {
+        if( !pp.isVia && pathItemDist.find( pp.item ) == pathItemDist.end() )
+            pathItemDist[pp.item] = pp.distFromStart;
+    }
+
+    int segIdx = 0;
+
+    for( int si = 0; si < numSamples; si++ )
+    {
+        double sampleDist = si * sampleStep;
+
+        if( sampleDist > totalLen )
+            sampleDist = totalLen;
+
+        // Advance to the segment containing this distance
+        while( segIdx + 1 < (int) segs.size()
+               && segs[segIdx + 1].dist <= sampleDist )
+        {
+            segIdx++;
         }
 
-        // Sample every Nth point (but always sample after a via and at start/end)
-        if( pi % sampleInterval != 0 && !lastWasVia
-            && pi != 0 && pi != (int) path.size() - 1 )
+        const PATH_SEG& seg = segs[segIdx];
+
+        // Interpolate position along the segment (exact for straight tracks)
+        VECTOR2I samplePos = seg.pos;
+
+        if( segIdx + 1 < (int) segs.size() )
         {
-            continue;
-        }
+            const PATH_SEG& next = segs[segIdx + 1];
+            double segLen = next.dist - seg.dist;
 
-        lastWasVia = false;
-
-        PCB_TRACK* track = static_cast<PCB_TRACK*>( pt.item );
-
-        LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
-                                                        pt.position,
-                                                        track->GetWidth() );
-
-        // Find neighbor traces at this point.
-        // Project each nearby track onto the perpendicular cut line and measure
-        // the lateral distance from our signal trace center.
-        struct NEIGHBOR
-        {
-            int distNm; // signed distance from signal center (nm), positive = right
-            int widthNm;
-        };
-
-        std::vector<NEIGHBOR> neighbors;
-
-        VECTOR2D normal( -pt.tangent.y, pt.tangent.x ); // perpendicular to trace direction
-
-        // Minimum edge-to-edge distance to count as a neighbor (not overlapping).
-        // Two traces closer than this are either the same trace or a DRC violation.
-        int minEdgeToEdge = 10000; // 10µm in nm
-
-        auto it = tracksByLayer.find( track->GetLayer() );
-
-        if( it != tracksByLayer.end() )
-        {
-            for( PCB_TRACK* other : it->second )
+            if( segLen > 1.0 )
             {
-                if( other == track )
-                    continue;
-
-                // Skip segments that share an endpoint with the current segment.
-                // These are topologically connected (the next/prev segment at a bend),
-                // not coupling neighbors. But segments on the same net that DON'T
-                // share an endpoint (e.g., adjacent serpentine legs) ARE neighbors.
-                if( other->GetStart() == track->GetStart()
-                    || other->GetStart() == track->GetEnd()
-                    || other->GetEnd() == track->GetStart()
-                    || other->GetEnd() == track->GetEnd() )
-                {
-                    continue;
-                }
-
-                // Compute the closest point on the other segment to our sample point,
-                // then project onto our perpendicular to get the lateral distance.
-                VECTOR2D otherDir( other->GetEnd().x - other->GetStart().x,
-                                   other->GetEnd().y - other->GetStart().y );
-                double otherLen = otherDir.EuclideanNorm();
-
-                if( otherLen < 1.0 )
-                    continue; // degenerate segment
-
-                otherDir = otherDir / otherLen;
-
-                // Parameter t along the other segment for closest point to our position
-                VECTOR2D toSample( pt.position.x - other->GetStart().x,
-                                   pt.position.y - other->GetStart().y );
-                double t = toSample.x * otherDir.x + toSample.y * otherDir.y;
-                t = std::max( 0.0, std::min( t, otherLen ) );
-
-                // Closest point on other segment
-                VECTOR2D closest( other->GetStart().x + t * otherDir.x,
-                                  other->GetStart().y + t * otherDir.y );
-
-                VECTOR2D delta( closest.x - pt.position.x, closest.y - pt.position.y );
-
-                // Lateral distance (projection onto our perpendicular)
-                double lateralDist = delta.x * normal.x + delta.y * normal.y;
-
-                if( std::abs( lateralDist ) > couplingHorizon )
-                    continue;
-
-                // Check edge-to-edge distance
-                double halfWidths = ( track->GetWidth() + other->GetWidth() ) / 2.0;
-                double edgeToEdge = std::abs( lateralDist ) - halfWidths;
-
-                if( edgeToEdge < minEdgeToEdge )
-                    continue; // overlapping or touching — not a real neighbor
-
-                // Along-track check: the closest point should be roughly "beside" us,
-                // not far ahead or behind
-                double alongDist = delta.x * pt.tangent.x + delta.y * pt.tangent.y;
-
-                if( std::abs( alongDist ) > track->GetLength() )
-                    continue;
-
-                neighbors.push_back(
-                        { static_cast<int>( lateralDist ), other->GetWidth() } );
+                double frac = ( sampleDist - seg.dist ) / segLen;
+                frac = std::clamp( frac, 0.0, 1.0 );
+                samplePos.x = seg.pos.x + (int) ( frac * ( next.pos.x - seg.pos.x ) );
+                samplePos.y = seg.pos.y + (int) ( frac * ( next.pos.y - seg.pos.y ) );
             }
         }
 
-        // Sort neighbors by absolute distance for deterministic cache key
-        std::sort( neighbors.begin(), neighbors.end(),
-                   []( const NEIGHBOR& a, const NEIGHBOR& b )
-                   {
-                       return std::abs( a.distNm ) < std::abs( b.distNm );
-                   } );
+        VECTOR2D     sampleTangent = seg.tangent;
+        PCB_TRACK*   track = seg.track;
+        int          signalWidth = track->GetWidth(); // may be overridden by pad
 
-        // Limit to 4 nearest neighbors (BEM cost grows with conductor count)
-        if( neighbors.size() > 4 )
-            neighbors.resize( 4 );
+        // Check if the sample point is inside a pad on the signal net.
+        // If so, the effective conductor width is the pad's cross-section extent.
+        for( PAD* pad : board->GetPads() )
+        {
+            if( pad->GetNetCode() != track->GetNetCode() )
+                continue;
 
-        // Build cache key with quantized neighbor distances (10µm buckets)
+            if( !pad->IsOnLayer( track->GetLayer() ) )
+                continue;
+
+            if( pad->HitTest( samplePos, 0 ) )
+            {
+                // Pad contains our sample point — use pad extent along the cut
+                // line as the effective signal width.
+                VECTOR2D normal0( -sampleTangent.y, sampleTangent.x );
+                BOX2I    padBBox = pad->GetBoundingBox();
+
+                // Project pad bounding box corners onto the cut-line normal
+                // to get the pad's cross-section width.
+                double minProj = 1e18, maxProj = -1e18;
+
+                for( const VECTOR2I& corner :
+                     { padBBox.GetOrigin(),
+                       padBBox.GetOrigin() + VECTOR2I( padBBox.GetWidth(), 0 ),
+                       padBBox.GetOrigin() + VECTOR2I( 0, padBBox.GetHeight() ),
+                       padBBox.GetEnd() } )
+                {
+                    VECTOR2D d( corner.x - samplePos.x, corner.y - samplePos.y );
+                    double proj = d.x * normal0.x + d.y * normal0.y;
+                    minProj = std::min( minProj, proj );
+                    maxProj = std::max( maxProj, proj );
+                }
+
+                int padWidth = (int) ( maxProj - minProj );
+
+                if( padWidth > signalWidth )
+                    signalWidth = padWidth;
+
+                break;
+            }
+        }
+
+        LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
+                                                        samplePos,
+                                                        signalWidth );
+
+        // Coupling horizon: 3× the nearest reference plane distance (edge-to-edge)
+        double hRef = std::max( geom.hAbove, geom.hBelow );
+        int    couplingHorizon = std::max( (int) ( hRef * 3.0 * 1e9 ), 500000 ); // nm, min 0.5mm
+
+        // Use the tested CROSS_SECTION_BUILDER for neighbor detection + geometry
+        CROSS_SECTION_BUILDER xsBuilder;
+        xsBuilder.SetSpatialIndex( rtree );
+        xsBuilder.SetBoard( board );
+        xsBuilder.SetPathItemDistances( &pathItemDist );
+        xsBuilder.SetSignalTrack( track );
+
+        XS_BUILD_PARAMS xsParams;
+        xsParams.samplePos = samplePos;
+        xsParams.sampleTangent = sampleTangent;
+        xsParams.signalLayer = track->GetLayer();
+        xsParams.signalNetCode = track->GetNetCode();
+        xsParams.signalWidth = signalWidth;
+        xsParams.couplingHorizon = couplingHorizon;
+        xsParams.sampleDist = sampleDist;
+        xsParams.layerGeom = geom;
+
+        auto neighbors = xsBuilder.FindNeighbors( xsParams );
+        XS_GEOMETRY xs = xsBuilder.BuildGeometry( xsParams, neighbors );
+
+        // Build cache key from neighbor configuration
         XS_KEY key;
         key.layer = track->GetLayer();
         key.width = track->GetWidth();
         key.refAbove = geom.hasRefAbove;
         key.refBelow = geom.hasRefBelow;
 
-        for( const NEIGHBOR& nb : neighbors )
+        for( const XS_NEIGHBOR& nb : neighbors )
         {
-            key.neighborKeys.push_back( nb.distNm / 10000 ); // quantize to 10µm
+            key.neighborKeys.push_back( nb.distNm / 10000 );
             key.neighborKeys.push_back( nb.widthNm );
         }
 
+        // Solve (with cache)
         double z0 = 0.0;
         auto cacheIt = z0Cache.find( key );
 
@@ -519,188 +888,110 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         }
         else
         {
-            // Build BEM cross-section
-            XS_GEOMETRY xs;
-            double      condY = 0.0;
-
-            bool hasAbove = ( geom.hAbove > 0.0 );
-            bool hasBelow = ( geom.hBelow > 0.0 );
-
-            if( hasAbove && hasBelow )
-            {
-                xs.groundY = 0.0;
-                xs.hasUpperGround = true;
-                xs.upperGroundY = -( geom.hAbove + geom.hBelow );
-                condY = -geom.hBelow;
-                xs.epsilonR = ( geom.erAbove + geom.erBelow ) / 2.0;
-
-                if( std::abs( geom.erAbove - geom.erBelow ) > 0.5 )
-                {
-                    XS_DIELECTRIC_REGION regA, regB;
-                    regA.yTop = xs.upperGroundY;
-                    regA.yBottom = condY;
-                    regA.epsilonR = geom.erAbove;
-                    regB.yTop = condY;
-                    regB.yBottom = 0.0;
-                    regB.epsilonR = geom.erBelow;
-                    xs.dielectrics.push_back( regA );
-                    xs.dielectrics.push_back( regB );
-                }
-            }
-            else if( hasBelow )
-            {
-                xs.groundY = 0.0;
-                condY = -( geom.hBelow + geom.traceThickness / 2.0 );
-                xs.epsilonR = geom.erBelow;
-
-                XS_DIELECTRIC_REGION air, diel;
-                air.yTop = -10e-3;
-                air.yBottom = -geom.hBelow;
-                air.epsilonR = 1.0;
-                diel.yTop = -geom.hBelow;
-                diel.yBottom = 0.0;
-                diel.epsilonR = geom.erBelow;
-                xs.dielectrics.push_back( air );
-                xs.dielectrics.push_back( diel );
-            }
-            else if( hasAbove )
-            {
-                xs.groundY = -( geom.hAbove + geom.traceThickness );
-                condY = -geom.traceThickness / 2.0;
-                xs.epsilonR = geom.erAbove;
-
-                XS_DIELECTRIC_REGION diel, air;
-                diel.yTop = xs.groundY;
-                diel.yBottom = -geom.traceThickness;
-                diel.epsilonR = geom.erAbove;
-                air.yTop = -geom.traceThickness;
-                air.yBottom = 10e-3;
-                air.epsilonR = 1.0;
-                xs.dielectrics.push_back( diel );
-                xs.dielectrics.push_back( air );
-            }
-
-            // Signal conductor at x=0
-            XS_CONDUCTOR cond;
-            cond.centerX = 0.0;
-            cond.centerY = condY;
-            cond.width = geom.traceWidth;
-            cond.thickness = geom.traceThickness;
-            xs.conductors.push_back( cond );
-
-            // Add neighbor conductors at their lateral offsets
-            for( const NEIGHBOR& nb : neighbors )
-            {
-                XS_CONDUCTOR nbCond;
-                nbCond.centerX = nb.distNm * 1e-9; // nm → meters
-                nbCond.centerY = condY;             // same layer
-                nbCond.width = nb.widthNm * 1e-9;
-                nbCond.thickness = geom.traceThickness;
-                xs.conductors.push_back( nbCond );
-            }
-
-            // Solve — Z₀ of conductor 0 (our signal) accounts for coupling
             BEM_2D_SOLVER solver;
             solver.SetGeometry( xs );
-            solver.SetPanelsPerEdge( neighbors.empty() ? 15 : 10 );
+            solver.SetPanelsPerEdge( 12 );
 
             if( solver.Solve() && solver.GetResult().Z0 > 0.0 )
-            {
                 z0 = solver.GetResult().Z0;
-            }
             else
-            {
                 z0 = STACKUP_READER::ComputeZ0( geom );
-            }
 
             z0Cache[key] = z0;
         }
 
-        double nearestNbDist = 0.0;
-
-        if( !neighbors.empty() )
-            nearestNbDist = std::abs( neighbors[0].distNm ) / 1e6; // nm → mm
-
-        positions.push_back( pt.distFromStart / 1e6 ); // nm → mm
-        impedances.push_back( z0 );
-        neighborDists.push_back( nearestNbDist );
-        neighborCounts.push_back( (int) neighbors.size() );
+        // Store sample with full geometry
+        XS_SAMPLE sample;
+        sample.distMm = sampleDist / 1e6; // nm → mm
+        sample.z0 = z0;
+        sample.geometry = xs;
+        sample.boardPos = samplePos;
+        sample.hasRefAbove = geom.hasRefAbove;
+        sample.hasRefBelow = geom.hasRefBelow;
+        sample.hAbove = geom.hAbove;
+        sample.hBelow = geom.hBelow;
+        m_samples.push_back( sample );
     }
 
-    if( positions.empty() )
+    if( m_samples.empty() )
     {
         updateStatus( _( "No impedance data — trace has no non-via segments." ) );
         return;
     }
 
-    updatePlot( positions, impedances, neighborDists );
+    // Compute the max X extent across all samples so the XS view uses a fixed
+    // horizontal scale, making different points along the trace comparable.
+    double maxXExtent = 0.0;
 
-    // Build status string with diagnostics
+    for( const XS_SAMPLE& s : m_samples )
+    {
+        for( const XS_CONDUCTOR& c : s.geometry.conductors )
+            maxXExtent = std::max( maxXExtent, std::abs( c.centerX ) + c.width );
+    }
+
+    m_xsView->SetXExtent( maxXExtent * 1.5 );
+
+    updatePlot();
+
+    // Select the middle sample to show an initial cross-section
+    selectSample( (int) m_samples.size() / 2 );
+
+    // Build status string
     wxString status;
-    double   totalLen = walker.GetTotalLength() / 1e6; // mm
+    double   totalLenMm = totalLen / 1e6;
 
     if( result.isComplete() )
-        status.Printf( _( "%.1f mm, %d segs" ), totalLen, result.segmentsVisited );
+        status.Printf( _( "%.1f mm, %d segs" ), totalLenMm, result.segmentsVisited );
     else
         status.Printf( _( "%.1f mm, %d/%d segs" ),
-                       totalLen, result.segmentsVisited, result.totalSegmentsOnNet );
+                       totalLenMm, result.segmentsVisited, result.totalSegmentsOnNet );
 
-    double minZ = *std::min_element( impedances.begin(), impedances.end() );
-    double maxZ = *std::max_element( impedances.begin(), impedances.end() );
+    double minZ = 1e9, maxZ = 0.0;
+
+    for( const XS_SAMPLE& s : m_samples )
+    {
+        minZ = std::min( minZ, s.z0 );
+        maxZ = std::max( maxZ, s.z0 );
+    }
+
     status += wxString::Format( wxS( " | Z0: %.2f\u2013%.2f \u03A9 (\u0394%.2f)" ),
                                 minZ, maxZ, maxZ - minZ );
 
-    // Neighbor stats
     int samplesWithNeighbors = 0;
 
-    for( int nc : neighborCounts )
+    for( const XS_SAMPLE& s : m_samples )
     {
-        if( nc > 0 )
+        if( s.geometry.conductors.size() > 1 )
             samplesWithNeighbors++;
     }
 
-    // Neighbor distance stats
-    double minNbDist = 1e9, maxNbDist = 0.0;
-
-    for( double d : neighborDists )
-    {
-        if( d > 0.0 )
-        {
-            minNbDist = std::min( minNbDist, d );
-            maxNbDist = std::max( maxNbDist, d );
-        }
-    }
-
-    if( samplesWithNeighbors > 0 )
-    {
-        status += wxString::Format(
-                wxS( " | nb: %d/%d pts, dist %.2f\u2013%.2fmm, %d unique XS" ),
-                samplesWithNeighbors, (int) positions.size(),
-                minNbDist, maxNbDist, (int) z0Cache.size() );
-    }
-    else
-    {
-        status += wxString::Format( wxS( " | no neighbors, %d unique XS" ),
-                                    (int) z0Cache.size() );
-    }
+    status += wxString::Format( wxS( " | %d/%d pts with neighbors, %d unique XS" ),
+                                samplesWithNeighbors, (int) m_samples.size(),
+                                (int) z0Cache.size() );
 
     updateStatus( status );
 }
 
 
-void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions,
-                                           const std::vector<double>& aImpedances,
-                                           const std::vector<double>& aNeighborDists )
+void IMPEDANCE_PROFILER_PANEL::updatePlot()
 {
-    m_impedanceTrace->SetData( aPositions, aImpedances );
+    std::vector<double> positions;
+    std::vector<double> impedances;
+
+    for( const XS_SAMPLE& s : m_samples )
+    {
+        positions.push_back( s.distMm );
+        impedances.push_back( s.z0 );
+    }
+
+    m_impedanceTrace->SetData( positions, impedances );
     m_impedanceTrace->SetVisible( true );
     m_targetLine->SetVisible( false );
+    m_cursorLine->SetVisible( false );
 
-    // Y range: auto-scale to impedance data ONLY (no target line influence)
-    double yMin = *std::min_element( aImpedances.begin(), aImpedances.end() );
-    double yMax = *std::max_element( aImpedances.begin(), aImpedances.end() );
+    double yMin = *std::min_element( impedances.begin(), impedances.end() );
+    double yMax = *std::max_element( impedances.begin(), impedances.end() );
 
-    // Ensure some Y range even for perfectly flat traces
     if( yMax - yMin < 0.5 )
     {
         double mid = ( yMax + yMin ) / 2.0;
@@ -710,58 +1001,18 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot( const std::vector<double>& aPositions
 
     double yPad = ( yMax - yMin ) * 0.15;
 
-    // Neighbor distance overlay — scale to impedance Y range.
-    // Closer neighbor → lower on plot (matches impedance: coupling lowers Z₀).
-    // distance=0 → yMin, distance=horizon → yMax, no neighbor → yMax (top).
-    if( !aNeighborDists.empty() )
-    {
-        double horizon = 2.0; // mm coupling horizon
-        std::vector<double> scaledDist( aNeighborDists.size() );
-        bool anyNeighbors = false;
-
-        for( size_t i = 0; i < aNeighborDists.size(); i++ )
-        {
-            if( aNeighborDists[i] > 0.0 )
-            {
-                double frac = aNeighborDists[i] / horizon;
-                frac = std::min( frac, 1.0 );
-                // distance 0 → yMin (bottom), distance=horizon → yMax (top)
-                scaledDist[i] = ( yMin - yPad ) + frac * ( ( yMax + yPad ) - ( yMin - yPad ) );
-                anyNeighbors = true;
-            }
-            else
-            {
-                scaledDist[i] = yMax + yPad; // no neighbor → top of plot
-            }
-        }
-
-        if( anyNeighbors )
-        {
-            m_neighborTrace->SetData( aPositions, scaledDist );
-            m_neighborTrace->SetVisible( true );
-        }
-        else
-        {
-            m_neighborTrace->SetVisible( false );
-        }
-    }
-    else
-    {
-        m_neighborTrace->SetVisible( false );
-    }
-
-    // Propagate data extents to the scale objects
+    // Fit with explicit data range — mpWindow::UpdateBBox() always returns 0–1
+    // so the no-arg Fit() doesn't work.  Set the range on the scales manually
+    // so tick labels match, then fit the viewport.
+    // The scales transform data → normalized [0,1] via TransformToPlot.
+    // mpWindow::Fit() then maps [0,1] to the viewport.
+    // Set scale data ranges, then use no-arg Fit() (UpdateBBox returns 0–1).
     m_xAxis->ResetDataRange();
     m_yAxis->ResetDataRange();
     m_impedanceTrace->UpdateScales();
-
-    if( m_neighborTrace->IsVisible() )
-        m_neighborTrace->UpdateScales();
-
     m_yAxis->ExtendDataRange( yMin - yPad, yMax + yPad );
-
-    m_plotWindow->UpdateAll();
     m_plotWindow->Fit();
+    m_plotWindow->Refresh();
 }
 
 

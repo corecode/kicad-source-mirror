@@ -57,6 +57,7 @@ set( QA_PCBNEW_SRCS
     test_analytical_impedance.cpp
     test_bem_2d_solver.cpp
     test_bem_interface_debug.cpp
+    test_cross_section_builder.cpp
     test_impedance_profiler.cpp
     test_trace_path_walker.cpp
 

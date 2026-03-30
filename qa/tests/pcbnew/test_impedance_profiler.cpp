@@ -30,6 +30,8 @@
 #include <netinfo.h>
 #include <settings/settings_manager.h>
 
+#include <drc/drc_rtree.h>
+#include <sipi/cross_section_builder.h>
 #include <sipi/trace_path_walker.h>
 #include <sipi/stackup_reader.h>
 #include <sipi/bem_2d_solver.h>
@@ -50,150 +52,18 @@ struct PROFILER_TEST_FIXTURE
 };
 
 
-/**
- * Neighbor detection data for one sample point.
- */
-struct NEIGHBOR_SAMPLE
-{
-    VECTOR2I position;
-    VECTOR2D tangent;
-    VECTOR2D normal;
-    PCB_LAYER_ID layer;
-    int traceWidth;         // nm
-    double distFromStart;   // nm
-
-    struct NEIGHBOR_INFO
-    {
-        int      distNm;    // signed lateral distance
-        int      widthNm;
-        int      netCode;
-        wxString netName;
-    };
-
-    std::vector<NEIGHBOR_INFO> neighbors;
-};
-
-
-/**
- * Run neighbor detection on a walked path, returning detailed info per sample.
- */
-static std::vector<NEIGHBOR_SAMPLE> extractNeighborInfo(
-        const BOARD* aBoard, const std::vector<PATH_POINT>& aPath, int aSignalNetCode )
-{
-    std::vector<NEIGHBOR_SAMPLE> samples;
-
-    // Collect tracks by layer
-    std::map<PCB_LAYER_ID, std::vector<PCB_TRACK*>> tracksByLayer;
-
-    for( PCB_TRACK* t : aBoard->Tracks() )
-    {
-        if( t->Type() == PCB_VIA_T )
-            continue;
-
-        tracksByLayer[t->GetLayer()].push_back( t );
-    }
-
-    int couplingHorizon = 2000000; // 2mm in nm
-
-    for( const PATH_POINT& pt : aPath )
-    {
-        if( pt.isVia )
-            continue;
-
-        PCB_TRACK* track = static_cast<PCB_TRACK*>( pt.item );
-
-        NEIGHBOR_SAMPLE sample;
-        sample.position = pt.position;
-        sample.tangent = pt.tangent;
-        sample.normal = VECTOR2D( -pt.tangent.y, pt.tangent.x );
-        sample.layer = track->GetLayer();
-        sample.traceWidth = track->GetWidth();
-        sample.distFromStart = pt.distFromStart;
-
-        int minEdgeToEdge = 10000; // 10µm
-
-        auto it = tracksByLayer.find( track->GetLayer() );
-
-        if( it != tracksByLayer.end() )
-        {
-            for( PCB_TRACK* other : it->second )
-            {
-                if( other == track )
-                    continue;
-
-                // Skip endpoint-connected segments (same trace at a bend)
-                if( other->GetStart() == track->GetStart()
-                    || other->GetStart() == track->GetEnd()
-                    || other->GetEnd() == track->GetStart()
-                    || other->GetEnd() == track->GetEnd() )
-                {
-                    continue;
-                }
-
-                // Closest point on other segment to our sample point
-                VECTOR2D otherDir( other->GetEnd().x - other->GetStart().x,
-                                   other->GetEnd().y - other->GetStart().y );
-                double otherLen = otherDir.EuclideanNorm();
-
-                if( otherLen < 1.0 )
-                    continue;
-
-                otherDir = otherDir / otherLen;
-
-                VECTOR2D toSample( pt.position.x - other->GetStart().x,
-                                   pt.position.y - other->GetStart().y );
-                double t = toSample.x * otherDir.x + toSample.y * otherDir.y;
-                t = std::max( 0.0, std::min( t, otherLen ) );
-
-                VECTOR2D closest( other->GetStart().x + t * otherDir.x,
-                                  other->GetStart().y + t * otherDir.y );
-
-                VECTOR2D delta( closest.x - pt.position.x, closest.y - pt.position.y );
-
-                double lateralDist = delta.x * sample.normal.x + delta.y * sample.normal.y;
-
-                if( std::abs( lateralDist ) > couplingHorizon )
-                    continue;
-
-                double halfWidths = ( track->GetWidth() + other->GetWidth() ) / 2.0;
-                double edgeToEdge = std::abs( lateralDist ) - halfWidths;
-
-                if( edgeToEdge < minEdgeToEdge )
-                    continue;
-
-                double alongDist = delta.x * pt.tangent.x + delta.y * pt.tangent.y;
-
-                if( std::abs( alongDist ) > track->GetLength() )
-                    continue;
-
-                NEIGHBOR_SAMPLE::NEIGHBOR_INFO nb;
-                nb.distNm = static_cast<int>( lateralDist );
-                nb.widthNm = other->GetWidth();
-                nb.netCode = other->GetNetCode();
-                nb.netName = other->GetNetname();
-
-                sample.neighbors.push_back( nb );
-            }
-        }
-
-        samples.push_back( sample );
-    }
-
-    return samples;
-}
-
-
 BOOST_FIXTURE_TEST_SUITE( ImpedanceProfiler, PROFILER_TEST_FIXTURE )
 
 
 /**
- * Dump neighbor detection results for a board with routed tracks.
- * This is primarily diagnostic — it prints what the neighbor extraction finds
- * so we can see if the distances are realistic.
+ * Test neighbor detection using CROSS_SECTION_BUILDER on a real board.
+ * Loads tracks_arcs_vias test board, walks the first net, runs the builder
+ * at each path point, and checks for unrealistic distances.
  */
 BOOST_AUTO_TEST_CASE( NeighborDetectionDiag )
 {
     KI_TEST::LoadBoard( m_settingsManager, "tracks_arcs_vias", m_board );
+    KI_TEST::FillZones( m_board.get() );
     m_board->BuildConnectivity();
 
     // Find the first net with tracks
@@ -221,103 +91,96 @@ BOOST_AUTO_TEST_CASE( NeighborDetectionDiag )
 
     BOOST_TEST_MESSAGE( "Path has " << path.size() << " points on net " << targetNet );
 
-    auto samples = extractNeighborInfo( m_board.get(), path, targetNet );
+    // Build R-tree and path-distance map
+    DRC_RTREE rtree;
 
-    BOOST_TEST_MESSAGE( "Extracted " << samples.size() << " samples" );
-
-    // Detailed dump of first 20 samples
-    int count = 0;
-
-    for( const auto& s : samples )
+    for( PCB_TRACK* t : m_board->Tracks() )
     {
-        if( count++ >= 20 )
-            break;
-
-        wxString msg;
-        msg.Printf( wxS( "  pos=(%.3f,%.3f)mm, dist=%.2fmm, tangent=(%.2f,%.2f), %d neighbors:" ),
-                     s.position.x / 1e6, s.position.y / 1e6,
-                     s.distFromStart / 1e6,
-                     s.tangent.x, s.tangent.y,
-                     (int) s.neighbors.size() );
-
-        BOOST_TEST_MESSAGE( msg );
-
-        for( const auto& nb : s.neighbors )
-        {
-            wxString nbMsg;
-            nbMsg.Printf( wxS( "    dist=%.3fmm, width=%.3fmm, net=%d (%s), same_net=%s" ),
-                          nb.distNm / 1e6, nb.widthNm / 1e6,
-                          nb.netCode, nb.netName,
-                          ( nb.netCode == targetNet ) ? wxS( "YES" ) : wxS( "no" ) );
-
-            BOOST_TEST_MESSAGE( nbMsg );
-        }
+        if( t->Type() != PCB_VIA_T )
+            rtree.Insert( t, t->GetLayer() );
     }
 
-    // Statistics
-    int samplesWithNeighbors = 0;
-    int sameNetNeighbors = 0;
-    int otherNetNeighbors = 0;
-    double minDist = 1e9, maxDist = 0;
-    double minSameNetDist = 1e9;
+    std::map<BOARD_CONNECTED_ITEM*, double> pathItemDist;
 
-    for( const auto& s : samples )
+    for( const PATH_POINT& pp : path )
     {
-        if( !s.neighbors.empty() )
-            samplesWithNeighbors++;
+        if( !pp.isVia && pathItemDist.find( pp.item ) == pathItemDist.end() )
+            pathItemDist[pp.item] = pp.distFromStart;
+    }
 
-        for( const auto& nb : s.neighbors )
+    STACKUP_READER stackup( m_board.get() );
+
+    // Run builder at each non-via path point
+    double minDist = 1e9;
+    int    tinyDistCount = 0;
+    int    samplesWithNb = 0;
+    int    totalSamples = 0;
+
+    for( const PATH_POINT& pt : path )
+    {
+        if( pt.isVia )
+            continue;
+
+        totalSamples++;
+        PCB_TRACK* track = static_cast<PCB_TRACK*>( pt.item );
+
+        LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
+                                                        pt.position,
+                                                        track->GetWidth() );
+
+        double hRef = std::max( geom.hAbove, geom.hBelow );
+        int    couplingHorizon = std::max( (int) ( hRef * 3.0 * 1e9 ), 500000 );
+
+        CROSS_SECTION_BUILDER builder;
+        builder.SetSpatialIndex( &rtree );
+        builder.SetBoard( m_board.get() );
+        builder.SetPathItemDistances( &pathItemDist );
+        builder.SetSignalTrack( track );
+
+        XS_BUILD_PARAMS params;
+        params.samplePos = pt.position;
+        params.sampleTangent = pt.tangent;
+        params.signalLayer = track->GetLayer();
+        params.signalNetCode = track->GetNetCode();
+        params.signalWidth = track->GetWidth();
+        params.couplingHorizon = couplingHorizon;
+        params.sampleDist = pt.distFromStart;
+        params.layerGeom = geom;
+
+        auto neighbors = builder.FindNeighbors( params );
+
+        if( !neighbors.empty() )
+            samplesWithNb++;
+
+        for( const XS_NEIGHBOR& nb : neighbors )
         {
-            double d = std::abs( nb.distNm ) / 1e6; // mm
+            double edgeToEdge = ( std::abs( nb.distNm ) - track->GetWidth() / 2.0
+                                  - nb.widthNm / 2.0 ) / 1e6; // mm
+            double dist = std::abs( nb.distNm ) / 1e6;
 
-            if( nb.netCode == targetNet )
-            {
-                sameNetNeighbors++;
-                minSameNetDist = std::min( minSameNetDist, d );
-            }
-            else
-            {
-                otherNetNeighbors++;
-            }
+            minDist = std::min( minDist, dist );
 
-            minDist = std::min( minDist, d );
-            maxDist = std::max( maxDist, d );
+            if( edgeToEdge < 0.01 ) // less than 10µm edge-to-edge
+            {
+                tinyDistCount++;
+                BOOST_TEST_MESSAGE( "TINY: pos=(" << pt.position.x / 1e6 << ","
+                                    << pt.position.y / 1e6 << ")mm dist="
+                                    << pt.distFromStart / 1e6 << "mm nb_dist="
+                                    << nb.distNm / 1e6 << "mm nb_w="
+                                    << nb.widthNm / 1e6 << "mm e2e="
+                                    << edgeToEdge << "mm" );
+            }
         }
     }
 
     BOOST_TEST_MESSAGE( "\nSummary:" );
-    BOOST_TEST_MESSAGE( "  Samples with neighbors: " << samplesWithNeighbors
-                        << "/" << samples.size() );
-    BOOST_TEST_MESSAGE( "  Same-net neighbors: " << sameNetNeighbors );
-    BOOST_TEST_MESSAGE( "  Other-net neighbors: " << otherNetNeighbors );
-    BOOST_TEST_MESSAGE( "  Distance range: " << minDist << " - " << maxDist << " mm" );
+    BOOST_TEST_MESSAGE( "  Total samples: " << totalSamples );
+    BOOST_TEST_MESSAGE( "  With neighbors: " << samplesWithNb );
+    BOOST_TEST_MESSAGE( "  Min distance: " << minDist << " mm" );
+    BOOST_TEST_MESSAGE( "  Tiny distance count: " << tinyDistCount );
 
-    if( sameNetNeighbors > 0 )
-        BOOST_TEST_MESSAGE( "  Min same-net distance: " << minSameNetDist << " mm" );
-
-    // REGRESSION: no neighbor should overlap (edge-to-edge < 0).
-    // This catches the bug where endpoint-connected segments show up as
-    // neighbors at 0.03mm distance.
-    for( const auto& s : samples )
-    {
-        double halfTraceWidth = s.traceWidth / 2e6; // mm
-
-        for( const auto& nb : s.neighbors )
-        {
-            double d = std::abs( nb.distNm ) / 1e6; // mm
-            double halfNbWidth = nb.widthNm / 2e6;
-            double edgeToEdge = d - halfTraceWidth - halfNbWidth;
-
-            BOOST_CHECK_GE( edgeToEdge, -0.01 ); // no overlapping neighbors
-        }
-    }
-
-    // REGRESSION: minimum neighbor distance should be physically realistic
-    // (> trace width, i.e., > ~0.1mm for typical traces)
-    if( minDist < 1e9 )
-    {
-        BOOST_CHECK_GT( minDist, 0.1 );
-    }
+    // REGRESSION: no tiny edge-to-edge distances
+    BOOST_CHECK_EQUAL( tinyDistCount, 0 );
 }
 
 
@@ -368,22 +231,26 @@ BOOST_AUTO_TEST_CASE( BEMCouplingEffect )
         return xs;
     };
 
+    // Use consistent panel count for all cases so that convergence differences
+    // don't mask or invert the coupling effect.
+    int panels = 12;
+
     // Isolated (no neighbor)
     BEM_2D_SOLVER solverIsolated;
     solverIsolated.SetGeometry( makeGeom( 0.0 ) );
-    solverIsolated.SetPanelsPerEdge( 15 );
+    solverIsolated.SetPanelsPerEdge( panels );
     solverIsolated.Solve();
 
     // Neighbor at 0.3mm center-to-center
     BEM_2D_SOLVER solverClose;
     solverClose.SetGeometry( makeGeom( 0.3e-3 ) );
-    solverClose.SetPanelsPerEdge( 10 );
+    solverClose.SetPanelsPerEdge( panels );
     solverClose.Solve();
 
     // Neighbor at 1.0mm center-to-center
     BEM_2D_SOLVER solverFar;
     solverFar.SetGeometry( makeGeom( 1.0e-3 ) );
-    solverFar.SetPanelsPerEdge( 10 );
+    solverFar.SetPanelsPerEdge( panels );
     solverFar.Solve();
 
     double z0_iso = solverIsolated.GetResult().Z0;
@@ -440,12 +307,12 @@ BOOST_AUTO_TEST_CASE( BEMCouplingEffect )
 
     BEM_2D_SOLVER solverUniIso;
     solverUniIso.SetGeometry( makeGeomUniform( 0.0 ) );
-    solverUniIso.SetPanelsPerEdge( 15 );
+    solverUniIso.SetPanelsPerEdge( panels );
     solverUniIso.Solve();
 
     BEM_2D_SOLVER solverUniClose;
     solverUniClose.SetGeometry( makeGeomUniform( 0.3e-3 ) );
-    solverUniClose.SetPanelsPerEdge( 10 );
+    solverUniClose.SetPanelsPerEdge( panels );
     solverUniClose.Solve();
 
     BOOST_TEST_MESSAGE( "--- Uniform dielectric (no regions) ---" );

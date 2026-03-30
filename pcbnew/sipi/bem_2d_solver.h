@@ -31,15 +31,21 @@
 
 
 /**
- * 2D Boundary Element Method solver for per-unit-length capacitance and
- * inductance of PCB transmission line cross-sections.
+ * 2D sub-region BEM solver for per-unit-length capacitance and impedance
+ * of PCB microstrip cross-sections.
  *
- * Solves Laplace's equation (∇²Φ = 0) using constant-charge boundary elements
- * on the conductor surfaces. Ground planes are handled by the method of images
- * (no meshing of the planes themselves).
+ * Uses the vacuum+ground-image Green's function with explicit interface
+ * panels that enforce D-normal continuity at the dielectric boundary.
+ * The dielectric effect emerges from bound charge on the interface —
+ * no dielectric images are used.
  *
- * Phase A: single conductor over one ground plane (microstrip).
- * Phase B (future): stripline (image series), coupled conductors, R(f), G(f).
+ * Follows the formulation in subregion_bem_spec_rev4.md.
+ *
+ * Coordinate system (matching the spec):
+ *   y = 0: dielectric interface
+ *   y = -h: ground plane (Φ = 0)
+ *   y > 0: air (εr = 1), conductors sit here with bottom face at y = 0
+ *   y < 0: substrate (εr configurable)
  */
 class BEM_2D_SOLVER
 {
@@ -47,52 +53,76 @@ public:
     BEM_2D_SOLVER();
 
     void SetGeometry( const XS_GEOMETRY& aGeometry );
-
-    /**
-     * Number of constant-charge panels per edge of each conductor.
-     * Total panels per conductor = 4 * panelsPerEdge (for a rectangle).
-     * Default 10 (40 panels per conductor).
-     */
     void SetPanelsPerEdge( int aCount );
 
-    /**
-     * Solve for per-unit-length C and L matrices, and derive Z0.
-     * @return true on success.
-     */
     bool Solve();
 
     const RLGC_RESULT& GetResult() const { return m_result; }
 
 private:
-    /**
-     * A constant-charge boundary element (panel) on a conductor surface.
-     */
-    struct PANEL
+    enum PANEL_TYPE
     {
-        double cx, cy;      ///< Center of the panel
-        double length;      ///< Length of the panel
-        double nx, ny;      ///< Outward normal direction
-        int    conductorIdx; ///< Which conductor this panel belongs to
+        CONDUCTOR,
+        INTERFACE
     };
 
+    struct PANEL
+    {
+        double     cx, cy;        ///< Midpoint
+        double     length;        ///< Panel length
+        double     nx, ny;        ///< Outward normal
+        int        conductorIdx;  ///< Which conductor (-1 for interface)
+        PANEL_TYPE type;
+
+        // Per-panel dielectric properties (following NMMTL convention)
+        double     epsilonR;      ///< CONDUCTOR panels: εr of medium this face sees
+        double     epsPlus;       ///< INTERFACE panels: εr on the +n̂ side (above)
+        double     epsMinus;      ///< INTERFACE panels: εr on the -n̂ side (below)
+    };
+
+    /// Build conductor and interface panels per the spec
     void buildPanels();
-    void fillCoefficientMatrix( bool aVacuum );
-    Eigen::MatrixXd solveCapacitance( bool aVacuum );
 
-    /**
-     * Green's function for a line charge in the presence of ground plane(s)
-     * and (optionally) dielectric interfaces.
-     *
-     * @param aVacuum  If true, use εr=1 everywhere (no dielectric images).
-     */
-    double greenFunction( double x, double y, double xs, double ys, bool aVacuum ) const;
+    /// Vacuum Green's function with ground-plane image: G(r, r')
+    double greenG( double x, double y, double xs, double ys ) const;
 
-    XS_GEOMETRY             m_geometry;
-    RLGC_RESULT             m_result;
-    int                     m_panelsPerEdge;
+    /// Normal derivative ∂G/∂n at (x, y) due to source at (xs, ys), with n̂ = (0, +1)
+    double greenDGDn( double x, double y, double xs, double ys ) const;
 
-    std::vector<PANEL>      m_panels;
-    Eigen::MatrixXd         m_coeffMatrix;
+    /// Assemble and solve the full system (conductor + interface panels).
+    /// Returns the NxN Maxwell capacitance matrix (N = number of conductors).
+    Eigen::MatrixXd solveCapacitanceFull();
+
+    /// Assemble and solve the air-only system (conductor panels only, no interface).
+    /// Returns the NxN vacuum capacitance matrix.
+    Eigen::MatrixXd solveCapacitanceAir();
+
+    /// Analytic self-integral of the direct Green's function over a panel of length L
+    double selfIntegralG( double aLength ) const;
+
+    /// Look up the relative permittivity of the dielectric region at position y,
+    /// on the side indicated by normalY (> 0 means look above y, < 0 means below).
+    /// Returns 1.0 (air) if no dielectric region is found.
+    double getEpsilonR( double aY, double aNormalY ) const;
+
+    XS_GEOMETRY        m_geometry;
+    RLGC_RESULT        m_result;
+    int                m_panelsPerEdge;
+
+    double             m_h;           ///< Distance from lowest interface to ground plane
+
+    /// Dielectric boundaries in spec coordinates, sorted by y.
+    /// Each entry: { y-level, εr above, εr below }.
+    struct DIELECTRIC_BOUNDARY
+    {
+        double y;
+        double epsAbove;    ///< εr of region above this boundary
+        double epsBelow;    ///< εr of region below this boundary
+    };
+    std::vector<DIELECTRIC_BOUNDARY> m_dielectricBoundaries;
+
+    std::vector<PANEL> m_conductorPanels;
+    std::vector<PANEL> m_interfacePanels;
 };
 
 #endif // BEM_2D_SOLVER_H

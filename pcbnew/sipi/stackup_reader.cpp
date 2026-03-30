@@ -110,13 +110,42 @@ void STACKUP_READER::buildLayerModel()
             z += item->GetThickness() * NM_TO_M;
         }
     }
+
+    fprintf( stderr, "SIPI stackup: %d copper layers, %d dielectrics, defaults=%d\n",
+             (int) m_copperLayers.size(), (int) m_dielectrics.size(), m_usingDefaults );
+
+    for( size_t i = 0; i < m_copperLayers.size(); i++ )
+    {
+        fprintf( stderr, "  Cu[%d]: layer=%d z=%.4fmm t=%.1fum\n",
+                 (int) i, (int) m_copperLayers[i].layerId,
+                 m_copperLayers[i].zPosition * 1e3,
+                 m_copperLayers[i].thickness * 1e6 );
+    }
+
+    fprintf( stderr, "  Zones on board: %d\n", (int) m_board->Zones().size() );
+
+    for( ZONE* zone : m_board->Zones() )
+    {
+        fprintf( stderr, "    Zone '%s' ruleArea=%d\n",
+                 (const char*) zone->GetZoneName().utf8_str(),
+                 zone->GetIsRuleArea() );
+
+        for( PCB_LAYER_ID layer : zone->GetLayerSet().Seq() )
+        {
+            const auto& fill = zone->GetFilledPolysList( layer );
+            fprintf( stderr, "      layer %d: fill %s (%d polys)\n",
+                     (int) layer, ( fill && !fill->IsEmpty() ) ? "YES" : "NO",
+                     fill ? fill->OutlineCount() : 0 );
+        }
+    }
 }
 
 
 bool STACKUP_READER::isReferencePlane( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition ) const
 {
     // A layer is a reference plane at a given position if there is a filled zone
-    // on that layer covering the position.
+    // on that layer covering the position.  Zones must be filled (Edit > Fill All Zones)
+    // for this to work — unfilled zones have no fill data to test against.
     for( ZONE* zone : m_board->Zones() )
     {
         if( !zone->IsOnLayer( aLayer ) )
@@ -127,6 +156,17 @@ bool STACKUP_READER::isReferencePlane( PCB_LAYER_ID aLayer, const VECTOR2I& aPos
 
         if( zone->HitTestFilledArea( aLayer, aPosition ) )
             return true;
+
+        // Log zones that are on the right layer but don't have fill data
+        const std::shared_ptr<SHAPE_POLY_SET>& fill = zone->GetFilledPolysList( aLayer );
+
+        if( !fill || fill->IsEmpty() )
+        {
+            fprintf( stderr, "SIPI: zone '%s' on layer %d has no fill at (%d,%d) — "
+                             "run Edit > Fill All Zones\n",
+                     (const char*) zone->GetZoneName().utf8_str(),
+                     (int) aLayer, aPosition.x, aPosition.y );
+        }
     }
 
     return false;
@@ -158,9 +198,43 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
     }
 
     if( signalIdx < 0 )
+    {
+        static bool logged = false;
+
+        if( !logged )
+        {
+            fprintf( stderr, "SIPI: signal layer %d not found in stackup!\n", (int) aLayer );
+            logged = true;
+        }
+
         return geom; // Layer not found in stackup
+    }
 
     double signalZ = m_copperLayers[signalIdx].zPosition;
+
+    // Log first query for diagnostics
+    static bool firstQuery = true;
+
+    if( firstQuery )
+    {
+        firstQuery = false;
+        fprintf( stderr, "SIPI: first query: signal layer=%d (idx=%d) pos=(%d,%d) width=%dnm\n",
+                 (int) aLayer, signalIdx, aPosition.x, aPosition.y, aTraceWidth );
+
+        for( int i = signalIdx - 1; i >= 0; i-- )
+        {
+            bool isRef = isReferencePlane( m_copperLayers[i].layerId, aPosition );
+            fprintf( stderr, "  search above: Cu[%d] layer=%d isRef=%d\n",
+                     i, (int) m_copperLayers[i].layerId, isRef );
+        }
+
+        for( int i = signalIdx + 1; i < (int) m_copperLayers.size(); i++ )
+        {
+            bool isRef = isReferencePlane( m_copperLayers[i].layerId, aPosition );
+            fprintf( stderr, "  search below: Cu[%d] layer=%d isRef=%d\n",
+                     i, (int) m_copperLayers[i].layerId, isRef );
+        }
+    }
 
     // Helper: find the dielectric layer whose z-range overlaps the interval
     // between two copper layer centers. Use midpoint containment — the
@@ -191,61 +265,20 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
         return std::abs( zB - zA ) - tA / 2.0 - tB / 2.0;
     };
 
-    // Search upward for the nearest copper layer that is a reference plane
-    for( int i = signalIdx - 1; i >= 0; i-- )
-    {
-        if( isReferencePlane( m_copperLayers[i].layerId, aPosition ) )
-        {
-            geom.hAbove = copperSpacing( i, signalIdx );
-            geom.hasRefAbove = true;
-            findDielectric( m_copperLayers[i].zPosition, signalZ,
-                            geom.erAbove, geom.tanDAbove );
-            break;
-        }
-    }
-
-    // Search downward for the nearest copper layer that is a reference plane
-    for( int i = signalIdx + 1; i < (int) m_copperLayers.size(); i++ )
-    {
-        if( isReferencePlane( m_copperLayers[i].layerId, aPosition ) )
-        {
-            geom.hBelow = copperSpacing( signalIdx, i );
-            geom.hasRefBelow = true;
-            findDielectric( signalZ, m_copperLayers[i].zPosition,
-                            geom.erBelow, geom.tanDBelow );
-            break;
-        }
-    }
-
-    // Fallback: if no zone-confirmed reference plane, assume adjacent copper
-    // layers are planes. This is the common case for boards without zone fills
-    // or for inner layers where the adjacent layer is always a plane.
-    if( !geom.hasRefAbove && !geom.hasRefBelow )
-    {
-        // No zone-verified planes at all — use nearest copper layers as assumed planes
-        if( signalIdx > 0 )
-        {
-            geom.hAbove = copperSpacing( signalIdx - 1, signalIdx );
-            findDielectric( m_copperLayers[signalIdx - 1].zPosition, signalZ,
-                            geom.erAbove, geom.tanDAbove );
-        }
-
-        if( signalIdx < (int) m_copperLayers.size() - 1 )
-        {
-            geom.hBelow = copperSpacing( signalIdx, signalIdx + 1 );
-            findDielectric( signalZ, m_copperLayers[signalIdx + 1].zPosition,
-                            geom.erBelow, geom.tanDBelow );
-        }
-    }
-    else if( !geom.hasRefAbove && signalIdx > 0 )
+    // Use adjacent copper layers as reference planes directly from the stackup.
+    // The stackup defines the layer structure — no zone verification needed.
+    if( signalIdx > 0 )
     {
         geom.hAbove = copperSpacing( signalIdx - 1, signalIdx );
+        geom.hasRefAbove = true;
         findDielectric( m_copperLayers[signalIdx - 1].zPosition, signalZ,
                         geom.erAbove, geom.tanDAbove );
     }
-    else if( !geom.hasRefBelow && signalIdx < (int) m_copperLayers.size() - 1 )
+
+    if( signalIdx < (int) m_copperLayers.size() - 1 )
     {
         geom.hBelow = copperSpacing( signalIdx, signalIdx + 1 );
+        geom.hasRefBelow = true;
         findDielectric( signalZ, m_copperLayers[signalIdx + 1].zPosition,
                         geom.erBelow, geom.tanDBelow );
     }

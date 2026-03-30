@@ -25,6 +25,7 @@
 #define IMPEDANCE_PROFILER_PANEL_H
 
 #include <board.h>
+#include <sipi/cross_section.h>
 #include <widgets/wx_panel.h>
 
 class PCB_EDIT_FRAME;
@@ -35,6 +36,45 @@ class mpScaleY;
 class wxChoice;
 class wxTextCtrl;
 class wxStaticText;
+
+
+/**
+ * Per-sample snapshot of the cross-section used for the BEM solve.
+ */
+struct XS_SAMPLE
+{
+    double      distMm = 0.0;       ///< Distance along trace (mm)
+    double      z0 = 0.0;          ///< Computed Z₀ (Ohms)
+    XS_GEOMETRY geometry;           ///< Cross-section fed to solver
+    VECTOR2I    boardPos;           ///< Board position of this sample (nm)
+    bool        hasRefAbove = false;
+    bool        hasRefBelow = false;
+    double      hAbove = 0.0;       ///< Dielectric height above (m)
+    double      hBelow = 0.0;       ///< Dielectric height below (m)
+};
+
+
+/**
+ * Small panel that renders a 2D cross-section view of the trace geometry
+ * at a selected point along the impedance profile.
+ */
+class XS_VIEW_PANEL : public wxPanel
+{
+public:
+    XS_VIEW_PANEL( wxWindow* aParent );
+
+    void SetSample( const XS_SAMPLE* aSample );
+
+    /// Set the fixed horizontal extent (meters) so all samples use the same scale.
+    void SetXExtent( double aExtent ) { m_xExtent = aExtent; }
+
+private:
+    void onPaint( wxPaintEvent& aEvent );
+    void drawCrossSection( wxDC& aDC, const wxRect& aRect );
+
+    const XS_SAMPLE* m_sample;
+    double           m_xExtent;    ///< Fixed half-width in meters (0 = auto)
+};
 
 
 /**
@@ -49,9 +89,6 @@ public:
     IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent );
     ~IMPEDANCE_PROFILER_PANEL() override;
 
-    /**
-     * Called when the panel is shown — refreshes net list and optionally auto-analyses.
-     */
     void OnShowPanel();
 
     // BOARD_LISTENER overrides
@@ -68,13 +105,14 @@ private:
     void populateNetList();
     void onAnalyseClicked( wxCommandEvent& aEvent );
     void onNetSelected( wxCommandEvent& aEvent );
+    void onPlotClick( wxMouseEvent& aEvent );
     void runAnalysis( int aNetCode );
-    void updatePlot( const std::vector<double>& aPositions,
-                     const std::vector<double>& aImpedances,
-                     const std::vector<double>& aNeighborDists );
+    void updatePlot();
     void updateStatus( const wxString& aText );
+    void selectSample( int aIndex );
 
     PCB_EDIT_FRAME* m_frame;
+    bool            m_initialized;  ///< true after first OnShowPanel() builds UI
 
     // Controls
     wxChoice*       m_netSelector;
@@ -85,9 +123,16 @@ private:
     mpWindow*       m_plotWindow;
     mpFXYVector*    m_impedanceTrace;
     mpFXYVector*    m_targetLine;
-    mpFXYVector*    m_neighborTrace;    ///< Nearest neighbor distance overlay
+    mpFXYVector*    m_cursorLine;       ///< Vertical line at selected sample
     mpScaleX*       m_xAxis;
     mpScaleY*       m_yAxis;
+
+    // Cross-section view
+    XS_VIEW_PANEL*  m_xsView;
+
+    // Analysis results
+    std::vector<XS_SAMPLE> m_samples;
+    int             m_selectedSample;
 
     // State
     int             m_currentNetCode;
