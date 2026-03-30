@@ -38,6 +38,8 @@
 #include <sipi/analytical_impedance.h>
 #include <sipi/bem_2d_solver.h>
 
+#include <chrono>
+
 #include <wx/button.h>
 #include <wx/choice.h>
 #include <wx/dcbuffer.h>
@@ -345,7 +347,9 @@ IMPEDANCE_PROFILER_PANEL::IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent ) :
         m_initialized( false ),
         m_netSelector( nullptr ),
         m_targetZ0Input( nullptr ),
+        m_xAxisUnitSelector( nullptr ),
         m_statusText( nullptr ),
+        m_xAxisIsTime( false ),
         m_plotWindow( nullptr ),
         m_impedanceTrace( nullptr ),
         m_targetLine( nullptr ),
@@ -401,6 +405,17 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
     wxButton* analyseBtn = new wxButton( this, wxID_ANY, _( "Analyse" ) );
     topSizer->Add( analyseBtn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 8 );
 
+    topSizer->AddStretchSpacer();
+
+    topSizer->Add( new wxStaticText( this, wxID_ANY, _( "X:" ) ),
+                   0, wxALIGN_CENTER_VERTICAL | wxLEFT, 8 );
+
+    m_xAxisUnitSelector = new wxChoice( this, wxID_ANY );
+    m_xAxisUnitSelector->Append( _( "mm" ) );
+    m_xAxisUnitSelector->Append( _( "ps" ) );
+    m_xAxisUnitSelector->SetSelection( 0 );
+    topSizer->Add( m_xAxisUnitSelector, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2 );
+
     mainSizer->Add( topSizer, 0, wxEXPAND | wxALL, 4 );
 
     // Plot
@@ -440,6 +455,7 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
     m_cursorLine->SetContinuity( true );
     m_cursorLine->SetScale( m_xAxis, m_yAxis );
     m_cursorLine->SetVisible( false );
+    m_cursorLine->ShowName( false );
     m_plotWindow->AddLayer( m_cursorLine, false );
 
     m_plotWindow->SetMargins( 15, 10, 30, 50 );
@@ -460,6 +476,7 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
     // Bind events
     analyseBtn->Bind( wxEVT_BUTTON, &IMPEDANCE_PROFILER_PANEL::onAnalyseClicked, this );
     m_netSelector->Bind( wxEVT_CHOICE, &IMPEDANCE_PROFILER_PANEL::onNetSelected, this );
+    m_xAxisUnitSelector->Bind( wxEVT_CHOICE, &IMPEDANCE_PROFILER_PANEL::onXAxisUnitChanged, this );
     m_plotWindow->Bind( wxEVT_MOTION, &IMPEDANCE_PROFILER_PANEL::onPlotClick, this );
 }
 
@@ -570,6 +587,15 @@ void IMPEDANCE_PROFILER_PANEL::onNetSelected( wxCommandEvent& aEvent )
 }
 
 
+void IMPEDANCE_PROFILER_PANEL::onXAxisUnitChanged( wxCommandEvent& aEvent )
+{
+    m_xAxisIsTime = ( m_xAxisUnitSelector->GetSelection() == 1 );
+
+    if( !m_samples.empty() )
+        updatePlot();
+}
+
+
 void IMPEDANCE_PROFILER_PANEL::onPlotClick( wxMouseEvent& aEvent )
 {
     if( m_samples.empty() )
@@ -588,7 +614,8 @@ void IMPEDANCE_PROFILER_PANEL::onPlotClick( wxMouseEvent& aEvent )
 
     for( int i = 0; i < (int) m_samples.size(); i++ )
     {
-        double d = std::abs( m_samples[i].distMm - plotX );
+        double sampleX = m_xAxisIsTime ? m_samples[i].timePsec : m_samples[i].distMm;
+        double d = std::abs( sampleX - plotX );
 
         if( d < bestDist )
         {
@@ -613,7 +640,8 @@ void IMPEDANCE_PROFILER_PANEL::selectSample( int aIndex )
     // Update cursor line on the plot (vertical line at the sample position)
     if( !m_samples.empty() )
     {
-        double xPos = m_samples[aIndex].distMm;
+        double xPos = m_xAxisIsTime ? m_samples[aIndex].timePsec
+                                     : m_samples[aIndex].distMm;
 
         // Find Y range from impedance data
         double yMin = 1e9, yMax = -1e9;
@@ -683,7 +711,8 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         }
     };
 
-    std::map<XS_KEY, double> z0Cache;
+    struct XS_CACHED { double z0; double erEff; };
+    std::map<XS_KEY, XS_CACHED> z0Cache;
 
     // Build spatial index for neighbor search.  Use the board's DRC cache if
     // available; otherwise build a temporary one from all track segments.
@@ -756,7 +785,10 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
             pathItemDist[pp.item] = pp.distFromStart;
     }
 
-    int segIdx = 0;
+    int    segIdx = 0;
+    double cumulativeTimePsec = 0.0;
+    long   usXsTotal = 0, usBemTotal = 0;
+    int    bemSolves = 0, cacheHits = 0;
 
     for( int si = 0; si < numSamples; si++ )
     {
@@ -831,7 +863,14 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
                 int padWidth = (int) ( maxProj - minProj );
 
                 if( padWidth > signalWidth )
+                {
+                    fprintf( stderr, "SIPI: pad expansion at d=%.3fmm pos=(%d,%d) "
+                                     "pad=%s w=%d→%d\n",
+                             sampleDist / 1e6, samplePos.x, samplePos.y,
+                             (const char*) pad->GetNumber().utf8_str(),
+                             signalWidth, padWidth );
                     signalWidth = padWidth;
+                }
 
                 break;
             }
@@ -862,13 +901,18 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         xsParams.sampleDist = sampleDist;
         xsParams.layerGeom = geom;
 
+        auto t0 = std::chrono::steady_clock::now();
+
         auto neighbors = xsBuilder.FindNeighbors( xsParams );
         XS_GEOMETRY xs = xsBuilder.BuildGeometry( xsParams, neighbors );
+
+        auto t1 = std::chrono::steady_clock::now();
+        usXsTotal += std::chrono::duration_cast<std::chrono::microseconds>( t1 - t0 ).count();
 
         // Build cache key from neighbor configuration
         XS_KEY key;
         key.layer = track->GetLayer();
-        key.width = track->GetWidth();
+        key.width = signalWidth;
         key.refAbove = geom.hasRefAbove;
         key.refBelow = geom.hasRefBelow;
 
@@ -880,29 +924,60 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
 
         // Solve (with cache)
         double z0 = 0.0;
+        double erEff = 1.0;
         auto cacheIt = z0Cache.find( key );
 
         if( cacheIt != z0Cache.end() )
         {
-            z0 = cacheIt->second;
+            z0 = cacheIt->second.z0;
+            erEff = cacheIt->second.erEff;
+            cacheHits++;
         }
         else
         {
+            auto t2 = std::chrono::steady_clock::now();
             BEM_2D_SOLVER solver;
             solver.SetGeometry( xs );
             solver.SetPanelsPerEdge( 12 );
 
-            if( solver.Solve() && solver.GetResult().Z0 > 0.0 )
-                z0 = solver.GetResult().Z0;
-            else
-                z0 = STACKUP_READER::ComputeZ0( geom );
+            bool bemOk = solver.Solve();
 
-            z0Cache[key] = z0;
+            if( bemOk && solver.GetResult().Z0 > 0.0 )
+            {
+                z0 = solver.GetResult().Z0;
+                erEff = std::max( solver.GetResult().erEff, 1.0 );
+            }
+            else
+            {
+                z0 = STACKUP_READER::ComputeZ0( geom );
+                erEff = ( geom.erAbove + geom.erBelow ) / 2.0;
+
+                if( erEff < 1.0 )
+                    erEff = std::max( geom.erAbove, geom.erBelow );
+
+                fprintf( stderr, "SIPI: BEM fallback at d=%.3fmm Z0=%.1f "
+                                 "bemOk=%d nb=%d w=%d\n",
+                         sampleDist / 1e6, z0, bemOk,
+                         (int) neighbors.size(), signalWidth );
+            }
+
+            z0Cache[key] = { z0, erEff };
+
+            auto t3 = std::chrono::steady_clock::now();
+            usBemTotal += std::chrono::duration_cast<std::chrono::microseconds>( t3 - t2 ).count();
+            bemSolves++;
         }
+
+        // Compute cumulative propagation delay
+        static constexpr double C_LIGHT_M_S = 299792458.0;
+        double velocity = C_LIGHT_M_S / sqrt( erEff );
+        double stepMeters = sampleStep * 1e-9; // nm → m
+        cumulativeTimePsec += ( stepMeters / velocity ) * 1e12; // s → ps
 
         // Store sample with full geometry
         XS_SAMPLE sample;
         sample.distMm = sampleDist / 1e6; // nm → mm
+        sample.timePsec = cumulativeTimePsec;
         sample.z0 = z0;
         sample.geometry = xs;
         sample.boardPos = samplePos;
@@ -940,11 +1015,15 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     wxString status;
     double   totalLenMm = totalLen / 1e6;
 
+    double totalTimePsec = m_samples.empty() ? 0.0 : m_samples.back().timePsec;
+
     if( result.isComplete() )
-        status.Printf( _( "%.1f mm, %d segs" ), totalLenMm, result.segmentsVisited );
+        status.Printf( _( "%.1f mm (%.0f ps), %d segs" ),
+                       totalLenMm, totalTimePsec, result.segmentsVisited );
     else
-        status.Printf( _( "%.1f mm, %d/%d segs" ),
-                       totalLenMm, result.segmentsVisited, result.totalSegmentsOnNet );
+        status.Printf( _( "%.1f mm (%.0f ps), %d/%d segs" ),
+                       totalLenMm, totalTimePsec,
+                       result.segmentsVisited, result.totalSegmentsOnNet );
 
     double minZ = 1e9, maxZ = 0.0;
 
@@ -969,6 +1048,9 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
                                 samplesWithNeighbors, (int) m_samples.size(),
                                 (int) z0Cache.size() );
 
+    fprintf( stderr, "SIPI timing: XS=%.1fms BEM=%.1fms (%d solves, %d cached)\n",
+             usXsTotal / 1000.0, usBemTotal / 1000.0, bemSolves, cacheHits );
+
     updateStatus( status );
 }
 
@@ -980,7 +1062,7 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot()
 
     for( const XS_SAMPLE& s : m_samples )
     {
-        positions.push_back( s.distMm );
+        positions.push_back( m_xAxisIsTime ? s.timePsec : s.distMm );
         impedances.push_back( s.z0 );
     }
 

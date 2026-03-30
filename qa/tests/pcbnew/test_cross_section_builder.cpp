@@ -1160,4 +1160,173 @@ BOOST_AUTO_TEST_CASE( RealBoardSDRAM )
 }
 
 
+/**
+ * Diagnostic: Profile SRAM_D5 at 200µm steps, print Z0 at every sample.
+ */
+BOOST_AUTO_TEST_CASE( RealBoardSDRAM_D5 )
+{
+    SETTINGS_MANAGER settingsMgr( true );
+    std::unique_ptr<BOARD> board;
+
+    try { KI_TEST::LoadBoard( settingsMgr, "cparti_fpga", board ); }
+    catch( ... ) { BOOST_TEST_MESSAGE( "Board not found — skipping" ); return; }
+
+    if( !board || board->Tracks().empty() ) return;
+
+    KI_TEST::FillZones( board.get() );
+    board->BuildConnectivity();
+
+    int targetNet = -1;
+
+    for( const auto& [code, info] : board->GetNetInfo().NetsByNetcode() )
+    {
+        if( info->GetNetname().Lower() == wxS( "sram_d5" ) )
+        {
+            targetNet = code;
+            BOOST_TEST_MESSAGE( "Found net: " << info->GetNetname() << " (code " << code << ")" );
+            break;
+        }
+    }
+
+    if( targetNet < 0 ) { BOOST_TEST_MESSAGE( "SRAM_D5 not found" ); return; }
+
+    DRC_RTREE rtree;
+
+    for( PCB_TRACK* t : board->Tracks() )
+    {
+        if( t->Type() != PCB_VIA_T )
+            rtree.Insert( t, t->GetLayer() );
+    }
+
+    STACKUP_READER stackup( board.get() );
+    TRACE_PATH_WALKER walker( board.get() );
+    walker.WalkNet( targetNet );
+
+    const auto& path = walker.GetPath();
+
+    BOOST_TEST_MESSAGE( "Path: " << path.size() << " points, "
+                        << walker.GetTotalLength() / 1e6 << " mm" );
+
+    std::map<BOARD_CONNECTED_ITEM*, double> pathItemDist;
+
+    for( const PATH_POINT& pp : path )
+    {
+        if( !pp.isVia && pathItemDist.find( pp.item ) == pathItemDist.end() )
+            pathItemDist[pp.item] = pp.distFromStart;
+    }
+
+    // Build interpolation segments
+    struct SEG_PT { double dist; VECTOR2I pos; VECTOR2D tangent; PCB_TRACK* track; };
+    std::vector<SEG_PT> segs;
+
+    for( const PATH_POINT& pp : path )
+    {
+        if( !pp.isVia )
+            segs.push_back( { pp.distFromStart, pp.position, pp.tangent,
+                              static_cast<PCB_TRACK*>( pp.item ) } );
+    }
+
+    double totalLen = walker.GetTotalLength();
+    double step = 50000; // 50µm for fine resolution
+    int    segIdx = 0;
+    int    spikeCount = 0;
+    double prevZ0 = 0;
+
+    BOOST_TEST_MESSAGE( "\n=== SRAM_D5 profile at 200um steps ===" );
+
+    for( double d = 0; d <= totalLen; d += step )
+    {
+        while( segIdx + 1 < (int) segs.size() && segs[segIdx + 1].dist <= d )
+            segIdx++;
+
+        VECTOR2I pos = segs[segIdx].pos;
+
+        if( segIdx + 1 < (int) segs.size() )
+        {
+            double segLen = segs[segIdx + 1].dist - segs[segIdx].dist;
+
+            if( segLen > 1.0 )
+            {
+                double frac = std::clamp( ( d - segs[segIdx].dist ) / segLen, 0.0, 1.0 );
+                pos.x = segs[segIdx].pos.x
+                        + (int) ( frac * ( segs[segIdx + 1].pos.x - segs[segIdx].pos.x ) );
+                pos.y = segs[segIdx].pos.y
+                        + (int) ( frac * ( segs[segIdx + 1].pos.y - segs[segIdx].pos.y ) );
+            }
+        }
+
+        PCB_TRACK* track = segs[segIdx].track;
+
+        LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(), pos,
+                                                        track->GetWidth() );
+
+        double hRef = std::max( geom.hAbove, geom.hBelow );
+        int    couplingHorizon = std::max( (int) ( hRef * 3.0 * 1e9 ), 500000 );
+
+        CROSS_SECTION_BUILDER builder;
+        builder.SetSpatialIndex( &rtree );
+        builder.SetBoard( board.get() );
+        builder.SetPathItemDistances( &pathItemDist );
+        builder.SetSignalTrack( track );
+
+        XS_BUILD_PARAMS params;
+        params.samplePos = pos;
+        params.sampleTangent = segs[segIdx].tangent;
+        params.signalLayer = track->GetLayer();
+        params.signalNetCode = track->GetNetCode();
+        params.signalWidth = track->GetWidth();
+        params.couplingHorizon = couplingHorizon;
+        params.sampleDist = d;
+        params.layerGeom = geom;
+
+        auto neighbors = builder.FindNeighbors( params );
+        XS_GEOMETRY xs = builder.BuildGeometry( params, neighbors );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+
+        double z0 = 0.0;
+        bool   bemOk = solver.Solve();
+
+        if( bemOk && solver.GetResult().Z0 > 0.0 )
+            z0 = solver.GetResult().Z0;
+        else
+            z0 = STACKUP_READER::ComputeZ0( geom );
+
+        // Flag spikes > 3Ω
+        bool spike = ( prevZ0 > 0 && std::abs( z0 - prevZ0 ) > 3.0 );
+
+        if( spike )
+            spikeCount++;
+
+        BOOST_TEST_MESSAGE( "d=" << d / 1e6 << "mm"
+                            << " layer=" << (int) track->GetLayer()
+                            << " w=" << track->GetWidth() / 1000 << "um"
+                            << " nb=" << neighbors.size()
+                            << " Z0=" << z0
+                            << " bem=" << bemOk
+                            << ( spike ? " *** SPIKE ***" : "" ) );
+
+        if( spike || neighbors.size() > 0 )
+        {
+            for( const XS_NEIGHBOR& nb : neighbors )
+            {
+                BOOST_TEST_MESSAGE( "  nb: dist=" << nb.distNm / 1000 << "um"
+                                    << " w=" << nb.widthNm / 1000 << "um"
+                                    << " e2e=" << (int) ( ( std::abs( nb.distNm )
+                                        - track->GetWidth() / 2.0
+                                        - nb.widthNm / 2.0 ) / 1000 )
+                                    << "um" );
+            }
+        }
+
+        prevZ0 = z0;
+    }
+
+    BOOST_TEST_MESSAGE( "\nSpikes (>3Ω jump): " << spikeCount );
+    BOOST_CHECK_EQUAL( spikeCount, 0 );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

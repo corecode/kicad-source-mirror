@@ -44,6 +44,7 @@ class wxStaticText;
 struct XS_SAMPLE
 {
     double      distMm = 0.0;       ///< Distance along trace (mm)
+    double      timePsec = 0.0;    ///< Cumulative propagation delay (ps)
     double      z0 = 0.0;          ///< Computed Z₀ (Ohms)
     XS_GEOMETRY geometry;           ///< Cross-section fed to solver
     VECTOR2I    boardPos;           ///< Board position of this sample (nm)
@@ -105,6 +106,7 @@ private:
     void populateNetList();
     void onAnalyseClicked( wxCommandEvent& aEvent );
     void onNetSelected( wxCommandEvent& aEvent );
+    void onXAxisUnitChanged( wxCommandEvent& aEvent );
     void onPlotClick( wxMouseEvent& aEvent );
     void runAnalysis( int aNetCode );
     void updatePlot();
@@ -117,7 +119,10 @@ private:
     // Controls
     wxChoice*       m_netSelector;
     wxTextCtrl*     m_targetZ0Input;
+    wxChoice*       m_xAxisUnitSelector;  ///< mm or ps toggle
     wxStaticText*   m_statusText;
+
+    bool            m_xAxisIsTime;        ///< true = ps, false = mm
 
     // Plot
     mpWindow*       m_plotWindow;
