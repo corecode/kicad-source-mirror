@@ -462,8 +462,10 @@ void BEM_2D_SOLVER::buildElements()
         double yBot   = cy - ht;
         double yTop   = cy + ht;
 
-        int nHoriz = std::clamp( m_panelsPerEdge, 3, 50 );
-        int nVert  = std::clamp( (int) round( m_panelsPerEdge * cond.thickness
+        // Groundwires have smooth charge distributions — use fewer panels.
+        int ppe = cond.isGround ? std::max( m_panelsPerEdge / 2, 4 ) : m_panelsPerEdge;
+        int nHoriz = std::clamp( ppe, 3, 50 );
+        int nVert  = std::clamp( (int) round( ppe * cond.thickness
                                                / cond.width ), 2, 20 );
 
         // Four faces: bottom, right, top (reversed), left (reversed)

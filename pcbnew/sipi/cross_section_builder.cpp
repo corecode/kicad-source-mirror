@@ -435,84 +435,71 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
 
     double halfSignalW = aParams.signalWidth / 2.0;
 
-    // Helper: intersect the cut line with zone fills on a given layer.
-    // Returns all intersection lateral distances (projected onto normal).
-    // Uses bounding box filtering on each polygon chain to skip distant holes.
-    BOX2I cutBBox;
-    cutBBox.SetOrigin( cutA );
-    cutBBox.Merge( cutB );
+    // Helper: sample copper coverage along the cut line on a given layer.
+    // Returns copper spans as [left, right] lateral distances (nm) from signal center.
+    // Uses HitTestFilledArea at discrete points — robust with overlapping zones
+    // and complex polygon topologies (no parity pairing issues).
+    static constexpr int MAX_GROUNDWIRES = 4;
 
-    auto findZoneIntersections = [&]( PCB_LAYER_ID aLayer ) -> std::vector<double>
+    auto findCopperSpans = [&]( PCB_LAYER_ID aLayer ) -> std::vector<std::pair<double, double>>
     {
-        std::vector<double> intersections;
+        std::vector<std::pair<double, double>> spans;
 
-        for( ZONE* zone : m_board->Zones() )
+        // Sample interval: 50µm along the cut line
+        static constexpr double SAMPLE_STEP = 50000.0; // nm
+
+        bool   inCopper = false;
+        double spanStart = 0.0;
+
+        for( double lat = -extent; lat <= extent; lat += SAMPLE_STEP )
         {
-            if( !zone->IsOnLayer( aLayer ) )
-                continue;
+            VECTOR2I pt( aParams.samplePos.x + (int) ( normal.x * lat ),
+                         aParams.samplePos.y + (int) ( normal.y * lat ) );
 
-            if( zone->GetIsRuleArea() )
-                continue;
+            bool covered = false;
 
-            const std::shared_ptr<SHAPE_POLY_SET>& fill = zone->GetFilledPolysList( aLayer );
-
-            if( !fill || fill->IsEmpty() )
-                continue;
-
-            auto intersectChain = [&]( const SHAPE_LINE_CHAIN& aChain )
+            for( ZONE* zone : m_board->Zones() )
             {
-                // Skip chains whose bounding box doesn't overlap the cut line
-                const BOX2I& chainBBox = aChain.BBox();
+                if( !zone->IsOnLayer( aLayer ) || zone->GetIsRuleArea() )
+                    continue;
 
-                if( !cutBBox.Intersects( chainBBox ) )
-                    return;
-
-                for( int ei = 0; ei < aChain.SegmentCount(); ei++ )
+                if( zone->HitTestFilledArea( aLayer, pt ) )
                 {
-                    SEG edge = aChain.Segment( ei );
-                    OPT_VECTOR2I hit = cutSeg.IntersectLines( edge );
-
-                    if( !hit || !edge.Contains( *hit ) )
-                        continue;
-
-                    VECTOR2D delta( hit->x - aParams.samplePos.x,
-                                    hit->y - aParams.samplePos.y );
-                    intersections.push_back( delta.x * normal.x + delta.y * normal.y );
+                    covered = true;
+                    break;
                 }
-            };
+            }
 
-            for( int oi = 0; oi < fill->OutlineCount(); oi++ )
+            if( covered && !inCopper )
             {
-                intersectChain( fill->Outline( oi ) );
-
-                for( int hi = 0; hi < fill->HoleCount( oi ); hi++ )
-                    intersectChain( fill->Hole( oi, hi ) );
+                spanStart = lat;
+                inCopper = true;
+            }
+            else if( !covered && inCopper )
+            {
+                spans.push_back( { spanStart, lat - SAMPLE_STEP } );
+                inCopper = false;
             }
         }
 
-        std::sort( intersections.begin(), intersections.end() );
-        return intersections;
+        if( inCopper )
+            spans.push_back( { spanStart, (double) extent } );
+
+        return spans;
     };
 
-    // Helper: convert sorted intersection list into groundwire spans.
-    // Parity-based: even index = entering copper, odd = leaving.
-    // Only keeps spans whose nearest edge is within 2× coupling horizon —
-    // distant copper doesn't affect the signal impedance significantly.
-    static constexpr int MAX_GROUNDWIRES = 4;
-
-    auto makeGroundWires = [&]( const std::vector<double>& aIntersections,
+    // Helper: convert copper spans into groundwires.
+    auto makeGroundWires = [&]( const std::vector<std::pair<double, double>>& aSpans,
                                 double aZPosition, double aThickness,
                                 bool aSkipSignalCenter )
     {
         double maxDist = aParams.couplingHorizon * 2.0;
 
-        for( size_t i = 0; i + 1 < aIntersections.size(); i += 2 )
+        for( const auto& [left, right] : aSpans )
         {
-            double left = aIntersections[i];
-            double right = aIntersections[i + 1];
             double spanWidth = right - left;
 
-            if( spanWidth < 1000 ) // ignore tiny fragments (< 1µm)
+            if( spanWidth < 10000 ) // ignore tiny fragments (< 10µm)
                 continue;
 
             double spanCenter = ( left + right ) / 2.0;
@@ -520,7 +507,6 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
             if( aSkipSignalCenter && left < halfSignalW && right > -halfSignalW )
                 continue;
 
-            // Only keep spans whose nearest edge is within range
             double nearestEdge = std::min( std::abs( left ), std::abs( right ) );
 
             if( nearestEdge > maxDist )
@@ -538,10 +524,10 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
     // --- Check intermediate layers (antipad directly under signal) ---
     for( const auto& interLayer : aLayerGeom.intermediateLayers )
     {
-        auto intersections = findZoneIntersections( interLayer.layerId );
+        auto spans = findCopperSpans( interLayer.layerId );
 
-        if( !intersections.empty() )
-            makeGroundWires( intersections, interLayer.zPosition, interLayer.thickness, true );
+        if( !spans.empty() )
+            makeGroundWires( spans, interLayer.zPosition, interLayer.thickness, true );
     }
 
     // --- Check reference layers for nearby edges (adjacent antipad) ---
@@ -583,22 +569,22 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
         if( !hasNearbyObstacle )
             return;
 
-        auto intersections = findZoneIntersections( aRefLayer );
+        auto spans = findCopperSpans( aRefLayer );
 
-        if( intersections.empty() )
+        if( spans.empty() )
             return;
 
         // Find the copper span containing the signal center.
-        double spanLeft = -1e18;
-        double spanRight = 1e18;
+        double spanLeft = 0.0;
+        double spanRight = 0.0;
         bool   foundSignalSpan = false;
 
-        for( size_t i = 0; i + 1 < intersections.size(); i += 2 )
+        for( const auto& [left, right] : spans )
         {
-            if( intersections[i] <= halfSignalW && intersections[i + 1] >= -halfSignalW )
+            if( left <= halfSignalW && right >= -halfSignalW )
             {
-                spanLeft = intersections[i];
-                spanRight = intersections[i + 1];
+                spanLeft = left;
+                spanRight = right;
                 foundSignalSpan = true;
                 break;
             }
@@ -607,14 +593,14 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
         if( !foundSignalSpan )
             return;
 
-        // Only demote if the span edge is within the coupling horizon.
+        // Only demote if the signal's span edge is within the coupling horizon.
         double nearestEdge = std::min( std::abs( spanLeft ), std::abs( spanRight ) );
 
         if( nearestEdge >= aParams.couplingHorizon )
             return;
 
         // Demote: reference layer copper becomes groundwires
-        makeGroundWires( intersections, aRefZ, aRefThickness, false );
+        makeGroundWires( spans, aRefZ, aRefThickness, false );
 
         // Save original dielectric info before overwriting
         aHOrig = aH;
