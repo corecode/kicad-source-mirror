@@ -59,12 +59,21 @@ struct LAYER_GEOMETRY
 
     /// Original reference distance before demotion (0 if not demoted).
     /// When a reference layer is demoted to groundwires, hBelow/hAbove are
-    /// pushed to virtual earth but the substrate εr and thickness are preserved
-    /// here so BuildGeometry can create the correct dielectric layering.
+    /// pushed to a deeper layer but the original substrate εr and thickness
+    /// are preserved here so BuildGeometry creates the correct dielectric layering.
     double hOrigBelow = 0.0;
     double erOrigBelow = 0.0;
     double hOrigAbove = 0.0;
     double erOrigAbove = 0.0;
+
+    /// Fallback image ground for demotion: the outermost copper layer
+    /// beyond the current reference.  Used when the reference is demoted.
+    double hFallbackBelow = 0.0;    ///< Distance to outermost layer below (meters)
+    double erFallbackBelow = 4.5;   ///< εr to outermost layer below
+    double tanDFallbackBelow = 0.02;
+    double hFallbackAbove = 0.0;
+    double erFallbackAbove = 4.5;
+    double tanDFallbackAbove = 0.02;
 
     /// Intermediate copper layers between the signal and the image ground
     /// that may have partial zone coverage (groundwire candidates).

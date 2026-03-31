@@ -293,27 +293,41 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
                   m_copperLayers[i].thickness } );
     }
 
-    // Virtual earth fallback: if no reference plane was found in a direction,
-    // place a virtual ground at a large distance.  This gives the BEM a valid
-    // image ground to work with, producing a high but physically meaningful Z₀
-    // rather than failing.  Groundwires from intermediate layers (added by the
-    // cross-section builder) provide the local coupling.
-    static constexpr double VIRTUAL_EARTH_M = 10e-3; // 10mm
+    // Compute fallback image ground for demotion: the outermost copper layer
+    // in each direction, with the actual dielectric stackup.
+    if( signalIdx > 0 )
+    {
+        int outerIdx = 0;
+        geom.hFallbackAbove = copperSpacing( outerIdx, signalIdx );
+        findDielectric( m_copperLayers[outerIdx].zPosition, signalZ,
+                        geom.erFallbackAbove, geom.tanDFallbackAbove );
+    }
 
+    if( signalIdx < (int) m_copperLayers.size() - 1 )
+    {
+        int outerIdx = (int) m_copperLayers.size() - 1;
+        geom.hFallbackBelow = copperSpacing( signalIdx, outerIdx );
+        findDielectric( signalZ, m_copperLayers[outerIdx].zPosition,
+                        geom.erFallbackBelow, geom.tanDFallbackBelow );
+    }
+
+    // Virtual earth fallback: if no reference plane was found in a direction,
+    // use the outermost copper layer as the image ground with the actual
+    // dielectric stackup.
     if( !geom.hasRefAbove && signalIdx > 0 )
     {
-        geom.hAbove = VIRTUAL_EARTH_M;
+        geom.hAbove = geom.hFallbackAbove;
         geom.hasRefAbove = true;
-        geom.erAbove = 1.0;
-        geom.tanDAbove = 0.0;
+        geom.erAbove = geom.erFallbackAbove;
+        geom.tanDAbove = geom.tanDFallbackAbove;
     }
 
     if( !geom.hasRefBelow && signalIdx < (int) m_copperLayers.size() - 1 )
     {
-        geom.hBelow = VIRTUAL_EARTH_M;
+        geom.hBelow = geom.hFallbackBelow;
         geom.hasRefBelow = true;
-        geom.erBelow = 1.0;
-        geom.tanDBelow = 0.0;
+        geom.erBelow = geom.erFallbackBelow;
+        geom.tanDBelow = geom.tanDFallbackBelow;
     }
 
     return geom;

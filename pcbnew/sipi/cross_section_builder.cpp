@@ -535,11 +535,10 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
     // coupling horizon, demote the reference to groundwires.  The image
     // ground shifts to virtual earth, but the original dielectric info
     // is preserved so BuildGeometry creates the correct layering.
-    static constexpr double VIRTUAL_EARTH_M = 10e-3;
-
     auto checkRefLayer = [&]( PCB_LAYER_ID aRefLayer, double aRefZ, double aRefThickness,
                               bool& aHasRef, double& aH, double& aEr, double& aTanD,
-                              double& aHOrig, double& aErOrig )
+                              double& aHOrig, double& aErOrig,
+                              double aHFallback, double aErFallback, double aTanDFallback )
     {
         if( aRefLayer == UNDEFINED_LAYER )
             return;
@@ -606,11 +605,12 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
         aHOrig = aH;
         aErOrig = aEr;
 
-        // Shift image ground to virtual earth
+        // Shift image ground to the outermost copper layer (fallback)
+        // with the actual dielectric stackup.
         aHasRef = true;
-        aH = VIRTUAL_EARTH_M;
-        aEr = 1.0;
-        aTanD = 0.0;
+        aH = aHFallback;
+        aEr = aErFallback;
+        aTanD = aTanDFallback;
     };
 
     if( aLayerGeom.hasRefBelow && aLayerGeom.refLayerBelow != UNDEFINED_LAYER )
@@ -621,7 +621,9 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
         checkRefLayer( aLayerGeom.refLayerBelow, refZ, aLayerGeom.traceThickness,
                        aLayerGeom.hasRefBelow, aLayerGeom.hBelow,
                        aLayerGeom.erBelow, aLayerGeom.tanDBelow,
-                       aLayerGeom.hOrigBelow, aLayerGeom.erOrigBelow );
+                       aLayerGeom.hOrigBelow, aLayerGeom.erOrigBelow,
+                       aLayerGeom.hFallbackBelow, aLayerGeom.erFallbackBelow,
+                       aLayerGeom.tanDFallbackBelow );
     }
 
     if( aLayerGeom.hasRefAbove && aLayerGeom.refLayerAbove != UNDEFINED_LAYER )
@@ -632,7 +634,9 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
         checkRefLayer( aLayerGeom.refLayerAbove, refZ, aLayerGeom.traceThickness,
                        aLayerGeom.hasRefAbove, aLayerGeom.hAbove,
                        aLayerGeom.erAbove, aLayerGeom.tanDAbove,
-                       aLayerGeom.hOrigAbove, aLayerGeom.erOrigAbove );
+                       aLayerGeom.hOrigAbove, aLayerGeom.erOrigAbove,
+                       aLayerGeom.hFallbackAbove, aLayerGeom.erFallbackAbove,
+                       aLayerGeom.tanDFallbackAbove );
     }
 
     // Cap groundwire count — too many conductors makes the BEM matrix huge.

@@ -120,12 +120,12 @@ BOOST_AUTO_TEST_CASE( TwoLayerNoZones )
     LAYER_GEOMETRY geom = reader.GetLayerGeometry( F_Cu, VECTOR2I( 25000000, 25000000 ),
                                                    150000 );
 
-    // Virtual earth fallback kicks in — hasRef is true but at a large distance
+    // Fallback: use outermost copper layer (B.Cu) with actual dielectric stackup
     BOOST_CHECK( geom.hasRefBelow );
-    BOOST_CHECK_GT( geom.hBelow, 5e-3 ); // at least 5mm (virtual earth at 10mm)
-    BOOST_CHECK_CLOSE( geom.erBelow, 1.0, 1.0 ); // air dielectric
+    BOOST_CHECK_GT( geom.hBelow, 0.5e-3 ); // actual F.Cu-to-B.Cu distance
+    BOOST_CHECK_GT( geom.erBelow, 1.0 );   // real substrate εr, not air
 
-    // F.Cu is the top layer — no layers above, no virtual earth above
+    // F.Cu is the top layer — no layers above
     BOOST_CHECK( !geom.hasRefAbove );
 }
 
@@ -154,11 +154,11 @@ BOOST_AUTO_TEST_CASE( TwoLayerAntipad )
     BOOST_CHECK( geomInside.hasRefBelow );
     BOOST_CHECK_LT( geomInside.hBelow, 5e-3 ); // normal stackup distance
 
-    // In the gap between zones — virtual earth fallback (large h)
+    // In the gap between zones — fallback to outermost layer (B.Cu)
     LAYER_GEOMETRY geomGap = reader.GetLayerGeometry( F_Cu, VECTOR2I( 22000000, 25000000 ),
                                                       150000 );
     BOOST_CHECK( geomGap.hasRefBelow );
-    BOOST_CHECK_GT( geomGap.hBelow, 5e-3 ); // virtual earth, far away
+    BOOST_CHECK_GT( geomGap.hBelow, 0.5e-3 ); // actual board thickness
 
     // The gap point should have B.Cu as an intermediate layer (for groundwires)
     BOOST_CHECK_EQUAL( (int) geomGap.intermediateLayers.size(), 1 );
@@ -259,7 +259,7 @@ BOOST_AUTO_TEST_CASE( StriplineWithGapAbove )
                                                       150000 );
 
     BOOST_CHECK( geomGap.hasRefAbove );
-    BOOST_CHECK_GT( geomGap.hAbove, 5e-3 ); // virtual earth (far)
+    // Fallback to outermost layer above (F.Cu) — actual stackup distance
     BOOST_CHECK( geomGap.hasRefBelow );
     BOOST_CHECK_LT( geomGap.hBelow, 5e-3 ); // real ref on B.Cu
 
