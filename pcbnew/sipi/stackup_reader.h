@@ -52,6 +52,31 @@ struct LAYER_GEOMETRY
     bool hasRefAbove = false;       ///< true if a copper plane covers the trace above
     bool hasRefBelow = false;       ///< true if a copper plane covers the trace below
 
+    PCB_LAYER_ID refLayerAbove = UNDEFINED_LAYER;  ///< Copper layer used as ref above
+    PCB_LAYER_ID refLayerBelow = UNDEFINED_LAYER;  ///< Copper layer used as ref below
+
+    double signalZPosition = 0.0;   ///< Signal layer z-position (meters, from stackup)
+
+    /// Original reference distance before demotion (0 if not demoted).
+    /// When a reference layer is demoted to groundwires, hBelow/hAbove are
+    /// pushed to virtual earth but the substrate εr and thickness are preserved
+    /// here so BuildGeometry can create the correct dielectric layering.
+    double hOrigBelow = 0.0;
+    double erOrigBelow = 0.0;
+    double hOrigAbove = 0.0;
+    double erOrigAbove = 0.0;
+
+    /// Intermediate copper layers between the signal and the image ground
+    /// that may have partial zone coverage (groundwire candidates).
+    struct INTERMEDIATE_LAYER
+    {
+        PCB_LAYER_ID layerId;
+        double       zPosition;   ///< meters from top surface
+        double       thickness;   ///< meters
+    };
+
+    std::vector<INTERMEDIATE_LAYER> intermediateLayers;
+
     bool usingDefaults = false;     ///< true if stackup data was default/unconfigured
 };
 

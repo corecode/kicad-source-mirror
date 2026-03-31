@@ -244,9 +244,9 @@ void BEM_2D_SOLVER::buildElements()
     m_intfElements.clear();
     m_numCondNodes = 0;
     m_numIntfNodes = 0;
-    m_numConductors = (int) m_geometry.conductors.size();
+    m_numConductors = 0;
 
-    if( m_numConductors == 0 )
+    if( m_geometry.conductors.empty() )
         return;
 
     // --- Coordinate transform ---
@@ -405,9 +405,52 @@ void BEM_2D_SOLVER::buildElements()
 
     int nodeCounter = 0;
 
-    for( int ci = 0; ci < m_numConductors; ci++ )
+    // Helper to create elements along a straight line segment
+    auto buildFace = [&]( double x0, double y0, double x1, double y1,
+                          int nElem, double nx, double ny, int aCondIdx )
+    {
+        double er = getEpsilonR( ( y0 + y1 ) / 2.0, ny );
+
+        for( int e = 0; e < nElem; e++ )
+        {
+            double t0 = (double) e / nElem;
+            double t1 = (double) ( e + 1 ) / nElem;
+            double tm = ( t0 + t1 ) / 2.0;
+
+            ELEMENT el = {};
+            el.xpts[0] = x0 + t0 * ( x1 - x0 );
+            el.ypts[0] = y0 + t0 * ( y1 - y0 );
+            el.xpts[1] = x0 + tm * ( x1 - x0 );
+            el.ypts[1] = y0 + tm * ( y1 - y0 );
+            el.xpts[2] = x0 + t1 * ( x1 - x0 );
+            el.ypts[2] = y0 + t1 * ( y1 - y0 );
+            el.conductorIdx = aCondIdx;
+            el.epsilonR = er;
+
+            if( e == 0 )
+            {
+                el.nodeIdx[0] = nodeCounter++;
+                el.nodeIdx[1] = nodeCounter++;
+                el.nodeIdx[2] = nodeCounter++;
+            }
+            else
+            {
+                el.nodeIdx[0] = m_condElements.back().nodeIdx[2]; // shared
+                el.nodeIdx[1] = nodeCounter++;
+                el.nodeIdx[2] = nodeCounter++;
+            }
+
+            m_condElements.push_back( el );
+        }
+    };
+
+    // Signal conductor index counter (only non-ground conductors)
+    int signalIdx = 0;
+
+    for( int ci = 0; ci < (int) m_geometry.conductors.size(); ci++ )
     {
         const XS_CONDUCTOR& cond = m_geometry.conductors[ci];
+        int condIdx = cond.isGround ? GROUND_CONDUCTOR_IDX : signalIdx++;
 
         double cx = cond.centerX;
         double cy = toY( cond.centerY );
@@ -423,53 +466,14 @@ void BEM_2D_SOLVER::buildElements()
         int nVert  = std::clamp( (int) round( m_panelsPerEdge * cond.thickness
                                                / cond.width ), 2, 20 );
 
-        // Helper to create elements along a straight line segment
-        auto buildFace = [&]( double x0, double y0, double x1, double y1,
-                              int nElem, double nx, double ny )
-        {
-            double er = getEpsilonR( ( y0 + y1 ) / 2.0, ny );
-
-            for( int e = 0; e < nElem; e++ )
-            {
-                double t0 = (double) e / nElem;
-                double t1 = (double) ( e + 1 ) / nElem;
-                double tm = ( t0 + t1 ) / 2.0;
-
-                ELEMENT el = {};
-                el.xpts[0] = x0 + t0 * ( x1 - x0 );
-                el.ypts[0] = y0 + t0 * ( y1 - y0 );
-                el.xpts[1] = x0 + tm * ( x1 - x0 );
-                el.ypts[1] = y0 + tm * ( y1 - y0 );
-                el.xpts[2] = x0 + t1 * ( x1 - x0 );
-                el.ypts[2] = y0 + t1 * ( y1 - y0 );
-                el.conductorIdx = ci;
-                el.epsilonR = er;
-
-                // Assign nodes — first element gets 3 new nodes,
-                // subsequent elements share the start node with previous end.
-                if( e == 0 )
-                {
-                    el.nodeIdx[0] = nodeCounter++;
-                    el.nodeIdx[1] = nodeCounter++;
-                    el.nodeIdx[2] = nodeCounter++;
-                }
-                else
-                {
-                    el.nodeIdx[0] = m_condElements.back().nodeIdx[2]; // shared
-                    el.nodeIdx[1] = nodeCounter++;
-                    el.nodeIdx[2] = nodeCounter++;
-                }
-
-                m_condElements.push_back( el );
-            }
-        };
-
         // Four faces: bottom, right, top (reversed), left (reversed)
-        buildFace( xLeft, yBot, xRight, yBot, nHoriz, 0.0, -1.0 );  // bottom
-        buildFace( xRight, yBot, xRight, yTop, nVert, 1.0, 0.0 );    // right
-        buildFace( xRight, yTop, xLeft, yTop, nHoriz, 0.0, 1.0 );    // top
-        buildFace( xLeft, yTop, xLeft, yBot, nVert, -1.0, 0.0 );     // left
+        buildFace( xLeft, yBot, xRight, yBot, nHoriz, 0.0, -1.0, condIdx );
+        buildFace( xRight, yBot, xRight, yTop, nVert, 1.0, 0.0, condIdx );
+        buildFace( xRight, yTop, xLeft, yTop, nHoriz, 0.0, 1.0, condIdx );
+        buildFace( xLeft, yTop, xLeft, yBot, nVert, -1.0, 0.0, condIdx );
     }
+
+    m_numConductors = signalIdx;
 
     m_numCondNodes = nodeCounter;
 
@@ -756,6 +760,9 @@ void BEM_2D_SOLVER::extractCharge( const Eigen::VectorXd& aSigma,
     {
         int ci = el.conductorIdx;
 
+        if( ci < 0 )
+            continue; // skip ground and interface elements
+
         for( int q = 0; q < GAUSS_N_OUTER; q++ )
         {
             double xi = GAUSS_PTS_10[q];
@@ -989,6 +996,9 @@ Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceAir()
         for( const ELEMENT& el : m_condElements )
         {
             int ci = el.conductorIdx;
+
+            if( ci < 0 )
+                continue; // skip ground elements
 
             for( int q = 0; q < GAUSS_N_OUTER; q++ )
             {

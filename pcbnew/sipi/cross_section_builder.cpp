@@ -114,9 +114,6 @@ void CROSS_SECTION_BUILDER::findTrackNeighbors( const XS_BUILD_PARAMS& aParams,
 
     for( BOARD_ITEM* item : nearbyItems )
     {
-        if( item->Type() == PCB_VIA_T || item->Type() == PCB_ZONE_T )
-            continue;
-
         if( item->Type() != PCB_TRACE_T && item->Type() != PCB_ARC_T )
             continue;
 
@@ -193,7 +190,7 @@ void CROSS_SECTION_BUILDER::findShapeNeighbors( const XS_BUILD_PARAMS& aParams,
 
     for( BOARD_ITEM* item : nearbyItems )
     {
-        if( item->Type() == PCB_VIA_T || item->Type() == PCB_ZONE_T )
+        if( item->Type() == PCB_ZONE_T )
             continue;
 
         if( item->Type() == PCB_TRACE_T || item->Type() == PCB_ARC_T )
@@ -411,9 +408,266 @@ void CROSS_SECTION_BUILDER::deduplicateNeighbors( std::vector<XS_NEIGHBOR>& aNei
 }
 
 
+std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
+        const XS_BUILD_PARAMS& aParams,
+        LAYER_GEOMETRY& aLayerGeom ) const
+{
+    std::vector<XS_GROUNDWIRE> groundWires;
+
+    if( !m_board )
+        return groundWires;
+
+    // Construct the same cut line as FindNeighbors
+    VECTOR2D normal( -aParams.sampleTangent.y, aParams.sampleTangent.x );
+
+    // Search extent: coupling horizon or 5× dielectric height, capped at 5mm
+    // to avoid scanning the entire board when virtual earth is active.
+    double hRef = std::min( std::max( aLayerGeom.hAbove, aLayerGeom.hBelow ), 1e-3 );
+    int    extent = std::clamp( std::max( aParams.couplingHorizon,
+                                          (int) ( hRef * 5.0 / 1e-9 ) ),
+                                500000, 5000000 );
+
+    VECTOR2I cutA( aParams.samplePos.x - (int) ( normal.x * extent ),
+                   aParams.samplePos.y - (int) ( normal.y * extent ) );
+    VECTOR2I cutB( aParams.samplePos.x + (int) ( normal.x * extent ),
+                   aParams.samplePos.y + (int) ( normal.y * extent ) );
+    SEG cutSeg( cutA, cutB );
+
+    double halfSignalW = aParams.signalWidth / 2.0;
+
+    // Helper: intersect the cut line with zone fills on a given layer.
+    // Returns all intersection lateral distances (projected onto normal).
+    // Uses bounding box filtering on each polygon chain to skip distant holes.
+    BOX2I cutBBox;
+    cutBBox.SetOrigin( cutA );
+    cutBBox.Merge( cutB );
+
+    auto findZoneIntersections = [&]( PCB_LAYER_ID aLayer ) -> std::vector<double>
+    {
+        std::vector<double> intersections;
+
+        for( ZONE* zone : m_board->Zones() )
+        {
+            if( !zone->IsOnLayer( aLayer ) )
+                continue;
+
+            if( zone->GetIsRuleArea() )
+                continue;
+
+            const std::shared_ptr<SHAPE_POLY_SET>& fill = zone->GetFilledPolysList( aLayer );
+
+            if( !fill || fill->IsEmpty() )
+                continue;
+
+            auto intersectChain = [&]( const SHAPE_LINE_CHAIN& aChain )
+            {
+                // Skip chains whose bounding box doesn't overlap the cut line
+                const BOX2I& chainBBox = aChain.BBox();
+
+                if( !cutBBox.Intersects( chainBBox ) )
+                    return;
+
+                for( int ei = 0; ei < aChain.SegmentCount(); ei++ )
+                {
+                    SEG edge = aChain.Segment( ei );
+                    OPT_VECTOR2I hit = cutSeg.IntersectLines( edge );
+
+                    if( !hit || !edge.Contains( *hit ) )
+                        continue;
+
+                    VECTOR2D delta( hit->x - aParams.samplePos.x,
+                                    hit->y - aParams.samplePos.y );
+                    intersections.push_back( delta.x * normal.x + delta.y * normal.y );
+                }
+            };
+
+            for( int oi = 0; oi < fill->OutlineCount(); oi++ )
+            {
+                intersectChain( fill->Outline( oi ) );
+
+                for( int hi = 0; hi < fill->HoleCount( oi ); hi++ )
+                    intersectChain( fill->Hole( oi, hi ) );
+            }
+        }
+
+        std::sort( intersections.begin(), intersections.end() );
+        return intersections;
+    };
+
+    // Helper: convert sorted intersection list into groundwire spans.
+    // Parity-based: even index = entering copper, odd = leaving.
+    // Only keeps spans whose nearest edge is within 2× coupling horizon —
+    // distant copper doesn't affect the signal impedance significantly.
+    static constexpr int MAX_GROUNDWIRES = 4;
+
+    auto makeGroundWires = [&]( const std::vector<double>& aIntersections,
+                                double aZPosition, double aThickness,
+                                bool aSkipSignalCenter )
+    {
+        double maxDist = aParams.couplingHorizon * 2.0;
+
+        for( size_t i = 0; i + 1 < aIntersections.size(); i += 2 )
+        {
+            double left = aIntersections[i];
+            double right = aIntersections[i + 1];
+            double spanWidth = right - left;
+
+            if( spanWidth < 1000 ) // ignore tiny fragments (< 1µm)
+                continue;
+
+            double spanCenter = ( left + right ) / 2.0;
+
+            if( aSkipSignalCenter && left < halfSignalW && right > -halfSignalW )
+                continue;
+
+            // Only keep spans whose nearest edge is within range
+            double nearestEdge = std::min( std::abs( left ), std::abs( right ) );
+
+            if( nearestEdge > maxDist )
+                continue;
+
+            XS_GROUNDWIRE gw;
+            gw.lateralNm = (int) spanCenter;
+            gw.widthNm = (int) spanWidth;
+            gw.yPositionM = aZPosition;
+            gw.thicknessM = aThickness;
+            groundWires.push_back( gw );
+        }
+    };
+
+    // --- Check intermediate layers (antipad directly under signal) ---
+    for( const auto& interLayer : aLayerGeom.intermediateLayers )
+    {
+        auto intersections = findZoneIntersections( interLayer.layerId );
+
+        if( !intersections.empty() )
+            makeGroundWires( intersections, interLayer.zPosition, interLayer.thickness, true );
+    }
+
+    // --- Check reference layers for nearby edges (adjacent antipad) ---
+    // If the copper span containing the signal has an edge within the
+    // coupling horizon, demote the reference to groundwires.  The image
+    // ground shifts to virtual earth, but the original dielectric info
+    // is preserved so BuildGeometry creates the correct layering.
+    static constexpr double VIRTUAL_EARTH_M = 10e-3;
+
+    auto checkRefLayer = [&]( PCB_LAYER_ID aRefLayer, double aRefZ, double aRefThickness,
+                              bool& aHasRef, double& aH, double& aEr, double& aTanD,
+                              double& aHOrig, double& aErOrig )
+    {
+        if( aRefLayer == UNDEFINED_LAYER )
+            return;
+
+        // Fast check via R-tree: are there pads or vias on the reference layer
+        // near the sample point?  Antipads extend beyond the pad by the zone
+        // clearance, so search with extra margin.
+        static constexpr int ANTIPAD_MARGIN = 1000000; // 1mm
+
+        bool hasNearbyObstacle = false;
+
+        if( m_rtree )
+        {
+            auto nearby = m_rtree->GetObjectsAt( aParams.samplePos, aRefLayer,
+                                                  aParams.couplingHorizon + ANTIPAD_MARGIN );
+
+            for( BOARD_ITEM* item : nearby )
+            {
+                if( item->Type() == PCB_VIA_T || item->Type() == PCB_PAD_T )
+                {
+                    hasNearbyObstacle = true;
+                    break;
+                }
+            }
+        }
+
+        if( !hasNearbyObstacle )
+            return;
+
+        auto intersections = findZoneIntersections( aRefLayer );
+
+        if( intersections.empty() )
+            return;
+
+        // Find the copper span containing the signal center.
+        double spanLeft = -1e18;
+        double spanRight = 1e18;
+        bool   foundSignalSpan = false;
+
+        for( size_t i = 0; i + 1 < intersections.size(); i += 2 )
+        {
+            if( intersections[i] <= halfSignalW && intersections[i + 1] >= -halfSignalW )
+            {
+                spanLeft = intersections[i];
+                spanRight = intersections[i + 1];
+                foundSignalSpan = true;
+                break;
+            }
+        }
+
+        if( !foundSignalSpan )
+            return;
+
+        // Only demote if the span edge is within the coupling horizon.
+        double nearestEdge = std::min( std::abs( spanLeft ), std::abs( spanRight ) );
+
+        if( nearestEdge >= aParams.couplingHorizon )
+            return;
+
+        // Demote: reference layer copper becomes groundwires
+        makeGroundWires( intersections, aRefZ, aRefThickness, false );
+
+        // Save original dielectric info before overwriting
+        aHOrig = aH;
+        aErOrig = aEr;
+
+        // Shift image ground to virtual earth
+        aHasRef = true;
+        aH = VIRTUAL_EARTH_M;
+        aEr = 1.0;
+        aTanD = 0.0;
+    };
+
+    if( aLayerGeom.hasRefBelow && aLayerGeom.refLayerBelow != UNDEFINED_LAYER )
+    {
+        double refZ = aLayerGeom.signalZPosition
+                      + aLayerGeom.hBelow + aLayerGeom.traceThickness / 2.0;
+
+        checkRefLayer( aLayerGeom.refLayerBelow, refZ, aLayerGeom.traceThickness,
+                       aLayerGeom.hasRefBelow, aLayerGeom.hBelow,
+                       aLayerGeom.erBelow, aLayerGeom.tanDBelow,
+                       aLayerGeom.hOrigBelow, aLayerGeom.erOrigBelow );
+    }
+
+    if( aLayerGeom.hasRefAbove && aLayerGeom.refLayerAbove != UNDEFINED_LAYER )
+    {
+        double refZ = aLayerGeom.signalZPosition
+                      - aLayerGeom.hAbove - aLayerGeom.traceThickness / 2.0;
+
+        checkRefLayer( aLayerGeom.refLayerAbove, refZ, aLayerGeom.traceThickness,
+                       aLayerGeom.hasRefAbove, aLayerGeom.hAbove,
+                       aLayerGeom.erAbove, aLayerGeom.tanDAbove,
+                       aLayerGeom.hOrigAbove, aLayerGeom.erOrigAbove );
+    }
+
+    // Cap groundwire count — too many conductors makes the BEM matrix huge.
+    // Keep the closest ones (sorted by distance from signal center).
+    if( (int) groundWires.size() > MAX_GROUNDWIRES )
+    {
+        std::sort( groundWires.begin(), groundWires.end(),
+                   []( const XS_GROUNDWIRE& a, const XS_GROUNDWIRE& b )
+                   { return std::abs( a.lateralNm ) < std::abs( b.lateralNm ); } );
+
+        groundWires.resize( MAX_GROUNDWIRES );
+    }
+
+    return groundWires;
+}
+
+
 XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
         const XS_BUILD_PARAMS& aParams,
-        const std::vector<XS_NEIGHBOR>& aNeighbors ) const
+        const std::vector<XS_NEIGHBOR>& aNeighbors,
+        const std::vector<XS_GROUNDWIRE>& aGroundWires ) const
 {
     XS_GEOMETRY xs;
     double condY = 0.0;
@@ -449,15 +703,43 @@ XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
         condY = -( geom.hBelow + geom.traceThickness / 2.0 );
         xs.epsilonR = geom.erBelow;
 
-        XS_DIELECTRIC_REGION air, diel;
-        air.yTop = -10e-3;
-        air.yBottom = -geom.hBelow;
-        air.epsilonR = 1.0;
-        diel.yTop = -geom.hBelow;
-        diel.yBottom = 0.0;
-        diel.epsilonR = geom.erBelow;
-        xs.dielectrics.push_back( air );
-        xs.dielectrics.push_back( diel );
+        if( geom.hOrigBelow > 0.0 )
+        {
+            // Demoted reference: substrate (original εr) from signal to
+            // original ground level, air from there to virtual earth.
+            // condY = -(hBelow + t/2), original ground was at hOrigBelow below signal
+            double origRefY = condY + geom.hOrigBelow + geom.traceThickness / 2.0;
+
+            XS_DIELECTRIC_REGION airAbove, substrate, airBelow;
+            airAbove.yTop = -10e-3;
+            airAbove.yBottom = condY + geom.traceThickness / 2.0;
+            airAbove.epsilonR = 1.0;
+
+            substrate.yTop = condY + geom.traceThickness / 2.0;
+            substrate.yBottom = origRefY;
+            substrate.epsilonR = geom.erOrigBelow;
+
+            airBelow.yTop = origRefY;
+            airBelow.yBottom = 0.0;
+            airBelow.epsilonR = 1.0;
+
+            xs.dielectrics.push_back( airAbove );
+            xs.dielectrics.push_back( substrate );
+            xs.dielectrics.push_back( airBelow );
+            xs.epsilonR = geom.erOrigBelow;
+        }
+        else
+        {
+            XS_DIELECTRIC_REGION air, diel;
+            air.yTop = -10e-3;
+            air.yBottom = -geom.hBelow;
+            air.epsilonR = 1.0;
+            diel.yTop = -geom.hBelow;
+            diel.yBottom = 0.0;
+            diel.epsilonR = geom.erBelow;
+            xs.dielectrics.push_back( air );
+            xs.dielectrics.push_back( diel );
+        }
     }
     else if( hasAbove )
     {
@@ -493,6 +775,31 @@ XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
         nbCond.width = nb.widthNm * 1e-9;
         nbCond.thickness = geom.traceThickness;
         xs.conductors.push_back( nbCond );
+    }
+
+    // Groundwire conductors from intermediate reference layers.
+    // Transform stackup z-positions to cross-section y-coordinates using the
+    // same mapping as the signal conductor: offset from the signal's stackup z
+    // converted to the XS coordinate system.
+    for( const XS_GROUNDWIRE& gw : aGroundWires )
+    {
+        // The groundwire's offset from the signal in the stackup (meters).
+        // Positive = toward the ground (below for hasBelow, above for hasAbove).
+        double dzFromSignal = gw.yPositionM - geom.signalZPosition;
+
+        // In the XS coordinate system, the signal is at condY.
+        // Moving toward ground means moving toward y=0 (for hasBelow) or
+        // toward upperGroundY (for hasAbove).  The stackup z-axis and XS
+        // y-axis both increase downward, so the offset maps directly.
+        double gwY = condY + dzFromSignal;
+
+        XS_CONDUCTOR gwCond;
+        gwCond.centerX = gw.lateralNm * 1e-9;
+        gwCond.centerY = gwY;
+        gwCond.width = gw.widthNm * 1e-9;
+        gwCond.thickness = gw.thicknessM;
+        gwCond.isGround = true;
+        xs.conductors.push_back( gwCond );
     }
 
     return xs;

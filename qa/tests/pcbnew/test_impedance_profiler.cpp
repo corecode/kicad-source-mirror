@@ -25,6 +25,7 @@
 
 #include <pcbnew_utils/board_test_utils.h>
 #include <board.h>
+#include <footprint.h>
 #include <pcb_track.h>
 #include <pad.h>
 #include <netinfo.h>
@@ -421,6 +422,228 @@ BOOST_AUTO_TEST_CASE( SameSideNeighborDecreasesZ0 )
 
     BOOST_CHECK_GT( c_1, c_iso );
     BOOST_CHECK_GT( c_2, c_1 );
+}
+
+
+/**
+ * Diagnostic: profile SRAM_D5 on the cparti_fpga board.
+ * Prints Z₀ at every sample point with per-sample timing.
+ * Checks for impedance jumps > 20Ω between adjacent samples.
+ */
+BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
+{
+    std::unique_ptr<BOARD> board;
+
+    try
+    {
+        KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", board );
+    }
+    catch( ... )
+    {
+        BOOST_TEST_MESSAGE( "Board cparti_fpga not found — skipping" );
+        return;
+    }
+
+    if( !board || board->Tracks().empty() )
+    {
+        BOOST_TEST_MESSAGE( "No tracks — skipping" );
+        return;
+    }
+
+    KI_TEST::FillZones( board.get() );
+    board->BuildConnectivity();
+
+    // Find SRAM_D5 net
+    int targetNet = -1;
+
+    for( const auto& [code, info] : board->GetNetInfo().NetsByNetcode() )
+    {
+        if( info->GetNetname().Lower() == wxS( "sram_d5" ) )
+        {
+            targetNet = code;
+            break;
+        }
+    }
+
+    if( targetNet < 0 )
+    {
+        BOOST_TEST_MESSAGE( "SRAM_D5 not found — skipping" );
+        return;
+    }
+
+    // Build R-tree with tracks, vias, and pads
+    DRC_RTREE rtree;
+
+    for( PCB_TRACK* t : board->Tracks() )
+    {
+        if( t->Type() == PCB_VIA_T )
+        {
+            for( PCB_LAYER_ID layer : t->GetLayerSet().CuStack() )
+                rtree.Insert( t, layer );
+        }
+        else
+        {
+            rtree.Insert( t, t->GetLayer() );
+        }
+    }
+
+    for( FOOTPRINT* fp : board->Footprints() )
+    {
+        for( PAD* pad : fp->Pads() )
+        {
+            for( PCB_LAYER_ID layer : pad->GetLayerSet().CuStack() )
+                rtree.Insert( pad, layer );
+        }
+    }
+
+    STACKUP_READER stackup( board.get() );
+    TRACE_PATH_WALKER walker( board.get() );
+    walker.WalkNet( targetNet );
+
+    const auto& path = walker.GetPath();
+
+    BOOST_TEST_MESSAGE( "D5 path: " << path.size() << " points, "
+                        << walker.GetTotalLength() / 1e6 << " mm" );
+
+    // Build path-distance map
+    std::map<BOARD_CONNECTED_ITEM*, double> pathItemDist;
+
+    for( const PATH_POINT& pp : path )
+    {
+        if( !pp.isVia && pathItemDist.find( pp.item ) == pathItemDist.end() )
+            pathItemDist[pp.item] = pp.distFromStart;
+    }
+
+    // Sample every 200µm
+    double totalLen = walker.GetTotalLength();
+    double step = 200000.0; // 200µm in nm
+
+    // Build non-via segment list for interpolation
+    struct SEG_PT { double dist; VECTOR2I pos; VECTOR2D tangent; PCB_TRACK* track; };
+    std::vector<SEG_PT> segs;
+
+    for( const PATH_POINT& pp : path )
+    {
+        if( !pp.isVia )
+            segs.push_back( { pp.distFromStart, pp.position, pp.tangent,
+                              static_cast<PCB_TRACK*>( pp.item ) } );
+    }
+
+    int segIdx = 0;
+    double prevZ0 = 0.0;
+    int jumpCount = 0;
+    int totalSamples = 0;
+
+    auto tStart = std::chrono::steady_clock::now();
+
+    for( double d = 0; d <= totalLen; d += step )
+    {
+        while( segIdx + 1 < (int) segs.size() && segs[segIdx + 1].dist <= d )
+            segIdx++;
+
+        VECTOR2I pos = segs[segIdx].pos;
+        VECTOR2D tangent = segs[segIdx].tangent;
+
+        if( segIdx + 1 < (int) segs.size() )
+        {
+            double segLen = segs[segIdx + 1].dist - segs[segIdx].dist;
+
+            if( segLen > 1.0 )
+            {
+                double frac = std::clamp( ( d - segs[segIdx].dist ) / segLen, 0.0, 1.0 );
+                pos.x = segs[segIdx].pos.x
+                        + (int) ( frac * ( segs[segIdx + 1].pos.x - segs[segIdx].pos.x ) );
+                pos.y = segs[segIdx].pos.y
+                        + (int) ( frac * ( segs[segIdx + 1].pos.y - segs[segIdx].pos.y ) );
+            }
+        }
+
+        PCB_TRACK* track = segs[segIdx].track;
+        int signalWidth = track->GetWidth();
+
+        LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(), pos, signalWidth );
+
+        double hRef = std::max( geom.hAbove, geom.hBelow );
+        int    couplingHorizon = std::clamp( (int) ( hRef * 3.0 * 1e9 ), 500000, 3000000 );
+
+        CROSS_SECTION_BUILDER xsBuilder;
+        xsBuilder.SetSpatialIndex( &rtree );
+        xsBuilder.SetBoard( board.get() );
+        xsBuilder.SetPathItemDistances( &pathItemDist );
+        xsBuilder.SetSignalTrack( track );
+
+        XS_BUILD_PARAMS xsParams;
+        xsParams.samplePos = pos;
+        xsParams.sampleTangent = tangent;
+        xsParams.signalLayer = track->GetLayer();
+        xsParams.signalNetCode = track->GetNetCode();
+        xsParams.signalWidth = signalWidth;
+        xsParams.couplingHorizon = couplingHorizon;
+        xsParams.sampleDist = d;
+        xsParams.layerGeom = geom;
+
+        auto t0 = std::chrono::steady_clock::now();
+
+        auto neighbors = xsBuilder.FindNeighbors( xsParams );
+        auto groundWires = xsBuilder.FindGroundWires( xsParams, geom );
+        xsParams.layerGeom = geom;
+
+        auto t1 = std::chrono::steady_clock::now();
+
+        XS_GEOMETRY xs = xsBuilder.BuildGeometry( xsParams, neighbors, groundWires );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        bool bemOk = solver.Solve();
+
+        auto t2 = std::chrono::steady_clock::now();
+
+        double z0 = 0.0;
+
+        if( bemOk && solver.GetResult().Z0 > 0.0 )
+            z0 = solver.GetResult().Z0;
+
+        long usXs = std::chrono::duration_cast<std::chrono::microseconds>( t1 - t0 ).count();
+        long usBem = std::chrono::duration_cast<std::chrono::microseconds>( t2 - t1 ).count();
+
+        // Count groundwires
+        int gwCount = 0;
+        for( const auto& c : xs.conductors )
+        {
+            if( c.isGround )
+                gwCount++;
+        }
+
+        bool isJump = ( prevZ0 > 0.0 && std::abs( z0 - prevZ0 ) > 20.0 );
+
+        if( isJump )
+            jumpCount++;
+
+        // Log every sample
+        BOOST_TEST_MESSAGE(
+                wxString::Format( wxS( "d=%.2fmm Z0=%.1f%s hBelow=%.0fum nb=%d gw=%d "
+                                       "xs=%ldus bem=%ldus" ),
+                                  d / 1e6, z0,
+                                  isJump ? wxS( " ***JUMP***" ) : wxS( "" ),
+                                  geom.hBelow * 1e6,
+                                  (int) neighbors.size(), gwCount,
+                                  usXs, usBem ) );
+
+        prevZ0 = z0;
+        totalSamples++;
+    }
+
+    auto tEnd = std::chrono::steady_clock::now();
+    long totalMs = std::chrono::duration_cast<std::chrono::milliseconds>( tEnd - tStart ).count();
+
+    BOOST_TEST_MESSAGE( "\n=== SUMMARY ===" );
+    BOOST_TEST_MESSAGE( "Samples: " << totalSamples << "  Total time: " << totalMs << "ms"
+                        << "  Avg: " << totalMs / std::max( totalSamples, 1 ) << "ms/sample" );
+    BOOST_TEST_MESSAGE( "Impedance jumps (>20 Ohm): " << jumpCount );
+
+    // No large impedance jumps on a contiguous ground trace
+    BOOST_CHECK_EQUAL( jumpCount, 0 );
 }
 
 

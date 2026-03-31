@@ -59,6 +59,7 @@ set( QA_PCBNEW_SRCS
     test_bem_interface_debug.cpp
     test_cross_section_builder.cpp
     test_impedance_profiler.cpp
+    test_stackup_reader.cpp
     test_trace_path_walker.cpp
 
     drc/test_custom_rule_severities.cpp

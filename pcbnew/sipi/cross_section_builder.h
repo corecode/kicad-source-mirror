@@ -51,6 +51,19 @@ struct XS_NEIGHBOR
 
 
 /**
+ * A groundwire span found by intersecting the cross-section cut line
+ * with zone fills on a reference plane layer.
+ */
+struct XS_GROUNDWIRE
+{
+    int    lateralNm;    ///< Signed center distance from signal center (nm)
+    int    widthNm;      ///< Width of copper span in cross-section (nm)
+    double yPositionM;   ///< Vertical position in stackup coordinates (meters)
+    double thicknessM;   ///< Copper thickness (meters)
+};
+
+
+/**
  * Parameters for a single cross-section sample point.
  */
 struct XS_BUILD_PARAMS
@@ -98,10 +111,28 @@ public:
     std::vector<XS_NEIGHBOR> FindNeighbors( const XS_BUILD_PARAMS& aParams ) const;
 
     /**
-     * Build a complete XS_GEOMETRY from the signal trace and its neighbors.
+     * Find groundwire copper spans on reference and intermediate layers.
+     *
+     * Intersects the cross-section cut line with zone fills on:
+     * 1. Intermediate layers (skipped during reference plane search)
+     * 2. The reference layers themselves — if a ground edge is found within
+     *    the coupling horizon, the reference is promoted to groundwires and
+     *    the image ground is shifted to a deeper layer (or virtual earth).
+     *
+     * @param aParams    Sample parameters (position, tangent, layer geometry)
+     * @param aLayerGeom Layer geometry, may be modified if a reference is demoted
+     * @return Groundwire spans suitable for adding to XS_GEOMETRY as ground conductors
+     */
+    std::vector<XS_GROUNDWIRE> FindGroundWires( const XS_BUILD_PARAMS& aParams,
+                                                LAYER_GEOMETRY& aLayerGeom ) const;
+
+    /**
+     * Build a complete XS_GEOMETRY from the signal trace, its neighbors,
+     * and any groundwires from intermediate reference layers.
      */
     XS_GEOMETRY BuildGeometry( const XS_BUILD_PARAMS& aParams,
-                               const std::vector<XS_NEIGHBOR>& aNeighbors ) const;
+                               const std::vector<XS_NEIGHBOR>& aNeighbors,
+                               const std::vector<XS_GROUNDWIRE>& aGroundWires = {} ) const;
 
 private:
     void findTrackNeighbors( const XS_BUILD_PARAMS& aParams,

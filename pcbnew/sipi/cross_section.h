@@ -39,6 +39,7 @@ struct XS_CONDUCTOR
     double centerY = 0.0;
     double width = 0.0;
     double thickness = 0.0;
+    bool   isGround = false;    ///< True for groundwire elements (V=0 in BEM)
 };
 
 

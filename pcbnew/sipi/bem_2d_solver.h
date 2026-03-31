@@ -153,9 +153,12 @@ private:
     /// All interface elements.
     std::vector<ELEMENT> m_intfElements;
 
-    int m_numCondNodes;     ///< Total conductor nodes
+    int m_numCondNodes;     ///< Total conductor + ground nodes
     int m_numIntfNodes;     ///< Total interface nodes
-    int m_numConductors;    ///< Number of distinct conductors
+    int m_numConductors;    ///< Number of signal conductors (excludes ground)
+
+    /// Conductor index for groundwire elements (V=0, charge not extracted).
+    static constexpr int GROUND_CONDUCTOR_IDX = -2;
 };
 
 #endif // BEM_2D_SOLVER_H

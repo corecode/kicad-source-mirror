@@ -253,7 +253,13 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
         int pw = std::max( toPixX( c.centerX + c.width / 2.0 ) - px, 3 );
         int ph = std::max( toPixY( c.centerY - c.thickness / 2.0 ) - py, 2 );
 
-        if( ci == 0 )
+        if( c.isGround )
+        {
+            // Groundwire — gold color matching ground plane lines
+            aDC.SetBrush( wxBrush( wxColour( 180, 160, 50 ) ) );
+            aDC.SetPen( wxPen( wxColour( 200, 180, 60 ), 1 ) );
+        }
+        else if( ci == 0 )
         {
             aDC.SetBrush( wxBrush( wxColour( 220, 140, 40 ) ) );
             aDC.SetPen( wxPen( wxColour( 255, 180, 60 ), 2 ) );
@@ -266,14 +272,18 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
 
         aDC.DrawRectangle( px, py, pw, ph );
 
-        // Width label below conductor
-        wxString wLabel = wxString::Format( wxS( "w=%.0f\u00B5m" ), c.width * 1e6 );
-        aDC.SetTextForeground( ci == 0 ? wxColour( 255, 200, 100 ) : wxColour( 180, 160, 120 ) );
-        wxSize ws = aDC.GetTextExtent( wLabel );
-        aDC.DrawText( wLabel, px + pw / 2 - ws.GetWidth() / 2, py + ph + 2 );
+        // Width label below conductor (skip for groundwires — they clutter)
+        if( !c.isGround )
+        {
+            wxString wLabel = wxString::Format( wxS( "w=%.0f\u00B5m" ), c.width * 1e6 );
+            aDC.SetTextForeground( ci == 0 ? wxColour( 255, 200, 100 )
+                                           : wxColour( 180, 160, 120 ) );
+            wxSize ws = aDC.GetTextExtent( wLabel );
+            aDC.DrawText( wLabel, px + pw / 2 - ws.GetWidth() / 2, py + ph + 2 );
+        }
 
         // Edge-to-edge distance dimension line from signal to neighbor
-        if( ci > 0 )
+        if( ci > 0 && !c.isGround )
         {
             double sigRight = sig.centerX + sig.width / 2.0;
             double sigLeft = sig.centerX - sig.width / 2.0;
@@ -318,8 +328,22 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
     wxString info = wxString::Format( wxS( "Z\u2080=%.1f\u03A9 @ %.2fmm" ),
                                       m_sample->z0, m_sample->distMm );
 
-    if( geom.conductors.size() > 1 )
-        info += wxString::Format( wxS( " %dnb" ), (int) geom.conductors.size() - 1 );
+    int nbCount = 0;
+    int gwCount = 0;
+
+    for( size_t i = 1; i < geom.conductors.size(); i++ )
+    {
+        if( geom.conductors[i].isGround )
+            gwCount++;
+        else
+            nbCount++;
+    }
+
+    if( nbCount > 0 )
+        info += wxString::Format( wxS( " %dnb" ), nbCount );
+
+    if( gwCount > 0 )
+        info += wxString::Format( wxS( " %dgw" ), gwCount );
 
     // Reference plane diagnostics
     wxString refInfo;
@@ -720,8 +744,16 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
 
     for( PCB_TRACK* t : board->Tracks() )
     {
-        if( t->Type() != PCB_VIA_T )
+        if( t->Type() == PCB_VIA_T )
+        {
+            // Insert vias on all their layers so they appear as neighbors
+            for( PCB_LAYER_ID layer : t->GetLayerSet().CuStack() )
+                tempRtree.Insert( t, layer );
+        }
+        else
+        {
             tempRtree.Insert( t, t->GetLayer() );
+        }
     }
 
     for( FOOTPRINT* fp : board->Footprints() )
@@ -879,9 +911,10 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
                                                         samplePos,
                                                         signalWidth );
 
-        // Coupling horizon: 3× the nearest reference plane distance (edge-to-edge)
+        // Coupling horizon: 3× the nearest reference plane distance (edge-to-edge).
+        // Cap at 3mm to avoid huge searches when virtual earth is active.
         double hRef = std::max( geom.hAbove, geom.hBelow );
-        int    couplingHorizon = std::max( (int) ( hRef * 3.0 * 1e9 ), 500000 ); // nm, min 0.5mm
+        int    couplingHorizon = std::clamp( (int) ( hRef * 3.0 * 1e9 ), 500000, 3000000 );
 
         // Use the tested CROSS_SECTION_BUILDER for neighbor detection + geometry
         CROSS_SECTION_BUILDER xsBuilder;
@@ -903,12 +936,17 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         auto t0 = std::chrono::steady_clock::now();
 
         auto neighbors = xsBuilder.FindNeighbors( xsParams );
-        XS_GEOMETRY xs = xsBuilder.BuildGeometry( xsParams, neighbors );
+        auto groundWires = xsBuilder.FindGroundWires( xsParams, geom );
+
+        // Update params with potentially modified geometry (reference demotion)
+        xsParams.layerGeom = geom;
+
+        XS_GEOMETRY xs = xsBuilder.BuildGeometry( xsParams, neighbors, groundWires );
 
         auto t1 = std::chrono::steady_clock::now();
         usXsTotal += std::chrono::duration_cast<std::chrono::microseconds>( t1 - t0 ).count();
 
-        // Build cache key from neighbor configuration
+        // Build cache key from neighbor and groundwire configuration
         XS_KEY key;
         key.layer = track->GetLayer();
         key.width = signalWidth;
@@ -919,6 +957,12 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
         {
             key.neighborKeys.push_back( nb.distNm / 10000 );
             key.neighborKeys.push_back( nb.widthNm );
+        }
+
+        for( const XS_GROUNDWIRE& gw : groundWires )
+        {
+            key.neighborKeys.push_back( gw.lateralNm / 10000 );
+            key.neighborKeys.push_back( gw.widthNm );
         }
 
         // Solve (with cache)
@@ -948,16 +992,14 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
             }
             else
             {
-                z0 = STACKUP_READER::ComputeZ0( geom );
-                erEff = ( geom.erAbove + geom.erBelow ) / 2.0;
-
-                if( erEff < 1.0 )
-                    erEff = std::max( geom.erAbove, geom.erBelow );
-
-                fprintf( stderr, "SIPI: BEM fallback at d=%.3fmm Z0=%.1f "
-                                 "bemOk=%d nb=%d w=%d\n",
-                         sampleDist / 1e6, z0, bemOk,
-                         (int) neighbors.size(), signalWidth );
+                // BEM failed — leave z0=0 so the failure is visible in the plot.
+                // Common causes: no reference plane at this position (antipad,
+                // ground slot), singular geometry, or unfilled zones.
+                fprintf( stderr, "SIPI: BEM failed at d=%.3fmm "
+                                 "bemOk=%d nb=%d w=%d refAbove=%d refBelow=%d\n",
+                         sampleDist / 1e6, bemOk,
+                         (int) neighbors.size(), signalWidth,
+                         geom.hasRefAbove, geom.hasRefBelow );
             }
 
             z0Cache[key] = { z0, erEff };

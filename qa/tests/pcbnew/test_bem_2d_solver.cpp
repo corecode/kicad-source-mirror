@@ -361,4 +361,396 @@ BOOST_AUTO_TEST_CASE( CoupledSpacingEffect )
 }
 
 
+/**
+ * Groundwire regression: a geometry with no ground conductors should produce
+ * the same result as before the groundwire feature was added.
+ */
+BOOST_AUTO_TEST_CASE( GroundwireRegression )
+{
+    double w = 0.15e-3;
+    double h = 0.1e-3;
+    double er = 4.4;
+
+    XS_GEOMETRY geom = makeMicrostripGeom( w, h, er );
+
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( geom );
+    solver.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver.Solve() );
+
+    double z0 = solver.GetResult().Z0;
+
+    BOOST_TEST_MESSAGE( "Groundwire regression: Z0 = " << z0 );
+
+    // Same check as MicrostripVsAnalytical — must still be in range
+    BOOST_CHECK_GT( z0, 30.0 );
+    BOOST_CHECK_LT( z0, 100.0 );
+}
+
+
+/**
+ * Groundwire basic: add two wide ground conductors flanking the signal at the
+ * ground level.  These should increase capacitance (lower Z₀) compared to the
+ * plain microstrip with only the image ground.
+ *
+ * Geometry (cross-section):
+ *                    signal (0.15mm)
+ *                       ===
+ *   [groundwire]                    [groundwire]
+ *   ============   | gap 0.5mm |   =============
+ *   ─────────────────────────────────────────────  image ground at y=0
+ */
+BOOST_AUTO_TEST_CASE( GroundwireIncreasesCapacitance )
+{
+    double w = 0.15e-3;
+    double t = 35e-6;
+    double h = 0.1e-3;
+    double er = 4.4;
+
+    // Baseline: standard microstrip (no groundwires)
+    XS_GEOMETRY geomBase = makeMicrostripGeom( w, h, er, t );
+
+    BEM_2D_SOLVER solverBase;
+    solverBase.SetGeometry( geomBase );
+    solverBase.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverBase.Solve() );
+
+    double z0Base = solverBase.GetResult().Z0;
+
+    // With groundwires: two wide copper strips at ground level (y=0),
+    // flanking the signal with a 0.25mm gap on each side.
+    XS_GEOMETRY geomGW = makeMicrostripGeom( w, h, er, t );
+
+    XS_CONDUCTOR gwLeft;
+    gwLeft.centerX = -0.5e-3;    // 0.5mm to the left
+    gwLeft.centerY = -t / 2.0;   // at ground level, copper thickness
+    gwLeft.width = 0.5e-3;       // 0.5mm wide
+    gwLeft.thickness = t;
+    gwLeft.isGround = true;
+    geomGW.conductors.push_back( gwLeft );
+
+    XS_CONDUCTOR gwRight;
+    gwRight.centerX = 0.5e-3;
+    gwRight.centerY = -t / 2.0;
+    gwRight.width = 0.5e-3;
+    gwRight.thickness = t;
+    gwRight.isGround = true;
+    geomGW.conductors.push_back( gwRight );
+
+    BEM_2D_SOLVER solverGW;
+    solverGW.SetGeometry( geomGW );
+    solverGW.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverGW.Solve() );
+
+    double z0GW = solverGW.GetResult().Z0;
+
+    BOOST_TEST_MESSAGE( "Z0 without groundwires: " << z0Base );
+    BOOST_TEST_MESSAGE( "Z0 with groundwires:    " << z0GW );
+    BOOST_TEST_MESSAGE( "C base:  " << solverBase.GetResult().C( 0, 0 ) );
+    BOOST_TEST_MESSAGE( "C with GW: " << solverGW.GetResult().C( 0, 0 ) );
+
+    // Groundwires add capacitance → lower Z₀
+    BOOST_CHECK_LT( z0GW, z0Base );
+
+    // The effect should be measurable (at least 0.1Ω difference)
+    BOOST_CHECK_GT( z0Base - z0GW, 0.1 );
+}
+
+
+/**
+ * Ground receding: as the image ground moves further from the trace while
+ * groundwires remain at a fixed distance, Z₀ should increase smoothly.
+ * This simulates the antipad case: the reference layer copper (groundwires)
+ * is nearby, but the next solid ground (image) is further away.
+ *
+ * Geometry:
+ *                 signal
+ *                   ===
+ *  [gw]   | gap |         | gap |   [gw]   ← at y = -h_ref (original ref layer)
+ *  ─────────────────────────────────────    ← image ground at y=0 (further away)
+ */
+BOOST_AUTO_TEST_CASE( GroundRecedingSmoothly )
+{
+    double w = 0.15e-3;
+    double t = 35e-6;
+    double er = 4.4;
+    double hRef = 0.1e-3;   // original ref layer distance from signal
+    int panels = 12;
+
+    // Groundwire dimensions (constant across tests)
+    double gwWidth = 1.0e-3;
+    double gwGap = 0.25e-3;  // gap half-width (from signal center to gw edge)
+
+    // Test with image ground at increasing distances
+    double hValues[] = { 0.1e-3, 0.2e-3, 0.5e-3, 1.0e-3, 2.0e-3, 5.0e-3 };
+    double prevZ0 = 0.0;
+
+    for( double hImage : hValues )
+    {
+        XS_GEOMETRY geom;
+        geom.groundY = 0.0;
+        geom.epsilonR = er;
+
+        // Signal conductor
+        double condY = -( hImage + t / 2.0 );
+
+        XS_CONDUCTOR cond;
+        cond.centerX = 0.0;
+        cond.centerY = condY;
+        cond.width = w;
+        cond.thickness = t;
+        geom.conductors.push_back( cond );
+
+        // Dielectric regions
+        XS_DIELECTRIC_REGION air, diel;
+        air.yTop = -10e-3;
+        air.yBottom = -hImage;
+        air.epsilonR = 1.0;
+        diel.yTop = -hImage;
+        diel.yBottom = 0.0;
+        diel.epsilonR = er;
+        geom.dielectrics.push_back( air );
+        geom.dielectrics.push_back( diel );
+
+        // Groundwires at original ref layer distance (constant y relative to signal)
+        double gwY = condY + hRef;  // hRef below signal (toward ground)
+
+        XS_CONDUCTOR gwLeft;
+        gwLeft.centerX = -( gwGap + gwWidth / 2.0 );
+        gwLeft.centerY = gwY;
+        gwLeft.width = gwWidth;
+        gwLeft.thickness = t;
+        gwLeft.isGround = true;
+        geom.conductors.push_back( gwLeft );
+
+        XS_CONDUCTOR gwRight;
+        gwRight.centerX = gwGap + gwWidth / 2.0;
+        gwRight.centerY = gwY;
+        gwRight.width = gwWidth;
+        gwRight.thickness = t;
+        gwRight.isGround = true;
+        geom.conductors.push_back( gwRight );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+        solver.SetPanelsPerEdge( panels );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+
+        BOOST_TEST_MESSAGE( "hImage=" << hImage * 1e3 << "mm  Z0=" << z0
+                            << "  erEff=" << solver.GetResult().erEff );
+
+        // Z₀ should be positive and reasonable
+        BOOST_CHECK_GT( z0, 10.0 );
+        BOOST_CHECK_LT( z0, 300.0 );
+
+        // Z₀ should increase monotonically as image ground recedes
+        if( prevZ0 > 0.0 )
+            BOOST_CHECK_GT( z0, prevZ0 );
+
+        prevZ0 = z0;
+    }
+}
+
+
+/**
+ * Ground opening: groundwires gradually open (gap widens) while image ground
+ * stays at a fixed distance.  Simulates a trace approaching a via antipad —
+ * the reference layer copper recedes laterally while the next ground layer
+ * below stays constant.
+ *
+ * Z₀ should increase smoothly and monotonically as the gap widens.
+ * At gap=0 (solid ground), Z₀ ≈ normal microstrip.
+ * At very large gap, groundwires are far away and Z₀ approaches the
+ * "deep ground only" value.
+ */
+BOOST_AUTO_TEST_CASE( GroundwiresOpeningSmoothly )
+{
+    double w = 0.15e-3;
+    double t = 35e-6;
+    double er = 4.4;
+    double hImage = 0.5e-3;   // image ground fixed at 0.5mm (next layer)
+    double hRef = 0.1e-3;     // groundwire layer is 0.1mm below signal
+    double gwWidth = 2.0e-3;  // wide groundwires
+    int panels = 12;
+
+    // Reference: no groundwires at all (just image ground at 0.5mm)
+    XS_GEOMETRY geomNoGW = makeMicrostripGeom( w, hImage, er, t );
+
+    BEM_2D_SOLVER solverNoGW;
+    solverNoGW.SetGeometry( geomNoGW );
+    solverNoGW.SetPanelsPerEdge( panels );
+    BOOST_REQUIRE( solverNoGW.Solve() );
+    double z0NoGW = solverNoGW.GetResult().Z0;
+
+    BOOST_TEST_MESSAGE( "No groundwires (image at 0.5mm): Z0=" << z0NoGW );
+
+    // Sweep gap half-width from tight (0.1mm) to wide (3mm)
+    double gapValues[] = { 0.1e-3, 0.15e-3, 0.2e-3, 0.3e-3, 0.5e-3,
+                           0.75e-3, 1.0e-3, 1.5e-3, 2.0e-3, 3.0e-3 };
+    double prevZ0 = 0.0;
+
+    for( double halfGap : gapValues )
+    {
+        XS_GEOMETRY geom;
+        geom.groundY = 0.0;
+        geom.epsilonR = er;
+
+        double condY = -( hImage + t / 2.0 );
+
+        XS_CONDUCTOR cond;
+        cond.centerX = 0.0;
+        cond.centerY = condY;
+        cond.width = w;
+        cond.thickness = t;
+        geom.conductors.push_back( cond );
+
+        XS_DIELECTRIC_REGION air, diel;
+        air.yTop = -10e-3;
+        air.yBottom = -hImage;
+        air.epsilonR = 1.0;
+        diel.yTop = -hImage;
+        diel.yBottom = 0.0;
+        diel.epsilonR = er;
+        geom.dielectrics.push_back( air );
+        geom.dielectrics.push_back( diel );
+
+        // Groundwires at hRef below signal, opening symmetrically
+        double gwY = condY + hRef;
+
+        XS_CONDUCTOR gwLeft;
+        gwLeft.centerX = -( halfGap + gwWidth / 2.0 );
+        gwLeft.centerY = gwY;
+        gwLeft.width = gwWidth;
+        gwLeft.thickness = t;
+        gwLeft.isGround = true;
+        geom.conductors.push_back( gwLeft );
+
+        XS_CONDUCTOR gwRight;
+        gwRight.centerX = halfGap + gwWidth / 2.0;
+        gwRight.centerY = gwY;
+        gwRight.width = gwWidth;
+        gwRight.thickness = t;
+        gwRight.isGround = true;
+        geom.conductors.push_back( gwRight );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+        solver.SetPanelsPerEdge( panels );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+
+        BOOST_TEST_MESSAGE( "halfGap=" << halfGap * 1e3 << "mm  Z0=" << z0
+                            << "  erEff=" << solver.GetResult().erEff );
+
+        BOOST_CHECK_GT( z0, 10.0 );
+        BOOST_CHECK_LT( z0, 300.0 );
+
+        // Z₀ should increase monotonically as gap widens
+        if( prevZ0 > 0.0 )
+            BOOST_CHECK_GT( z0, prevZ0 );
+
+        prevZ0 = z0;
+    }
+
+    // At very wide gap, Z₀ should approach the no-groundwire value
+    // (groundwires are so far away they have negligible effect)
+    BOOST_TEST_MESSAGE( "Largest gap Z0=" << prevZ0
+                        << "  no-GW Z0=" << z0NoGW );
+    BOOST_CHECK_LT( std::abs( prevZ0 - z0NoGW ), 2.0 );
+}
+
+
+/**
+ * BUG TEST: A very wide groundwire at the original ground plane position should
+ * approximate the infinite ground plane.  When the image ground is pushed to
+ * virtual earth (10mm), the groundwire must sit in the correct dielectric
+ * (FR4, not air) to give the right Z₀.
+ *
+ * This test constructs the geometry manually with the proper dielectric
+ * layering: FR4 from signal to groundwire level, air below.
+ */
+BOOST_AUTO_TEST_CASE( WideGroundwireMatchesImageGround )
+{
+    double w = 0.15e-3;
+    double t = 35e-6;
+    double hOrig = 0.1e-3;   // original ground distance
+    double er = 4.4;
+    double hEarth = 10e-3;   // virtual earth distance
+    int panels = 12;
+
+    // Reference: normal microstrip with image ground at hOrig
+    XS_GEOMETRY geomRef = makeMicrostripGeom( w, hOrig, er, t );
+
+    BEM_2D_SOLVER solverRef;
+    solverRef.SetGeometry( geomRef );
+    solverRef.SetPanelsPerEdge( panels );
+    BOOST_REQUIRE( solverRef.Solve() );
+    double z0Ref = solverRef.GetResult().Z0;
+
+    // Test: image ground at virtual earth, wide groundwire at original position.
+    // Dielectric: FR4 from signal to groundwire, air from groundwire to earth.
+    XS_GEOMETRY geomGW;
+    geomGW.groundY = 0.0;  // image ground (virtual earth maps here)
+
+    double condY = -( hEarth + t / 2.0 );
+
+    XS_CONDUCTOR cond;
+    cond.centerX = 0.0;
+    cond.centerY = condY;
+    cond.width = w;
+    cond.thickness = t;
+    geomGW.conductors.push_back( cond );
+
+    // Wide groundwire at the original ground position
+    double gwY = condY + hOrig + t / 2.0;  // hOrig below signal center
+
+    XS_CONDUCTOR gw;
+    gw.centerX = 0.0;
+    gw.centerY = gwY;
+    gw.width = 10e-3;   // 10mm wide — should approximate infinite
+    gw.thickness = t;
+    gw.isGround = true;
+    geomGW.conductors.push_back( gw );
+
+    // Dielectric: FR4 between signal and groundwire, air below groundwire
+    XS_DIELECTRIC_REGION air, fr4, airBelow;
+    air.yTop = -10e-3;                 // far above
+    air.yBottom = condY + t / 2.0;     // top of signal
+    air.epsilonR = 1.0;
+
+    fr4.yTop = condY + t / 2.0;       // top of signal → bottom face of signal is the interface
+    fr4.yBottom = gwY - t / 2.0;      // top of groundwire
+    fr4.epsilonR = er;
+
+    airBelow.yTop = gwY + t / 2.0;    // below groundwire
+    airBelow.yBottom = 0.0;           // image ground
+    airBelow.epsilonR = 1.0;
+
+    geomGW.dielectrics.push_back( air );
+    geomGW.dielectrics.push_back( fr4 );
+    geomGW.dielectrics.push_back( airBelow );
+    geomGW.epsilonR = er;
+
+    BEM_2D_SOLVER solverGW;
+    solverGW.SetGeometry( geomGW );
+    solverGW.SetPanelsPerEdge( panels );
+    BOOST_REQUIRE( solverGW.Solve() );
+    double z0GW = solverGW.GetResult().Z0;
+
+    BOOST_TEST_MESSAGE( "Reference (image at " << hOrig * 1e3 << "mm): Z0=" << z0Ref );
+    BOOST_TEST_MESSAGE( "Groundwire (10mm wide at " << hOrig * 1e3
+                        << "mm, earth at " << hEarth * 1e3 << "mm): Z0=" << z0GW );
+    BOOST_TEST_MESSAGE( "Difference: " << std::abs( z0GW - z0Ref ) << " Ohm ("
+                        << std::abs( z0GW - z0Ref ) / z0Ref * 100.0 << "%)" );
+
+    // A 10mm-wide groundwire should match the image ground within ~10%.
+    // The groundwire has edge fringing that an infinite plane doesn't,
+    // so it slightly over-estimates capacitance (lower Z₀).
+    BOOST_CHECK_CLOSE( z0GW, z0Ref, 10.0 );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()
