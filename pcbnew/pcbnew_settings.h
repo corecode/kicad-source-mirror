@@ -153,6 +153,12 @@ public:
         bool  show_net_inspector;
     };
 
+    struct IMPEDANCE_PROFILER
+    {
+        bool  x_axis_is_time;
+        bool  show_cross_section;
+    };
+
     struct DIALOG_CLEANUP
     {
         bool cleanup_refill_zones;
@@ -370,6 +376,8 @@ public:
     virtual bool MigrateFromLegacy( wxConfigBase* aLegacyConfig ) override;
 
     AUI_PANELS m_AuiPanels;
+
+    IMPEDANCE_PROFILER m_ImpedanceProfiler;
 
     DIALOG_CLEANUP m_Cleanup;
 

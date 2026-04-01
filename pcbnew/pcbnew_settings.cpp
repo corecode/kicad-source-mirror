@@ -50,6 +50,7 @@ const int pcbnewSchemaVersion = 5;
 PCBNEW_SETTINGS::PCBNEW_SETTINGS()
         : PCB_VIEWERS_SETTINGS_BASE( "pcbnew", pcbnewSchemaVersion ),
           m_AuiPanels(),
+          m_ImpedanceProfiler(),
           m_Cleanup(),
           m_DrcDialog(),
           m_ExportIdf(),
@@ -133,6 +134,12 @@ PCBNEW_SETTINGS::PCBNEW_SETTINGS()
 
     m_params.emplace_back( new PARAM<bool>( "aui.show_net_inspector",
             &m_AuiPanels.show_net_inspector, false ) );
+
+    m_params.emplace_back( new PARAM<bool>( "impedance_profiler.x_axis_is_time",
+            &m_ImpedanceProfiler.x_axis_is_time, false ) );
+
+    m_params.emplace_back( new PARAM<bool>( "impedance_profiler.show_cross_section",
+            &m_ImpedanceProfiler.show_cross_section, false ) );
 
     m_params.emplace_back( new PARAM<int>( "footprint_chooser.width",
             &m_FootprintChooser.width, -1 ) );

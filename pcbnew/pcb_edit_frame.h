@@ -324,6 +324,8 @@ public:
     void ToggleNetInspector();
 
     void ToggleImpedanceProfiler();
+    void ShowImpedanceProfiler();
+    IMPEDANCE_PROFILER_PANEL* GetImpedanceProfilerPanel() { return m_impedanceProfilerPanel; }
 
     void ToggleSearch();
 

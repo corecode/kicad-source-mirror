@@ -772,6 +772,23 @@ void PCB_EDIT_FRAME::ToggleImpedanceProfiler()
 }
 
 
+void PCB_EDIT_FRAME::ShowImpedanceProfiler()
+{
+    wxAuiPaneInfo& pane = m_auimgr.GetPane( wxS( "ImpedanceProfiler" ) );
+
+    if( !pane.IsShown() )
+    {
+        m_show_impedance_profiler = true;
+        pane.Show( true );
+
+        if( m_impedanceProfilerPanel )
+            m_impedanceProfilerPanel->OnShowPanel();
+
+        m_auimgr.Update();
+    }
+}
+
+
 void PCB_EDIT_FRAME::ToggleSearch()
 {
     PCBNEW_SETTINGS* settings = GetPcbNewSettings();

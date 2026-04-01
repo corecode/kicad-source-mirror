@@ -51,6 +51,7 @@
 #include <netlist_reader/pcb_netlist.h>
 #include <origin_viewitem.h>
 #include <pcb_edit_frame.h>
+#include <pcb_track.h>
 #include <pcbnew_id.h>
 #include <project.h>
 #include <project/project_file.h> // LAST_PATH_TYPE
@@ -65,6 +66,7 @@
 #include <tools/edit_tool.h>
 #include <tools/tool_event_utils.h>
 #include <tools/zone_filler_tool.h>
+#include <widgets/impedance_profiler_panel.h>
 #include <richio.h>
 #include <router/router_tool.h>
 #include <view/view_controls.h>
@@ -223,6 +225,9 @@ bool BOARD_EDITOR_CONTROL::Init()
         menu.AddMenu( lockMenu.get(), SELECTION_CONDITIONS::NotEmpty, 100 );
 
         menu.AddMenu( zoneMenu.get(), SELECTION_CONDITIONS::OnlyTypes( { PCB_ZONE_T } ), 100 );
+
+        menu.AddItem( PCB_ACTIONS::analyzeImpedance,
+                       SELECTION_CONDITIONS::OnlyTypes( { PCB_TRACE_T, PCB_ARC_T } ), 100 );
     }
 
     DRAWING_TOOL* drawingTool = m_toolMgr->GetTool<DRAWING_TOOL>();
@@ -712,6 +717,39 @@ int BOARD_EDITOR_CONTROL::ToggleNetInspector( const TOOL_EVENT& aEvent )
 int BOARD_EDITOR_CONTROL::ToggleImpedanceProfiler( const TOOL_EVENT& aEvent )
 {
     getEditFrame<PCB_EDIT_FRAME>()->ToggleImpedanceProfiler();
+    return 0;
+}
+
+
+int BOARD_EDITOR_CONTROL::AnalyzeImpedance( const TOOL_EVENT& aEvent )
+{
+    PCB_EDIT_FRAME*  frame = getEditFrame<PCB_EDIT_FRAME>();
+    PCB_SELECTION&   selection = m_toolMgr->GetTool<PCB_SELECTION_TOOL>()->GetSelection();
+
+    // Find the first track/arc in the selection to get the net
+    int netCode = -1;
+
+    for( EDA_ITEM* item : selection )
+    {
+        if( item->Type() == PCB_TRACE_T || item->Type() == PCB_ARC_T )
+        {
+            netCode = static_cast<PCB_TRACK*>( item )->GetNetCode();
+            break;
+        }
+    }
+
+    if( netCode <= 0 )
+        return 0;
+
+    // Ensure the profiler panel is visible
+    frame->ShowImpedanceProfiler();
+
+    // Run analysis
+    IMPEDANCE_PROFILER_PANEL* profiler = frame->GetImpedanceProfilerPanel();
+
+    if( profiler )
+        profiler->AnalyseNet( netCode );
+
     return 0;
 }
 
@@ -1763,6 +1801,7 @@ void BOARD_EDITOR_CONTROL::setTransitions()
     Go( &BOARD_EDITOR_CONTROL::ToggleProperties,       ACTIONS::showProperties.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ToggleNetInspector,     PCB_ACTIONS::showNetInspector.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ToggleImpedanceProfiler, PCB_ACTIONS::showImpedanceProfiler.MakeEvent() );
+    Go( &BOARD_EDITOR_CONTROL::AnalyzeImpedance,       PCB_ACTIONS::analyzeImpedance.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::ToggleSearch,           PCB_ACTIONS::showSearch.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::TogglePythonConsole,    PCB_ACTIONS::showPythonConsole.MakeEvent() );
     Go( &BOARD_EDITOR_CONTROL::RepairBoard,            PCB_ACTIONS::repairBoard.MakeEvent() );

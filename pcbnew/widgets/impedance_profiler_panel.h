@@ -28,13 +28,12 @@
 #include <sipi/cross_section.h>
 #include <widgets/wx_panel.h>
 
+class CROSSHAIR_LAYER;
 class PCB_EDIT_FRAME;
 class mpWindow;
 class mpFXYVector;
 class mpScaleX;
 class mpScaleY;
-class wxChoice;
-class wxTextCtrl;
 class wxStaticText;
 
 
@@ -52,6 +51,9 @@ struct XS_SAMPLE
     bool        hasRefBelow = false;
     double      hAbove = 0.0;       ///< Dielectric height above (m)
     double      hBelow = 0.0;       ///< Dielectric height below (m)
+    double      erEff = 1.0;        ///< Effective εr at this sample
+    int         neighborCount = 0;  ///< Number of neighbor conductors
+    int         groundwireCount = 0;///< Number of groundwire conductors
 };
 
 
@@ -82,7 +84,7 @@ private:
  * Dockable panel in Pcbnew showing trace impedance (Z0) vs. distance
  * along a selected net.
  *
- * Pipeline: net selection -> TRACE_PATH_WALKER -> STACKUP_READER -> Z0 -> plot
+ * Pipeline: track selection -> AnalyseNet() -> TRACE_PATH_WALKER -> BEM -> plot
  */
 class IMPEDANCE_PROFILER_PANEL : public WX_PANEL, public BOARD_LISTENER
 {
@@ -91,6 +93,9 @@ public:
     ~IMPEDANCE_PROFILER_PANEL() override;
 
     void OnShowPanel();
+
+    /// Analyse a specific net (called from board context menu or selection).
+    void AnalyseNet( int aNetCode );
 
     // BOARD_LISTENER overrides
     void OnBoardItemAdded( BOARD& aBoard, BOARD_ITEM* aBoardItem ) override;
@@ -103,11 +108,8 @@ public:
 
 private:
     void buildUI();
-    void populateNetList();
-    void onAnalyseClicked( wxCommandEvent& aEvent );
-    void onNetSelected( wxCommandEvent& aEvent );
-    void onXAxisUnitChanged( wxCommandEvent& aEvent );
-    void onPlotClick( wxMouseEvent& aEvent );
+    void onPlotMotion( wxMouseEvent& aEvent );
+    void onContextMenuCommand( wxCommandEvent& aEvent );
     void runAnalysis( int aNetCode );
     void updatePlot();
     void updateStatus( const wxString& aText );
@@ -116,24 +118,20 @@ private:
     PCB_EDIT_FRAME* m_frame;
     bool            m_initialized;  ///< true after first OnShowPanel() builds UI
 
-    // Controls
-    wxChoice*       m_netSelector;
-    wxTextCtrl*     m_targetZ0Input;
-    wxChoice*       m_xAxisUnitSelector;  ///< mm or ps toggle
-    wxStaticText*   m_statusText;
-
-    bool            m_xAxisIsTime;        ///< true = ps, false = mm
-
     // Plot
     mpWindow*       m_plotWindow;
-    mpFXYVector*    m_impedanceTrace;
-    mpFXYVector*    m_targetLine;
-    mpFXYVector*    m_cursorLine;       ///< Vertical line at selected sample
-    mpScaleX*       m_xAxis;
+    mpFXYVector*      m_impedanceTrace;
+    mpFXYVector*      m_targetLine;
+    CROSSHAIR_LAYER*  m_crosshair;
+    mpScaleX*         m_xAxis;
     mpScaleY*       m_yAxis;
 
     // Cross-section view
     XS_VIEW_PANEL*  m_xsView;
+    wxStaticText*   m_xsDiagText;       ///< Diagnostic info inside XS panel
+
+    // Status
+    wxStaticText*   m_statusText;
 
     // Analysis results
     std::vector<XS_SAMPLE> m_samples;
@@ -141,7 +139,17 @@ private:
 
     // State
     int             m_currentNetCode;
-    double          m_targetZ0;
+    wxString        m_currentNetName;
+    bool            m_xAxisIsTime;        ///< true = ps, false = mm
+    bool            m_showCrossSection;   ///< cross-section panel visibility
+
+    // Context menu IDs
+    enum
+    {
+        ID_XAXIS_MM = wxID_HIGHEST + 1,
+        ID_XAXIS_PS,
+        ID_SHOW_XS,
+    };
 };
 
 #endif // IMPEDANCE_PROFILER_PANEL_H

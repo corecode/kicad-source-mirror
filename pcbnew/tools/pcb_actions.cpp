@@ -1354,6 +1354,13 @@ TOOL_ACTION PCB_ACTIONS::showImpedanceProfiler( TOOL_ACTION_ARGS()
         .Tooltip( _( "Show/hide the impedance profiler panel" ) )
         .Icon( BITMAPS::tools ) );
 
+TOOL_ACTION PCB_ACTIONS::analyzeImpedance( TOOL_ACTION_ARGS()
+        .Name( "pcbnew.Control.analyzeImpedance" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Analyze Impedance" ) )
+        .Tooltip( _( "Profile impedance along the selected trace" ) )
+        .Icon( BITMAPS::tools ) );
+
 TOOL_ACTION PCB_ACTIONS::zonesManager( "pcbnew.Control.zonesManager",
         AS_GLOBAL, 0, "",
         _( "Zone Manager" ),
