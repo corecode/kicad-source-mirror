@@ -96,8 +96,9 @@ struct RLGC_RESULT
     Eigen::MatrixXd C0;     ///< Vacuum capacitance per unit length (F/m)
     Eigen::MatrixXd L;      ///< Inductance per unit length (H/m)
     double          Z0 = 0.0;     ///< Characteristic impedance (Ohms) — single-ended
-    double          Zdiff = 0.0;  ///< Differential impedance (Ohms) — for 2-conductor
-    double          erEff = 0.0;  ///< Effective dielectric constant
+    double          Zdiff = 0.0;     ///< Differential impedance (Ohms) — for 2-conductor
+    double          erEff = 0.0;     ///< Effective dielectric constant
+    double          erEffOdd = 0.0;  ///< Odd-mode effective εr (for diff pair delay)
 };
 
 

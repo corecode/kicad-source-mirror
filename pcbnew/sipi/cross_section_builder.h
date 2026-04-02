@@ -64,6 +64,17 @@ struct XS_GROUNDWIRE
 
 
 /**
+ * A diff-pair partner conductor found on the cross-section cut line.
+ */
+struct XS_DIFF_PAIR_CONDUCTOR
+{
+    int    lateralNm = 0;   ///< Signed lateral distance from signal center (nm)
+    int    widthNm = 0;     ///< Track width (nm)
+    bool   found = false;   ///< True if coupled-net track was found on cut line
+};
+
+
+/**
  * Parameters for a single cross-section sample point.
  */
 struct XS_BUILD_PARAMS
@@ -75,6 +86,7 @@ struct XS_BUILD_PARAMS
     int            signalWidth = 0;   ///< Effective signal width (nm), may include pad
     int            couplingHorizon = 0; ///< Max edge-to-edge search distance (nm)
     double         sampleDist = 0.0;  ///< Distance along the walked path (nm)
+    int            coupledNetCode = 0; ///< Coupled diff-pair net code (0 = not a diff pair)
     LAYER_GEOMETRY layerGeom;         ///< Stackup geometry at this point
 };
 
@@ -127,12 +139,29 @@ public:
                                                 LAYER_GEOMETRY& aLayerGeom ) const;
 
     /**
+     * Find the diff-pair partner conductor on the cross-section cut line.
+     *
+     * Searches the R-tree for tracks on the coupled net that intersect the
+     * perpendicular cut line.  If multiple candidates are found, the closest
+     * one (by lateral distance) is returned.
+     *
+     * @param aParams  Sample parameters (must have coupledNetCode > 0).
+     * @return Result with found=true and lateral position if a partner was detected.
+     */
+    XS_DIFF_PAIR_CONDUCTOR FindDiffPairConductor( const XS_BUILD_PARAMS& aParams ) const;
+
+    /**
      * Build a complete XS_GEOMETRY from the signal trace, its neighbors,
      * and any groundwires from intermediate reference layers.
+     *
+     * @param aDiffPair  Optional diff-pair partner.  When present and found,
+     *                   placed as conductors[1] (signal index 1) for BEM Zdiff
+     *                   extraction.  Any neighbor at the same position is skipped.
      */
     XS_GEOMETRY BuildGeometry( const XS_BUILD_PARAMS& aParams,
                                const std::vector<XS_NEIGHBOR>& aNeighbors,
-                               const std::vector<XS_GROUNDWIRE>& aGroundWires = {} ) const;
+                               const std::vector<XS_GROUNDWIRE>& aGroundWires = {},
+                               const XS_DIFF_PAIR_CONDUCTOR* aDiffPair = nullptr ) const;
 
 private:
     void findTrackNeighbors( const XS_BUILD_PARAMS& aParams,

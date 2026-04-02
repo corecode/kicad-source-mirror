@@ -36,6 +36,7 @@
 #include <sipi/trace_path_walker.h>
 #include <sipi/stackup_reader.h>
 #include <sipi/bem_2d_solver.h>
+#include <sipi/impedance_profile.h>
 
 #include <cmath>
 #include <set>
@@ -644,6 +645,243 @@ BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
 
     // No large impedance jumps on a contiguous ground trace
     BOOST_CHECK_EQUAL( jumpCount, 0 );
+}
+
+
+/**
+ * Test SE_PROFILE::Compute on a real board.
+ * Verify samples are produced, Z0 is reasonable, geometry has conductors,
+ * and delay accumulates.
+ */
+BOOST_AUTO_TEST_CASE( SEProfileBasic )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "tracks_arcs_vias", m_board );
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
+
+    int targetNet = -1;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() > 0 && track->Type() != PCB_VIA_T )
+        {
+            targetNet = track->GetNetCode();
+            break;
+        }
+    }
+
+    if( targetNet < 0 )
+    {
+        BOOST_TEST_MESSAGE( "No routed nets — skipping" );
+        return;
+    }
+
+    SE_PROFILE profile;
+    bool ok = profile.Compute( m_board.get(), targetNet );
+    BOOST_REQUIRE( ok );
+
+    const auto& samples = profile.GetSamples();
+    BOOST_REQUIRE_GT( samples.size(), 0 );
+
+    BOOST_TEST_MESSAGE( "SE_PROFILE: " << samples.size() << " samples"
+                        << "  length=" << profile.GetTotalLength() / 1e6 << "mm"
+                        << "  delay=" << profile.GetTotalDelay() << "ps" );
+
+    BOOST_CHECK_GT( profile.GetTotalLength(), 0.0 );
+    BOOST_CHECK_GT( profile.GetTotalDelay(), 0.0 );
+
+    // Every sample should have at least one conductor and a valid Z0
+    for( size_t i = 0; i < samples.size(); i++ )
+    {
+        const IMPEDANCE_SAMPLE& s = samples[i];
+
+        BOOST_CHECK_GT( s.geometry.conductors.size(), 0 );
+        BOOST_CHECK_GT( s.z0, 10.0 );
+        BOOST_CHECK_LT( s.z0, 300.0 );
+        BOOST_CHECK_GE( s.delayPs, 0.0 );
+
+        if( i > 0 )
+            BOOST_CHECK_GE( s.delayPs, samples[i - 1].delayPs );
+    }
+
+    // AtDelay should return valid interpolated result
+    double midDelay = profile.GetTotalDelay() / 2.0;
+    IMPEDANCE_SAMPLE mid = profile.AtDelay( midDelay );
+    BOOST_CHECK_GT( mid.z0, 10.0 );
+    BOOST_CHECK_GT( mid.geometry.conductors.size(), 0 );
+
+    BOOST_TEST_MESSAGE( "AtDelay(" << midDelay << "ps): Z0=" << mid.z0
+                        << "  conductors=" << mid.geometry.conductors.size() );
+}
+
+
+/**
+ * Test SE_PROFILE and DIFF_PROFILE on the USB_D differential pair
+ * from the cparti_fpga test board.
+ */
+BOOST_AUTO_TEST_CASE( USBDiffPairProfile )
+{
+    try
+    {
+        KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+    }
+    catch( ... )
+    {
+        BOOST_TEST_MESSAGE( "Board cparti_fpga not found — skipping" );
+        return;
+    }
+
+    if( !m_board || m_board->Tracks().empty() )
+    {
+        BOOST_TEST_MESSAGE( "No tracks — skipping" );
+        return;
+    }
+
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
+
+    // Find USB_D+ and USB_D- nets
+    int netP = -1, netN = -1;
+
+    for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+    {
+        wxString name = info->GetNetname();
+
+        if( name.Contains( wxS( "USB_D_P" ) ) )
+        {
+            netP = code;
+            BOOST_TEST_MESSAGE( "P net: " << name << " (code " << code << ")" );
+        }
+
+        if( name.Contains( wxS( "USB_D_N" ) ) )
+        {
+            netN = code;
+            BOOST_TEST_MESSAGE( "N net: " << name << " (code " << code << ")" );
+        }
+    }
+
+    if( netP < 0 || netN < 0 )
+    {
+        BOOST_TEST_MESSAGE( "USB_D pair not found — skipping" );
+        return;
+    }
+
+    // Test SE_PROFILE on P
+    SE_PROFILE profileP;
+    BOOST_REQUIRE( profileP.Compute( m_board.get(), netP ) );
+
+    BOOST_TEST_MESSAGE( "P profile: " << profileP.GetSamples().size() << " samples"
+                        << "  length=" << profileP.GetTotalLength() / 1e6 << "mm"
+                        << "  delay=" << profileP.GetTotalDelay() << "ps" );
+
+    for( size_t i = 0; i < profileP.GetSamples().size(); i++ )
+    {
+        const IMPEDANCE_SAMPLE& s = profileP.GetSamples()[i];
+
+        BOOST_TEST_MESSAGE( "  P[" << i << "] d=" << s.distNm / 1e6 << "mm"
+                            << " Z0=" << s.z0
+                            << " cond=" << s.geometry.conductors.size()
+                            << " nb=" << s.neighborCount
+                            << " gw=" << s.groundwireCount
+                            << " layer=" << s.layer );
+
+        BOOST_CHECK_GT( s.geometry.conductors.size(), 0 );
+        BOOST_CHECK_GT( s.z0, 0.0 );
+    }
+
+    // Test SE_PROFILE on N
+    SE_PROFILE profileN;
+    BOOST_REQUIRE( profileN.Compute( m_board.get(), netN ) );
+
+    BOOST_TEST_MESSAGE( "N profile: " << profileN.GetSamples().size() << " samples"
+                        << "  length=" << profileN.GetTotalLength() / 1e6 << "mm"
+                        << "  delay=" << profileN.GetTotalDelay() << "ps" );
+
+    // Test DIFF_PROFILE
+    DIFF_PROFILE diffProfile;
+    bool diffOk = diffProfile.Compute( m_board.get(), netP, netN );
+
+    BOOST_TEST_MESSAGE( "DIFF_PROFILE ok=" << diffOk
+                        << " error=" << diffProfile.GetError() );
+
+    if( diffOk )
+    {
+        // Dump internal profile stats
+        const auto& intP = diffProfile.GetProfileP();
+        const auto& intN = diffProfile.GetProfileN();
+
+        BOOST_TEST_MESSAGE( "DIFF internal P: " << intP.GetSamples().size() << " samples"
+                            << "  length=" << intP.GetTotalLength() / 1e6 << "mm"
+                            << "  delay=" << intP.GetTotalDelay() << "ps"
+                            << "  startPad=" << ( intP.GetStartPad() ? "yes" : "no" )
+                            << "  endPad=" << ( intP.GetEndPad() ? "yes" : "no" ) );
+
+        BOOST_TEST_MESSAGE( "DIFF internal N: " << intN.GetSamples().size() << " samples"
+                            << "  length=" << intN.GetTotalLength() / 1e6 << "mm"
+                            << "  delay=" << intN.GetTotalDelay() << "ps"
+                            << "  startPad=" << ( intN.GetStartPad() ? "yes" : "no" )
+                            << "  endPad=" << ( intN.GetEndPad() ? "yes" : "no" ) );
+
+        if( intP.GetStartPad() )
+            BOOST_TEST_MESSAGE( "  P start pad: " << intP.GetStartPad()->GetPosition() );
+
+        if( intN.GetStartPad() )
+            BOOST_TEST_MESSAGE( "  N start pad: " << intN.GetStartPad()->GetPosition() );
+
+        // Dump first/last few board positions to check alignment
+        if( !intP.GetSamples().empty() && !intN.GetSamples().empty() )
+        {
+            auto& sp = intP.GetSamples();
+            auto& sn = intN.GetSamples();
+
+            BOOST_TEST_MESSAGE( "  P[0] pos=(" << sp.front().boardPos.x / 1e6 << ","
+                                << sp.front().boardPos.y / 1e6 << ")mm  layer=" << sp.front().layer );
+            BOOST_TEST_MESSAGE( "  P[last] pos=(" << sp.back().boardPos.x / 1e6 << ","
+                                << sp.back().boardPos.y / 1e6 << ")mm" );
+            BOOST_TEST_MESSAGE( "  N[0] pos=(" << sn.front().boardPos.x / 1e6 << ","
+                                << sn.front().boardPos.y / 1e6 << ")mm  layer=" << sn.front().layer );
+            BOOST_TEST_MESSAGE( "  N[last] pos=(" << sn.back().boardPos.x / 1e6 << ","
+                                << sn.back().boardPos.y / 1e6 << ")mm" );
+        }
+
+        BOOST_TEST_MESSAGE( "Diff samples: " << diffProfile.GetSamples().size()
+                            << "  skew=" << diffProfile.GetSkewPs() << "ps" );
+
+        int coupledCount = 0;
+        int uncoupledCount = 0;
+
+        for( size_t i = 0; i < diffProfile.GetSamples().size(); i++ )
+        {
+            const DIFF_SAMPLE& ds = diffProfile.GetSamples()[i];
+
+            if( ds.coupled )
+                coupledCount++;
+            else
+                uncoupledCount++;
+
+            // Only dump every 50th sample to reduce noise
+            if( i % 50 == 0 || i == diffProfile.GetSamples().size() - 1 )
+            {
+                BOOST_TEST_MESSAGE( "  D[" << i << "] d=" << ds.distMm << "mm"
+                                    << " Z0p=" << ds.z0P << " Z0n=" << ds.z0N
+                                    << " Zdiff=" << ds.zdiff
+                                    << " " << ( ds.coupled ? "coupled" : "uncoupled" )
+                                    << ( ds.coupled ? " gap=" + std::to_string( ds.gapUm ) + "um" : "" )
+                                    << " cond=" << ds.geometry.conductors.size() );
+            }
+
+            BOOST_CHECK_GT( ds.zdiff, 0.0 );
+            BOOST_CHECK_GT( ds.z0P, 0.0 );
+            BOOST_CHECK_GT( ds.z0N, 0.0 );
+        }
+
+        BOOST_TEST_MESSAGE( "Coupled: " << coupledCount
+                            << "  Uncoupled: " << uncoupledCount );
+    }
+    else
+    {
+        BOOST_TEST_MESSAGE( "DIFF_PROFILE failed: " << diffProfile.GetError() );
+    }
 }
 
 

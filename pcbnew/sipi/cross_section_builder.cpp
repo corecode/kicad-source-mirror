@@ -101,6 +101,70 @@ std::vector<XS_NEIGHBOR> CROSS_SECTION_BUILDER::FindNeighbors(
 }
 
 
+XS_DIFF_PAIR_CONDUCTOR CROSS_SECTION_BUILDER::FindDiffPairConductor(
+        const XS_BUILD_PARAMS& aParams ) const
+{
+    XS_DIFF_PAIR_CONDUCTOR result;
+
+    if( aParams.coupledNetCode <= 0 || !m_rtree )
+        return result;
+
+    VECTOR2D normal( -aParams.sampleTangent.y, aParams.sampleTangent.x );
+
+    VECTOR2I cutA( aParams.samplePos.x - (int) ( normal.x * aParams.couplingHorizon ),
+                   aParams.samplePos.y - (int) ( normal.y * aParams.couplingHorizon ) );
+    VECTOR2I cutB( aParams.samplePos.x + (int) ( normal.x * aParams.couplingHorizon ),
+                   aParams.samplePos.y + (int) ( normal.y * aParams.couplingHorizon ) );
+    SEG cutSeg( cutA, cutB );
+
+    double bestAbsDist = 1e18;
+
+    auto nearbyItems = m_rtree->GetObjectsAt( aParams.samplePos, aParams.signalLayer,
+                                               aParams.couplingHorizon );
+
+    for( BOARD_ITEM* item : nearbyItems )
+    {
+        if( item->Type() != PCB_TRACE_T && item->Type() != PCB_ARC_T )
+            continue;
+
+        PCB_TRACK* other = static_cast<PCB_TRACK*>( item );
+
+        if( other->GetNetCode() != aParams.coupledNetCode )
+            continue;
+
+        std::shared_ptr<SHAPE> shape = other->GetEffectiveShape( aParams.signalLayer );
+
+        if( !shape )
+            continue;
+
+        VECTOR2I nearest;
+
+        if( !shape->Collide( cutSeg, 0, nullptr, &nearest ) )
+            continue;
+
+        VECTOR2D delta( nearest.x - aParams.samplePos.x,
+                        nearest.y - aParams.samplePos.y );
+        double lateralDist = delta.x * normal.x + delta.y * normal.y;
+        double edgeToEdge = std::abs( lateralDist )
+                            - aParams.signalWidth / 2.0
+                            - other->GetWidth() / 2.0;
+
+        if( edgeToEdge < MIN_EDGE_TO_EDGE || edgeToEdge > aParams.couplingHorizon )
+            continue;
+
+        if( std::abs( lateralDist ) < bestAbsDist )
+        {
+            bestAbsDist = std::abs( lateralDist );
+            result.lateralNm = static_cast<int>( lateralDist );
+            result.widthNm = other->GetWidth();
+            result.found = true;
+        }
+    }
+
+    return result;
+}
+
+
 void CROSS_SECTION_BUILDER::findTrackNeighbors( const XS_BUILD_PARAMS& aParams,
                                                  const SEG& aCutSeg,
                                                  const VECTOR2D& aNormal,
@@ -657,7 +721,8 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
 XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
         const XS_BUILD_PARAMS& aParams,
         const std::vector<XS_NEIGHBOR>& aNeighbors,
-        const std::vector<XS_GROUNDWIRE>& aGroundWires ) const
+        const std::vector<XS_GROUNDWIRE>& aGroundWires,
+        const XS_DIFF_PAIR_CONDUCTOR* aDiffPair ) const
 {
     XS_GEOMETRY xs;
     double condY = 0.0;
@@ -748,7 +813,7 @@ XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
         xs.dielectrics.push_back( air );
     }
 
-    // Signal conductor at x=0
+    // Signal conductor at x=0 (conductors[0])
     XS_CONDUCTOR cond;
     cond.centerX = 0.0;
     cond.centerY = condY;
@@ -756,9 +821,27 @@ XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
     cond.thickness = geom.traceThickness;
     xs.conductors.push_back( cond );
 
-    // Neighbor conductors
+    // Diff-pair partner at conductors[1] — must come before neighbors
+    // so the BEM extracts Zdiff from C(0,1).
+    if( aDiffPair && aDiffPair->found )
+    {
+        XS_CONDUCTOR dpCond;
+        dpCond.centerX = aDiffPair->lateralNm * 1e-9;
+        dpCond.centerY = condY;
+        dpCond.width = aDiffPair->widthNm * 1e-9;
+        dpCond.thickness = geom.traceThickness;
+        xs.conductors.push_back( dpCond );
+    }
+
+    // Neighbor conductors (skip any that overlap with the diff-pair partner)
     for( const XS_NEIGHBOR& nb : aNeighbors )
     {
+        if( aDiffPair && aDiffPair->found
+            && std::abs( nb.distNm - aDiffPair->lateralNm ) < aDiffPair->widthNm )
+        {
+            continue;
+        }
+
         XS_CONDUCTOR nbCond;
         nbCond.centerX = nb.distNm * 1e-9;
         nbCond.centerY = condY;

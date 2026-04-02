@@ -25,22 +25,9 @@
 
 #include <board.h>
 #include <netinfo.h>
-#include <footprint.h>
-#include <pad.h>
-#include <pcb_track.h>
-#include <zone.h>
 #include <pcb_edit_frame.h>
 #include <pcbnew_settings.h>
 #include <widgets/mathplot.h>
-
-#include <drc/drc_rtree.h>
-#include <sipi/cross_section_builder.h>
-#include <sipi/trace_path_walker.h>
-#include <sipi/stackup_reader.h>
-#include <sipi/analytical_impedance.h>
-#include <sipi/bem_2d_solver.h>
-
-#include <chrono>
 
 #include <wx/dcbuffer.h>
 #include <wx/menu.h>
@@ -48,7 +35,7 @@
 #include <wx/stattext.h>
 
 #include <algorithm>
-#include <set>
+#include <cmath>
 
 
 // ============================================================================
@@ -153,7 +140,11 @@ private:
 XS_VIEW_PANEL::XS_VIEW_PANEL( wxWindow* aParent ) :
         wxPanel( aParent, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                  wxFULL_REPAINT_ON_RESIZE ),
-        m_sample( nullptr ),
+        m_geometry( nullptr ),
+        m_z0( 0.0 ),
+        m_zdiff( 0.0 ),
+        m_distMm( 0.0 ),
+        m_isDiffPair( false ),
         m_xExtent( 0.0 )
 {
     SetBackgroundStyle( wxBG_STYLE_PAINT );
@@ -162,9 +153,14 @@ XS_VIEW_PANEL::XS_VIEW_PANEL( wxWindow* aParent ) :
 }
 
 
-void XS_VIEW_PANEL::SetSample( const XS_SAMPLE* aSample )
+void XS_VIEW_PANEL::SetGeometry( const XS_GEOMETRY* aGeometry, double aZ0, double aZdiff,
+                                  double aDistMm, bool aIsDiffPair )
 {
-    m_sample = aSample;
+    m_geometry = aGeometry;
+    m_z0 = aZ0;
+    m_zdiff = aZdiff;
+    m_distMm = aDistMm;
+    m_isDiffPair = aIsDiffPair;
     Refresh();
 }
 
@@ -177,7 +173,7 @@ void XS_VIEW_PANEL::onPaint( wxPaintEvent& aEvent )
     dc.SetBackground( wxBrush( wxColour( 40, 40, 45 ) ) );
     dc.Clear();
 
-    if( m_sample && !m_sample->geometry.conductors.empty() )
+    if( m_geometry && !m_geometry->conductors.empty() )
         drawCrossSection( dc, rect );
     else
     {
@@ -190,7 +186,7 @@ void XS_VIEW_PANEL::onPaint( wxPaintEvent& aEvent )
 
 void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
 {
-    const XS_GEOMETRY& geom = m_sample->geometry;
+    const XS_GEOMETRY& geom = *m_geometry;
     const XS_CONDUCTOR& sig = geom.conductors[0];
 
     // --- Compute Y extent from conductors + ground planes ---
@@ -206,7 +202,6 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
         yMax = std::max( yMax, geom.upperGroundY );
     }
 
-    // Include dielectric regions that are near the geometry (skip far-away air)
     double ySpan = yMax - yMin;
 
     for( const XS_DIELECTRIC_REGION& dr : geom.dielectrics )
@@ -225,12 +220,11 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
     yMin -= yPad;
     yMax += yPad;
 
-    // --- X extent: fixed across all samples for comparability ---
+    // --- X extent ---
     double xHalf = m_xExtent;
 
     if( xHalf < 1e-9 )
     {
-        // Fallback: auto from geometry
         for( const XS_CONDUCTOR& c : geom.conductors )
             xHalf = std::max( xHalf, std::abs( c.centerX ) + c.width );
 
@@ -242,7 +236,7 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
 
     // --- Mapping ---
     int margin = 8;
-    int topMargin = 20; // room for info text
+    int topMargin = 20;
     int drawW = aRect.width - 2 * margin;
     int drawH = aRect.height - margin - topMargin;
 
@@ -288,7 +282,6 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
     int gndPy = toPixY( geom.groundY );
     aDC.DrawLine( toPixX( xMin ), gndPy, toPixX( xMax ), gndPy );
 
-    // "GND" label
     aDC.SetTextForeground( wxColour( 200, 180, 60 ) );
     aDC.DrawText( wxS( "GND" ), toPixX( xMax ) - 30, gndPy - 14 );
 
@@ -311,14 +304,20 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
 
         if( c.isGround )
         {
-            // Groundwire — gold color matching ground plane lines
             aDC.SetBrush( wxBrush( wxColour( 180, 160, 50 ) ) );
             aDC.SetPen( wxPen( wxColour( 200, 180, 60 ), 1 ) );
         }
         else if( ci == 0 )
         {
+            // Signal P — orange
             aDC.SetBrush( wxBrush( wxColour( 220, 140, 40 ) ) );
             aDC.SetPen( wxPen( wxColour( 255, 180, 60 ), 2 ) );
+        }
+        else if( ci == 1 && m_isDiffPair )
+        {
+            // Signal N — teal
+            aDC.SetBrush( wxBrush( wxColour( 40, 160, 200 ) ) );
+            aDC.SetPen( wxPen( wxColour( 60, 200, 240 ), 2 ) );
         }
         else
         {
@@ -328,7 +327,6 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
 
         aDC.DrawRectangle( px, py, pw, ph );
 
-        // Width label below conductor (skip for groundwires — they clutter)
         if( !c.isGround )
         {
             wxString wLabel = wxString::Format( wxS( "w=%.0f\u00B5m" ), c.width * 1e6 );
@@ -338,7 +336,7 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
             aDC.DrawText( wLabel, px + pw / 2 - ws.GetWidth() / 2, py + ph + 2 );
         }
 
-        // Edge-to-edge distance dimension line from signal to neighbor
+        // Edge-to-edge distance dimension line
         if( ci > 0 && !c.isGround )
         {
             double sigRight = sig.centerX + sig.width / 2.0;
@@ -346,7 +344,6 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
             double nbRight = c.centerX + c.width / 2.0;
             double nbLeft = c.centerX - c.width / 2.0;
 
-            // Pick the facing edges
             double edgeA, edgeB;
 
             if( c.centerX > sig.centerX )
@@ -362,14 +359,12 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
 
             double edgeDist = std::abs( edgeB - edgeA );
 
-            // Draw dimension line at conductor mid-height
             int dimY = py + ph / 2;
             int dimX1 = toPixX( edgeA );
             int dimX2 = toPixX( edgeB );
 
             aDC.SetPen( wxPen( wxColour( 140, 200, 140 ), 1, wxPENSTYLE_SHORT_DASH ) );
             aDC.DrawLine( dimX1, dimY, dimX2, dimY );
-            // End ticks
             aDC.DrawLine( dimX1, dimY - 4, dimX1, dimY + 4 );
             aDC.DrawLine( dimX2, dimY - 4, dimX2, dimY + 4 );
 
@@ -381,23 +376,15 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
     }
 
     // --- Info text ---
-    wxString info = wxString::Format( wxS( "Z\u2080=%.1f\u03A9 @ %.2fmm" ),
-                                      m_sample->z0, m_sample->distMm );
+    wxString info = wxString::Format( wxS( "Z\u2080=%.1f\u03A9" ), m_z0 );
 
-    // Reference plane diagnostics
-    wxString refInfo;
+    if( m_isDiffPair && m_zdiff > 0.0 )
+        info += wxString::Format( wxS( "  Zdiff=%.1f\u03A9" ), m_zdiff );
 
-    if( m_sample->hasRefAbove )
-        refInfo += wxString::Format( wxS( " h\u2191%.0f\u00B5m" ), m_sample->hAbove * 1e6 );
-
-    if( m_sample->hasRefBelow )
-        refInfo += wxString::Format( wxS( " h\u2193%.0f\u00B5m" ), m_sample->hBelow * 1e6 );
-
-    if( !m_sample->hasRefAbove && !m_sample->hasRefBelow )
-        refInfo = wxS( " NO REF PLANES" );
+    info += wxString::Format( wxS( " @ %.2fmm" ), m_distMm );
 
     aDC.SetTextForeground( wxColour( 220, 220, 220 ) );
-    aDC.DrawText( info + refInfo, aRect.x + 6, aRect.y + 4 );
+    aDC.DrawText( info, aRect.x + 6, aRect.y + 4 );
 }
 
 
@@ -411,6 +398,7 @@ IMPEDANCE_PROFILER_PANEL::IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent ) :
         m_initialized( false ),
         m_plotWindow( nullptr ),
         m_impedanceTrace( nullptr ),
+        m_zdiffTrace( nullptr ),
         m_targetLine( nullptr ),
         m_crosshair( nullptr ),
         m_xAxis( nullptr ),
@@ -420,10 +408,11 @@ IMPEDANCE_PROFILER_PANEL::IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent ) :
         m_statusText( nullptr ),
         m_selectedSample( -1 ),
         m_currentNetCode( -1 ),
+        m_isDiffPairMode( false ),
+        m_coupledNetCode( 0 ),
         m_xAxisIsTime( false ),
         m_showCrossSection( false )
 {
-    // Load persisted settings
     PCBNEW_SETTINGS* cfg = aParent->GetPcbNewSettings();
 
     if( cfg )
@@ -436,7 +425,6 @@ IMPEDANCE_PROFILER_PANEL::IMPEDANCE_PROFILER_PANEL( PCB_EDIT_FRAME* aParent ) :
 
 IMPEDANCE_PROFILER_PANEL::~IMPEDANCE_PROFILER_PANEL()
 {
-    // Persist settings
     if( PCBNEW_SETTINGS* cfg = m_frame->GetPcbNewSettings() )
     {
         cfg->m_ImpedanceProfiler.x_axis_is_time = m_xAxisIsTime;
@@ -449,7 +437,6 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
 {
     wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
 
-    // Plot
     m_plotWindow = new mpWindow( this, wxID_ANY );
     m_plotWindow->SetMinSize( wxSize( 200, 150 ) );
     m_plotWindow->EnableDoubleBuffer( true );
@@ -481,6 +468,15 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
     m_targetLine->SetVisible( false );
     m_plotWindow->AddLayer( m_targetLine, false );
 
+    wxPen zdiffPen( wxColour( 40, 200, 120 ), 2, wxPENSTYLE_SOLID );
+
+    m_zdiffTrace = new mpFXYVector( _( "Zdiff" ) );
+    m_zdiffTrace->SetPen( zdiffPen );
+    m_zdiffTrace->SetContinuity( true );
+    m_zdiffTrace->SetScale( m_xAxis, m_yAxis );
+    m_zdiffTrace->SetVisible( false );
+    m_plotWindow->AddLayer( m_zdiffTrace, false );
+
     m_crosshair = new CROSSHAIR_LAYER();
     m_plotWindow->AddLayer( m_crosshair, false );
 
@@ -489,25 +485,21 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
 
     mainSizer->Add( m_plotWindow, 3, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4 );
 
-    // Cross-section view (hidden by default)
     m_xsView = new XS_VIEW_PANEL( this );
     mainSizer->Add( m_xsView, 1, wxEXPAND | wxLEFT | wxRIGHT, 4 );
 
-    // Cross-section diagnostic text
     m_xsDiagText = new wxStaticText( this, wxID_ANY, wxEmptyString );
     mainSizer->Add( m_xsDiagText, 0, wxEXPAND | wxLEFT | wxRIGHT, 4 );
 
     m_xsView->Show( m_showCrossSection );
     m_xsDiagText->Show( m_showCrossSection );
 
-    // Status bar
     m_statusText = new wxStaticText( this, wxID_ANY,
                                      _( "Right-click a trace and choose Analyze Impedance." ) );
     mainSizer->Add( m_statusText, 0, wxEXPAND | wxALL, 4 );
 
     SetSizer( mainSizer );
 
-    // Append our items to mpWindow's built-in popup menu (zoom, fit, etc.)
     wxMenu* popMenu = m_plotWindow->GetPopupMenu();
     popMenu->AppendSeparator();
     popMenu->AppendRadioItem( ID_XAXIS_MM, _( "X-axis: mm" ) );
@@ -517,7 +509,6 @@ void IMPEDANCE_PROFILER_PANEL::buildUI()
     popMenu->AppendCheckItem( ID_SHOW_XS, _( "Show cross-section" ) );
     popMenu->Check( ID_SHOW_XS, m_showCrossSection );
 
-    // Bind events
     m_plotWindow->Bind( wxEVT_MOTION, &IMPEDANCE_PROFILER_PANEL::onPlotMotion, this );
     m_plotWindow->Bind( wxEVT_MENU, &IMPEDANCE_PROFILER_PANEL::onContextMenuCommand, this,
                         ID_XAXIS_MM, ID_SHOW_XS );
@@ -550,13 +541,20 @@ void IMPEDANCE_PROFILER_PANEL::AnalyseNet( int aNetCode )
         m_initialized = true;
     }
 
-    // Look up the net name for display
+    // Look up net name and detect diff pair
     if( BOARD* board = m_frame->GetBoard() )
     {
         NETINFO_ITEM* net = board->FindNet( aNetCode );
 
         if( net )
+        {
             m_currentNetName = net->GetNetname();
+
+            NETINFO_ITEM* coupledNet = board->DpCoupledNet( net );
+            m_coupledNetCode = coupledNet ? coupledNet->GetNetCode() : 0;
+            m_isDiffPairMode = ( m_coupledNetCode > 0 );
+            m_coupledNetName = coupledNet ? coupledNet->GetNetname() : wxString();
+        }
     }
 
     runAnalysis( aNetCode );
@@ -565,29 +563,56 @@ void IMPEDANCE_PROFILER_PANEL::AnalyseNet( int aNetCode )
 
 void IMPEDANCE_PROFILER_PANEL::onPlotMotion( wxMouseEvent& aEvent )
 {
-    if( m_samples.empty() )
+    bool hasSamples = m_isDiffPairMode
+                      ? ( m_diffProfile && !m_diffProfile->GetSamples().empty() )
+                      : ( m_seProfile && !m_seProfile->GetSamples().empty() );
+
+    if( !hasSamples )
     {
         aEvent.Skip();
         return;
     }
 
-    // Convert pixel X -> normalized plot coord -> data coord
     double normX = m_plotWindow->p2x( aEvent.GetX() );
     double plotX = m_xAxis->TransformFromPlot( normX );
 
-    // Find the nearest sample
+    // Find nearest sample
     int bestIdx = 0;
     double bestDist = 1e9;
 
-    for( int i = 0; i < (int) m_samples.size(); i++ )
+    if( m_isDiffPairMode && m_diffProfile )
     {
-        double sampleX = m_xAxisIsTime ? m_samples[i].timePsec : m_samples[i].distMm;
-        double d = std::abs( sampleX - plotX );
+        const auto& samples = m_diffProfile->GetSamples();
 
-        if( d < bestDist )
+        for( int i = 0; i < (int) samples.size(); i++ )
         {
-            bestDist = d;
-            bestIdx = i;
+            double sampleX = m_xAxisIsTime ? samples[i].delayPs
+                                           : ( m_diffProfile->GetProfileP().GetSamples().empty()
+                                               ? 0.0
+                                               : m_diffProfile->GetProfileP().AtDelay( samples[i].delayPs ).distNm / 1e6 );
+            double d = std::abs( sampleX - plotX );
+
+            if( d < bestDist )
+            {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+    }
+    else if( m_seProfile )
+    {
+        const auto& samples = m_seProfile->GetSamples();
+
+        for( int i = 0; i < (int) samples.size(); i++ )
+        {
+            double sampleX = m_xAxisIsTime ? samples[i].delayPs : samples[i].distNm / 1e6;
+            double d = std::abs( sampleX - plotX );
+
+            if( d < bestDist )
+            {
+                bestDist = d;
+                bestIdx = i;
+            }
         }
     }
 
@@ -604,7 +629,7 @@ void IMPEDANCE_PROFILER_PANEL::onContextMenuCommand( wxCommandEvent& aEvent )
         m_xAxisIsTime = false;
         static_cast<PROFILER_SCALE_X*>( m_xAxis )->SetUnitLabel( wxS( "mm" ) );
 
-        if( !m_samples.empty() )
+        if( m_seProfile || m_diffProfile )
             updatePlot();
 
         break;
@@ -613,7 +638,7 @@ void IMPEDANCE_PROFILER_PANEL::onContextMenuCommand( wxCommandEvent& aEvent )
         m_xAxisIsTime = true;
         static_cast<PROFILER_SCALE_X*>( m_xAxis )->SetUnitLabel( wxS( "ps" ) );
 
-        if( !m_samples.empty() )
+        if( m_seProfile || m_diffProfile )
             updatePlot();
 
         break;
@@ -626,7 +651,6 @@ void IMPEDANCE_PROFILER_PANEL::onContextMenuCommand( wxCommandEvent& aEvent )
         break;
     }
 
-    // Persist
     if( PCBNEW_SETTINGS* cfg = m_frame->GetPcbNewSettings() )
     {
         cfg->m_ImpedanceProfiler.x_axis_is_time = m_xAxisIsTime;
@@ -637,421 +661,189 @@ void IMPEDANCE_PROFILER_PANEL::onContextMenuCommand( wxCommandEvent& aEvent )
 
 void IMPEDANCE_PROFILER_PANEL::selectSample( int aIndex )
 {
-    if( aIndex < 0 || aIndex >= (int) m_samples.size() )
-        return;
-
-    m_selectedSample = aIndex;
-    const XS_SAMPLE& sample = m_samples[aIndex];
-
-    if( m_showCrossSection )
+    if( m_isDiffPairMode && m_diffProfile )
     {
-        m_xsView->SetSample( &sample );
+        const auto& samples = m_diffProfile->GetSamples();
 
-        // Update diagnostic text
-        wxString diag;
+        if( aIndex < 0 || aIndex >= (int) samples.size() )
+            return;
 
-        if( sample.neighborCount > 0 )
-            diag += wxString::Format( wxS( "%dnb" ), sample.neighborCount );
+        m_selectedSample = aIndex;
+        const DIFF_SAMPLE& ds = samples[aIndex];
 
-        if( sample.groundwireCount > 0 )
+        double distMm = ds.distMm;
+
+        if( m_showCrossSection )
         {
-            if( !diag.empty() )
-                diag += wxS( "  " );
+            m_xsView->SetGeometry( &ds.geometry, ds.z0P, ds.zdiff, distMm, ds.coupled );
 
-            diag += wxString::Format( wxS( "%dgw" ), sample.groundwireCount );
+            wxString diag;
+
+            if( ds.coupled )
+            {
+                diag += wxString::Format( wxS( "gap=%.0f\u00B5m" ), ds.gapUm );
+                diag += wxString::Format( wxS( "  \u03B5rOdd=%.2f" ), ds.erEffOdd );
+            }
+            else
+            {
+                diag += wxS( "uncoupled" );
+            }
+
+            m_xsDiagText->SetLabel( diag );
         }
 
-        if( sample.hasRefBelow )
-        {
-            if( !diag.empty() )
-                diag += wxS( "  " );
+        double dataX = m_xAxisIsTime ? ds.delayPs : distMm;
+        m_crosshair->SetPosition( dataX, ds.zdiff, m_xAxis, m_yAxis );
+        m_plotWindow->Refresh();
 
-            diag += wxString::Format( wxS( "h\u2193%.0f\u00B5m" ), sample.hBelow * 1e6 );
-        }
+        wxString status = wxString::Format(
+                wxS( "@ %.1fmm (%.0fps)  Z\u2080_P=%.1f\u03A9  Z\u2080_N=%.1f\u03A9  Zdiff=%.1f\u03A9" ),
+                distMm, ds.delayPs, ds.z0P, ds.z0N, ds.zdiff );
 
-        if( sample.hasRefAbove )
-        {
-            if( !diag.empty() )
-                diag += wxS( "  " );
+        if( std::abs( m_diffProfile->GetSkewPs() ) > 0.01 )
+            status += wxString::Format( wxS( "  skew=%.1fps" ), m_diffProfile->GetSkewPs() );
 
-            diag += wxString::Format( wxS( "h\u2191%.0f\u00B5m" ), sample.hAbove * 1e6 );
-        }
+        updateStatus( status );
 
-        if( sample.erEff > 1.0 )
-        {
-            if( !diag.empty() )
-                diag += wxS( "  " );
-
-            diag += wxString::Format( wxS( "\u03B5rEff=%.2f" ), sample.erEff );
-        }
-
-        m_xsDiagText->SetLabel( diag );
+        m_frame->FocusOnLocation( ds.boardPosP );
+        m_frame->GetCanvas()->Refresh();
     }
+    else if( m_seProfile )
+    {
+        const auto& samples = m_seProfile->GetSamples();
 
-    // Update crosshair position and repaint
-    double dataX = m_xAxisIsTime ? sample.timePsec : sample.distMm;
-    m_crosshair->SetPosition( dataX, sample.z0, m_xAxis, m_yAxis );
-    m_plotWindow->Refresh();
+        if( aIndex < 0 || aIndex >= (int) samples.size() )
+            return;
 
-    // Update main status line with cursor info
-    wxString status = wxString::Format( wxS( "@ %.1fmm (%.0fps)  Z\u2080=%.1f\u03A9" ),
-                                        sample.distMm, sample.timePsec, sample.z0 );
-    updateStatus( status );
+        m_selectedSample = aIndex;
+        const IMPEDANCE_SAMPLE& s = samples[aIndex];
 
-    // Highlight the sample location on the board
-    m_frame->FocusOnLocation( sample.boardPos );
-    m_frame->GetCanvas()->Refresh();
+        double distMm = s.distNm / 1e6;
+
+        if( m_showCrossSection )
+        {
+            m_xsView->SetGeometry( &s.geometry, s.z0, 0.0, distMm, false );
+
+            wxString diag;
+
+            if( s.neighborCount > 0 )
+                diag += wxString::Format( wxS( "%dnb" ), s.neighborCount );
+
+            if( s.groundwireCount > 0 )
+            {
+                if( !diag.empty() )
+                    diag += wxS( "  " );
+
+                diag += wxString::Format( wxS( "%dgw" ), s.groundwireCount );
+            }
+
+            if( s.hasRefBelow )
+            {
+                if( !diag.empty() )
+                    diag += wxS( "  " );
+
+                diag += wxString::Format( wxS( "h\u2193%.0f\u00B5m" ), s.hBelow * 1e6 );
+            }
+
+            if( s.hasRefAbove )
+            {
+                if( !diag.empty() )
+                    diag += wxS( "  " );
+
+                diag += wxString::Format( wxS( "h\u2191%.0f\u00B5m" ), s.hAbove * 1e6 );
+            }
+
+            if( s.erEff > 1.0 )
+            {
+                if( !diag.empty() )
+                    diag += wxS( "  " );
+
+                diag += wxString::Format( wxS( "\u03B5rEff=%.2f" ), s.erEff );
+            }
+
+            m_xsDiagText->SetLabel( diag );
+        }
+
+        double dataX = m_xAxisIsTime ? s.delayPs : distMm;
+        m_crosshair->SetPosition( dataX, s.z0, m_xAxis, m_yAxis );
+        m_plotWindow->Refresh();
+
+        wxString status = wxString::Format( wxS( "@ %.1fmm (%.0fps)  Z\u2080=%.1f\u03A9" ),
+                                            distMm, s.delayPs, s.z0 );
+        updateStatus( status );
+
+        m_frame->FocusOnLocation( s.boardPos );
+        m_frame->GetCanvas()->Refresh();
+    }
 }
 
 
 void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
 {
     m_currentNetCode = aNetCode;
-    m_samples.clear();
     m_selectedSample = -1;
+
+    // Clear stale geometry pointer before destroying profiles
+    m_xsView->SetGeometry( nullptr, 0.0, 0.0, 0.0, false );
+
+    m_seProfile.reset();
+    m_diffProfile.reset();
 
     BOARD* board = m_frame->GetBoard();
 
     if( !board )
         return;
 
-    TRACE_PATH_WALKER walker( board );
-
-    if( !walker.WalkNet( aNetCode ) )
+    if( m_isDiffPairMode )
     {
-        updateStatus( _( "Could not walk net — no routed tracks found." ) );
-        return;
+        m_diffProfile = std::make_unique<DIFF_PROFILE>();
+
+        if( !m_diffProfile->Compute( board, aNetCode, m_coupledNetCode ) )
+        {
+            updateStatus( m_diffProfile->GetError() );
+            return;
+        }
     }
-
-    const auto& path = walker.GetPath();
-
-    STACKUP_READER stackup( board );
-
-    // Cache keyed on quantized cross-section to avoid redundant BEM solves.
-    struct XS_KEY
+    else
     {
-        PCB_LAYER_ID       layer;
-        int                width;
-        bool               refAbove;
-        bool               refBelow;
-        std::vector<int>   neighborKeys;
+        m_seProfile = std::make_unique<SE_PROFILE>();
 
-        bool operator<( const XS_KEY& o ) const
+        if( !m_seProfile->Compute( board, aNetCode ) )
         {
-            if( layer != o.layer ) return layer < o.layer;
-            if( width != o.width ) return width < o.width;
-            if( refAbove != o.refAbove ) return refAbove < o.refAbove;
-            if( refBelow != o.refBelow ) return refBelow < o.refBelow;
-            return neighborKeys < o.neighborKeys;
-        }
-    };
-
-    struct XS_CACHED { double z0; double erEff; };
-    std::map<XS_KEY, XS_CACHED> z0Cache;
-
-    // Build spatial index for neighbor search with tracks and pads.
-    DRC_RTREE tempRtree;
-
-    for( PCB_TRACK* t : board->Tracks() )
-    {
-        if( t->Type() == PCB_VIA_T )
-        {
-            // Insert vias on all their layers so they appear as neighbors
-            for( PCB_LAYER_ID layer : t->GetLayerSet().CuStack() )
-                tempRtree.Insert( t, layer );
-        }
-        else
-        {
-            tempRtree.Insert( t, t->GetLayer() );
+            updateStatus( m_seProfile->GetError() );
+            return;
         }
     }
 
-    for( FOOTPRINT* fp : board->Footprints() )
-    {
-        for( PAD* pad : fp->Pads() )
-        {
-            for( PCB_LAYER_ID layer : pad->GetLayerSet().CuStack() )
-                tempRtree.Insert( pad, layer );
-        }
-    }
-
-    DRC_RTREE* rtree = &tempRtree;
-
-    // Sample at uniform distance intervals along the path
-    double totalLen = walker.GetTotalLength(); // nm
-
-    if( totalLen < 1.0 )
-    {
-        updateStatus( _( "Trace has zero length." ) );
-        return;
-    }
-
-    double sampleStep = std::max( totalLen / 500.0, 50000.0 ); // ~500 samples, min 50um
-    int    numSamples = std::max( 2, (int) ceil( totalLen / sampleStep ) + 1 );
-
-    // Build non-via path index for interpolation
-    struct PATH_SEG
-    {
-        double       dist;     ///< Path distance at this point
-        VECTOR2I     pos;      ///< Board position
-        VECTOR2D     tangent;  ///< Unit tangent
-        PCB_TRACK*   track;    ///< Source track segment
-    };
-
-    std::vector<PATH_SEG> segs;
-
-    for( const PATH_POINT& pp : path )
-    {
-        if( pp.isVia )
-            continue;
-
-        segs.push_back( { pp.distFromStart, pp.position, pp.tangent,
-                          static_cast<PCB_TRACK*>( pp.item ) } );
-    }
-
-    if( segs.empty() )
-    {
-        updateStatus( _( "No impedance data — trace has no non-via segments." ) );
-        return;
-    }
-
-    // Map path items -> path distance for topological neighbor exclusion.
-    std::map<BOARD_CONNECTED_ITEM*, double> pathItemDist;
-
-    for( const PATH_POINT& pp : path )
-    {
-        if( !pp.isVia && pathItemDist.find( pp.item ) == pathItemDist.end() )
-            pathItemDist[pp.item] = pp.distFromStart;
-    }
-
-    int    segIdx = 0;
-    double cumulativeTimePsec = 0.0;
-    long   usXsTotal = 0, usBemTotal = 0;
-    int    bemSolves = 0, cacheHits = 0;
-
-    for( int si = 0; si < numSamples; si++ )
-    {
-        double sampleDist = si * sampleStep;
-
-        if( sampleDist > totalLen )
-            sampleDist = totalLen;
-
-        // Advance to the segment containing this distance
-        while( segIdx + 1 < (int) segs.size()
-               && segs[segIdx + 1].dist <= sampleDist )
-        {
-            segIdx++;
-        }
-
-        const PATH_SEG& seg = segs[segIdx];
-
-        // Interpolate position along the segment (exact for straight tracks)
-        VECTOR2I samplePos = seg.pos;
-
-        if( segIdx + 1 < (int) segs.size() )
-        {
-            const PATH_SEG& next = segs[segIdx + 1];
-            double segLen = next.dist - seg.dist;
-
-            if( segLen > 1.0 )
-            {
-                double frac = ( sampleDist - seg.dist ) / segLen;
-                frac = std::clamp( frac, 0.0, 1.0 );
-                samplePos.x = seg.pos.x + (int) ( frac * ( next.pos.x - seg.pos.x ) );
-                samplePos.y = seg.pos.y + (int) ( frac * ( next.pos.y - seg.pos.y ) );
-            }
-        }
-
-        VECTOR2D     sampleTangent = seg.tangent;
-        PCB_TRACK*   track = seg.track;
-        int          signalWidth = track->GetWidth(); // may be overridden by pad
-
-        // Check if the sample point is inside a pad on the signal net.
-        for( PAD* pad : board->GetPads() )
-        {
-            if( pad->GetNetCode() != track->GetNetCode() )
-                continue;
-
-            if( !pad->IsOnLayer( track->GetLayer() ) )
-                continue;
-
-            if( pad->HitTest( samplePos, 0 ) )
-            {
-                VECTOR2D normal0( -sampleTangent.y, sampleTangent.x );
-                BOX2I    padBBox = pad->GetBoundingBox();
-
-                double minProj = 1e18, maxProj = -1e18;
-
-                for( const VECTOR2I& corner :
-                     { padBBox.GetOrigin(),
-                       padBBox.GetOrigin() + VECTOR2I( padBBox.GetWidth(), 0 ),
-                       padBBox.GetOrigin() + VECTOR2I( 0, padBBox.GetHeight() ),
-                       padBBox.GetEnd() } )
-                {
-                    VECTOR2D d( corner.x - samplePos.x, corner.y - samplePos.y );
-                    double proj = d.x * normal0.x + d.y * normal0.y;
-                    minProj = std::min( minProj, proj );
-                    maxProj = std::max( maxProj, proj );
-                }
-
-                int padWidth = (int) ( maxProj - minProj );
-
-                if( padWidth > signalWidth )
-                    signalWidth = padWidth;
-
-                break;
-            }
-        }
-
-        LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),
-                                                        samplePos,
-                                                        signalWidth );
-
-        // Coupling horizon: 3x the nearest reference plane distance (edge-to-edge).
-        double hRef = std::max( geom.hAbove, geom.hBelow );
-        int    couplingHorizon = std::clamp( (int) ( hRef * 3.0 * 1e9 ), 500000, 3000000 );
-
-        CROSS_SECTION_BUILDER xsBuilder;
-        xsBuilder.SetSpatialIndex( rtree );
-        xsBuilder.SetBoard( board );
-        xsBuilder.SetPathItemDistances( &pathItemDist );
-        xsBuilder.SetSignalTrack( track );
-
-        XS_BUILD_PARAMS xsParams;
-        xsParams.samplePos = samplePos;
-        xsParams.sampleTangent = sampleTangent;
-        xsParams.signalLayer = track->GetLayer();
-        xsParams.signalNetCode = track->GetNetCode();
-        xsParams.signalWidth = signalWidth;
-        xsParams.couplingHorizon = couplingHorizon;
-        xsParams.sampleDist = sampleDist;
-        xsParams.layerGeom = geom;
-
-        auto t0 = std::chrono::steady_clock::now();
-
-        auto neighbors = xsBuilder.FindNeighbors( xsParams );
-        auto groundWires = xsBuilder.FindGroundWires( xsParams, geom );
-
-        // Update params with potentially modified geometry (reference demotion)
-        xsParams.layerGeom = geom;
-
-        XS_GEOMETRY xs = xsBuilder.BuildGeometry( xsParams, neighbors, groundWires );
-
-        auto t1 = std::chrono::steady_clock::now();
-        usXsTotal += std::chrono::duration_cast<std::chrono::microseconds>( t1 - t0 ).count();
-
-        // Build cache key from neighbor and groundwire configuration
-        XS_KEY key;
-        key.layer = track->GetLayer();
-        key.width = signalWidth;
-        key.refAbove = geom.hasRefAbove;
-        key.refBelow = geom.hasRefBelow;
-
-        for( const XS_NEIGHBOR& nb : neighbors )
-        {
-            key.neighborKeys.push_back( nb.distNm / 10000 );
-            key.neighborKeys.push_back( nb.widthNm );
-        }
-
-        for( const XS_GROUNDWIRE& gw : groundWires )
-        {
-            key.neighborKeys.push_back( gw.lateralNm / 10000 );
-            key.neighborKeys.push_back( gw.widthNm );
-        }
-
-        // Solve (with cache)
-        double z0 = 0.0;
-        double erEff = 1.0;
-        auto cacheIt = z0Cache.find( key );
-
-        if( cacheIt != z0Cache.end() )
-        {
-            z0 = cacheIt->second.z0;
-            erEff = cacheIt->second.erEff;
-            cacheHits++;
-        }
-        else
-        {
-            auto t2 = std::chrono::steady_clock::now();
-            BEM_2D_SOLVER solver;
-            solver.SetGeometry( xs );
-            solver.SetPanelsPerEdge( 12 );
-
-            bool bemOk = solver.Solve();
-
-            if( bemOk && solver.GetResult().Z0 > 0.0 )
-            {
-                z0 = solver.GetResult().Z0;
-                erEff = std::max( solver.GetResult().erEff, 1.0 );
-            }
-
-            z0Cache[key] = { z0, erEff };
-
-            auto t3 = std::chrono::steady_clock::now();
-            usBemTotal += std::chrono::duration_cast<std::chrono::microseconds>( t3 - t2 ).count();
-            bemSolves++;
-        }
-
-        // Compute cumulative propagation delay
-        static constexpr double C_LIGHT_M_S = 299792458.0;
-        double velocity = C_LIGHT_M_S / sqrt( erEff );
-        double stepMeters = sampleStep * 1e-9; // nm -> m
-        cumulativeTimePsec += ( stepMeters / velocity ) * 1e12; // s -> ps
-
-        // Count neighbor types
-        int nbCount = 0;
-        int gwCount = 0;
-
-        for( size_t i = 1; i < xs.conductors.size(); i++ )
-        {
-            if( xs.conductors[i].isGround )
-                gwCount++;
-            else
-                nbCount++;
-        }
-
-        // Store sample with full geometry
-        XS_SAMPLE sample;
-        sample.distMm = sampleDist / 1e6; // nm -> mm
-        sample.timePsec = cumulativeTimePsec;
-        sample.z0 = z0;
-        sample.geometry = xs;
-        sample.boardPos = samplePos;
-        sample.hasRefAbove = geom.hasRefAbove;
-        sample.hasRefBelow = geom.hasRefBelow;
-        sample.hAbove = geom.hAbove;
-        sample.hBelow = geom.hBelow;
-        sample.erEff = erEff;
-        sample.neighborCount = nbCount;
-        sample.groundwireCount = gwCount;
-        m_samples.push_back( sample );
-    }
-
-    if( m_samples.empty() )
-    {
-        updateStatus( _( "No impedance data — trace has no non-via segments." ) );
-        return;
-    }
-
-    // Compute the max X extent across all samples so the XS view uses a fixed
-    // horizontal scale, making different points along the trace comparable.
+    // Compute max X extent for the XS view
     double maxXExtent = 0.0;
 
-    for( const XS_SAMPLE& s : m_samples )
+    if( m_isDiffPairMode && m_diffProfile )
     {
-        for( const XS_CONDUCTOR& c : s.geometry.conductors )
-            maxXExtent = std::max( maxXExtent, std::abs( c.centerX ) + c.width );
+        for( const DIFF_SAMPLE& ds : m_diffProfile->GetSamples() )
+        {
+            for( const XS_CONDUCTOR& c : ds.geometry.conductors )
+                maxXExtent = std::max( maxXExtent, std::abs( c.centerX ) + c.width );
+        }
+    }
+    else if( m_seProfile )
+    {
+        for( const IMPEDANCE_SAMPLE& s : m_seProfile->GetSamples() )
+        {
+            for( const XS_CONDUCTOR& c : s.geometry.conductors )
+                maxXExtent = std::max( maxXExtent, std::abs( c.centerX ) + c.width );
+        }
     }
 
     m_xsView->SetXExtent( maxXExtent * 1.5 );
 
     updatePlot();
 
-    // Select the middle sample to show an initial cross-section
-    selectSample( (int) m_samples.size() / 2 );
-
-    fprintf( stderr, "SIPI timing: XS=%.1fms BEM=%.1fms (%d solves, %d cached)\n",
-             usXsTotal / 1000.0, usBemTotal / 1000.0, bemSolves, cacheHits );
+    // Select middle sample
+    if( m_isDiffPairMode && m_diffProfile )
+        selectSample( (int) m_diffProfile->GetSamples().size() / 2 );
+    else if( m_seProfile )
+        selectSample( (int) m_seProfile->GetSamples().size() / 2 );
 }
 
 
@@ -1059,12 +851,37 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot()
 {
     std::vector<double> positions;
     std::vector<double> impedances;
+    std::vector<double> zdiffPositions;
+    std::vector<double> zdiffValues;
 
-    for( const XS_SAMPLE& s : m_samples )
+    if( m_isDiffPairMode && m_diffProfile )
     {
-        positions.push_back( m_xAxisIsTime ? s.timePsec : s.distMm );
-        impedances.push_back( s.z0 );
+        const auto& dSamples = m_diffProfile->GetSamples();
+
+        for( size_t i = 0; i < dSamples.size(); i++ )
+        {
+            const DIFF_SAMPLE& ds = dSamples[i];
+
+            double xVal = m_xAxisIsTime ? ds.delayPs : ds.distMm;
+
+            positions.push_back( xVal );
+            impedances.push_back( ds.z0P );
+
+            zdiffPositions.push_back( xVal );
+            zdiffValues.push_back( ds.zdiff );
+        }
     }
+    else if( m_seProfile )
+    {
+        for( const IMPEDANCE_SAMPLE& s : m_seProfile->GetSamples() )
+        {
+            positions.push_back( m_xAxisIsTime ? s.delayPs : s.distNm / 1e6 );
+            impedances.push_back( s.z0 );
+        }
+    }
+
+    if( positions.empty() )
+        return;
 
     m_impedanceTrace->SetData( positions, impedances );
     m_impedanceTrace->SetVisible( true );
@@ -1072,6 +889,21 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot()
 
     double yMin = *std::min_element( impedances.begin(), impedances.end() );
     double yMax = *std::max_element( impedances.begin(), impedances.end() );
+
+    if( !zdiffValues.empty() )
+    {
+        m_zdiffTrace->SetData( zdiffPositions, zdiffValues );
+        m_zdiffTrace->SetVisible( true );
+
+        double zdMin = *std::min_element( zdiffValues.begin(), zdiffValues.end() );
+        double zdMax = *std::max_element( zdiffValues.begin(), zdiffValues.end() );
+        yMin = std::min( yMin, zdMin );
+        yMax = std::max( yMax, zdMax );
+    }
+    else
+    {
+        m_zdiffTrace->SetVisible( false );
+    }
 
     if( yMax - yMin < 0.5 )
     {
@@ -1085,6 +917,10 @@ void IMPEDANCE_PROFILER_PANEL::updatePlot()
     m_xAxis->ResetDataRange();
     m_yAxis->ResetDataRange();
     m_impedanceTrace->UpdateScales();
+
+    if( !zdiffValues.empty() )
+        m_zdiffTrace->UpdateScales();
+
     m_yAxis->ExtendDataRange( yMin - yPad, yMax + yPad );
     m_plotWindow->Fit();
     m_plotWindow->Refresh();
@@ -1097,35 +933,17 @@ void IMPEDANCE_PROFILER_PANEL::updateStatus( const wxString& aText )
 }
 
 
-// BOARD_LISTENER — schedule re-analysis on board changes
-void IMPEDANCE_PROFILER_PANEL::OnBoardItemAdded( BOARD& aBoard, BOARD_ITEM* aBoardItem )
-{
-}
-
-
-void IMPEDANCE_PROFILER_PANEL::OnBoardItemsAdded( BOARD& aBoard,
-                                                  std::vector<BOARD_ITEM*>& aBoardItems )
-{
-}
-
-
-void IMPEDANCE_PROFILER_PANEL::OnBoardItemRemoved( BOARD& aBoard, BOARD_ITEM* aBoardItem )
-{
-}
-
-
-void IMPEDANCE_PROFILER_PANEL::OnBoardItemsRemoved( BOARD& aBoard,
-                                                    std::vector<BOARD_ITEM*>& aBoardItems )
-{
-}
-
+// BOARD_LISTENER
+void IMPEDANCE_PROFILER_PANEL::OnBoardItemAdded( BOARD& aBoard, BOARD_ITEM* aBoardItem ) {}
+void IMPEDANCE_PROFILER_PANEL::OnBoardItemsAdded( BOARD& aBoard, std::vector<BOARD_ITEM*>& ) {}
+void IMPEDANCE_PROFILER_PANEL::OnBoardItemRemoved( BOARD& aBoard, BOARD_ITEM* aBoardItem ) {}
+void IMPEDANCE_PROFILER_PANEL::OnBoardItemsRemoved( BOARD& aBoard, std::vector<BOARD_ITEM*>& ) {}
 
 void IMPEDANCE_PROFILER_PANEL::OnBoardItemChanged( BOARD& aBoard, BOARD_ITEM* aBoardItem )
 {
     if( IsShown() && m_currentNetCode > 0 )
         runAnalysis( m_currentNetCode );
 }
-
 
 void IMPEDANCE_PROFILER_PANEL::OnBoardItemsChanged( BOARD& aBoard,
                                                     std::vector<BOARD_ITEM*>& aBoardItems )
@@ -1134,8 +952,4 @@ void IMPEDANCE_PROFILER_PANEL::OnBoardItemsChanged( BOARD& aBoard,
         runAnalysis( m_currentNetCode );
 }
 
-
-void IMPEDANCE_PROFILER_PANEL::OnBoardHighlightNetChanged( BOARD& aBoard )
-{
-    // Could auto-switch to the highlighted net — for now, no-op
-}
+void IMPEDANCE_PROFILER_PANEL::OnBoardHighlightNetChanged( BOARD& aBoard ) {}

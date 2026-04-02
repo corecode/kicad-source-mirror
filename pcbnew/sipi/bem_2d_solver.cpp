@@ -1071,8 +1071,8 @@ bool BEM_2D_SOLVER::Solve()
     m_result.Z0 = 1.0 / ( C_LIGHT * sqrt( Cfull( 0, 0 ) * Cair( 0, 0 ) ) );
     m_result.erEff = Cfull( 0, 0 ) / Cair( 0, 0 );
 
-    // Differential impedance for 2-conductor systems
-    if( m_numConductors == 2 )
+    // Differential impedance: odd-mode of conductors 0 and 1
+    if( m_numConductors >= 2 )
     {
         double Codd  = Cfull( 0, 0 ) - Cfull( 0, 1 );
         double C0odd = Cair( 0, 0 ) - Cair( 0, 1 );
@@ -1081,6 +1081,7 @@ bool BEM_2D_SOLVER::Solve()
         {
             double Zodd = 1.0 / ( C_LIGHT * sqrt( Codd * C0odd ) );
             m_result.Zdiff = 2.0 * Zodd;
+            m_result.erEffOdd = Codd / C0odd;
         }
     }
 

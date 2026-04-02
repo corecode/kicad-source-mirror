@@ -25,8 +25,10 @@
 #define IMPEDANCE_PROFILER_PANEL_H
 
 #include <board.h>
-#include <sipi/cross_section.h>
+#include <sipi/impedance_profile.h>
 #include <widgets/wx_panel.h>
+
+#include <memory>
 
 class CROSSHAIR_LAYER;
 class PCB_EDIT_FRAME;
@@ -38,26 +40,6 @@ class wxStaticText;
 
 
 /**
- * Per-sample snapshot of the cross-section used for the BEM solve.
- */
-struct XS_SAMPLE
-{
-    double      distMm = 0.0;       ///< Distance along trace (mm)
-    double      timePsec = 0.0;    ///< Cumulative propagation delay (ps)
-    double      z0 = 0.0;          ///< Computed Z₀ (Ohms)
-    XS_GEOMETRY geometry;           ///< Cross-section fed to solver
-    VECTOR2I    boardPos;           ///< Board position of this sample (nm)
-    bool        hasRefAbove = false;
-    bool        hasRefBelow = false;
-    double      hAbove = 0.0;       ///< Dielectric height above (m)
-    double      hBelow = 0.0;       ///< Dielectric height below (m)
-    double      erEff = 1.0;        ///< Effective εr at this sample
-    int         neighborCount = 0;  ///< Number of neighbor conductors
-    int         groundwireCount = 0;///< Number of groundwire conductors
-};
-
-
-/**
  * Small panel that renders a 2D cross-section view of the trace geometry
  * at a selected point along the impedance profile.
  */
@@ -66,7 +48,8 @@ class XS_VIEW_PANEL : public wxPanel
 public:
     XS_VIEW_PANEL( wxWindow* aParent );
 
-    void SetSample( const XS_SAMPLE* aSample );
+    void SetGeometry( const XS_GEOMETRY* aGeometry, double aZ0, double aZdiff,
+                      double aDistMm, bool aIsDiffPair );
 
     /// Set the fixed horizontal extent (meters) so all samples use the same scale.
     void SetXExtent( double aExtent ) { m_xExtent = aExtent; }
@@ -75,8 +58,12 @@ private:
     void onPaint( wxPaintEvent& aEvent );
     void drawCrossSection( wxDC& aDC, const wxRect& aRect );
 
-    const XS_SAMPLE* m_sample;
-    double           m_xExtent;    ///< Fixed half-width in meters (0 = auto)
+    const XS_GEOMETRY* m_geometry;
+    double      m_z0;
+    double      m_zdiff;
+    double      m_distMm;
+    bool        m_isDiffPair;
+    double      m_xExtent;    ///< Fixed half-width in meters (0 = auto)
 };
 
 
@@ -84,7 +71,7 @@ private:
  * Dockable panel in Pcbnew showing trace impedance (Z0) vs. distance
  * along a selected net.
  *
- * Pipeline: track selection -> AnalyseNet() -> TRACE_PATH_WALKER -> BEM -> plot
+ * Pipeline: track selection -> AnalyseNet() -> SE_PROFILE/DIFF_PROFILE -> plot
  */
 class IMPEDANCE_PROFILER_PANEL : public WX_PANEL, public BOARD_LISTENER
 {
@@ -119,12 +106,13 @@ private:
     bool            m_initialized;  ///< true after first OnShowPanel() builds UI
 
     // Plot
-    mpWindow*       m_plotWindow;
+    mpWindow*         m_plotWindow;
     mpFXYVector*      m_impedanceTrace;
+    mpFXYVector*      m_zdiffTrace;         ///< Differential impedance plot trace
     mpFXYVector*      m_targetLine;
     CROSSHAIR_LAYER*  m_crosshair;
     mpScaleX*         m_xAxis;
-    mpScaleY*       m_yAxis;
+    mpScaleY*         m_yAxis;
 
     // Cross-section view
     XS_VIEW_PANEL*  m_xsView;
@@ -134,12 +122,16 @@ private:
     wxStaticText*   m_statusText;
 
     // Analysis results
-    std::vector<XS_SAMPLE> m_samples;
+    std::unique_ptr<SE_PROFILE>   m_seProfile;
+    std::unique_ptr<DIFF_PROFILE> m_diffProfile;
     int             m_selectedSample;
 
     // State
     int             m_currentNetCode;
     wxString        m_currentNetName;
+    bool            m_isDiffPairMode;     ///< true when analyzing a diff pair net
+    int             m_coupledNetCode;     ///< Net code of coupled net (0 = none)
+    wxString        m_coupledNetName;     ///< Display name of coupled net
     bool            m_xAxisIsTime;        ///< true = ps, false = mm
     bool            m_showCrossSection;   ///< cross-section panel visibility
 

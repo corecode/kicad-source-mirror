@@ -362,6 +362,95 @@ BOOST_AUTO_TEST_CASE( CoupledSpacingEffect )
 
 
 /**
+ * Zdiff with a third conductor (neighbor) present.
+ * The BEM must still extract Zdiff from conductors 0 and 1 when
+ * m_numConductors >= 2, and the neighbor must affect the result.
+ */
+BOOST_AUTO_TEST_CASE( CoupledWithNeighbor )
+{
+    double w = 0.1e-3;
+    double s = 0.15e-3;
+    double t = 35e-6;
+    double h = 0.1e-3;
+    double er = 4.4;
+
+    auto makeGeom = [&]( bool withNeighbor ) -> XS_GEOMETRY
+    {
+        XS_GEOMETRY geom;
+
+        // Left trace (conductor 0)
+        XS_CONDUCTOR c0;
+        c0.centerX = -( s / 2.0 + w / 2.0 );
+        c0.centerY = -( h + t / 2.0 );
+        c0.width = w;
+        c0.thickness = t;
+        geom.conductors.push_back( c0 );
+
+        // Right trace (conductor 1 — diff pair partner)
+        XS_CONDUCTOR c1;
+        c1.centerX = ( s / 2.0 + w / 2.0 );
+        c1.centerY = -( h + t / 2.0 );
+        c1.width = w;
+        c1.thickness = t;
+        geom.conductors.push_back( c1 );
+
+        if( withNeighbor )
+        {
+            // Extra neighbor trace to the right of the pair
+            XS_CONDUCTOR c2;
+            c2.centerX = ( s / 2.0 + w / 2.0 ) + 0.3e-3;
+            c2.centerY = -( h + t / 2.0 );
+            c2.width = w;
+            c2.thickness = t;
+            geom.conductors.push_back( c2 );
+        }
+
+        geom.groundY = 0.0;
+        geom.epsilonR = er;
+
+        XS_DIELECTRIC_REGION dielAbove, dielBelow;
+        dielAbove.yTop = -10e-3;
+        dielAbove.yBottom = -h;
+        dielAbove.epsilonR = 1.0;
+        dielBelow.yTop = -h;
+        dielBelow.yBottom = 0.0;
+        dielBelow.epsilonR = er;
+        geom.dielectrics.push_back( dielAbove );
+        geom.dielectrics.push_back( dielBelow );
+
+        return geom;
+    };
+
+    BEM_2D_SOLVER solver2;
+    solver2.SetGeometry( makeGeom( false ) );
+    solver2.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver2.Solve() );
+
+    BEM_2D_SOLVER solver3;
+    solver3.SetGeometry( makeGeom( true ) );
+    solver3.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver3.Solve() );
+
+    BOOST_TEST_MESSAGE( "2 conductors: Zdiff=" << solver2.GetResult().Zdiff
+                        << " Z0=" << solver2.GetResult().Z0 );
+    BOOST_TEST_MESSAGE( "3 conductors: Zdiff=" << solver3.GetResult().Zdiff
+                        << " Z0=" << solver3.GetResult().Z0 );
+
+    // Both should produce valid Zdiff
+    BOOST_CHECK_GT( solver2.GetResult().Zdiff, 0.0 );
+    BOOST_CHECK_GT( solver3.GetResult().Zdiff, 0.0 );
+
+    // Zdiff should be in a reasonable range
+    BOOST_CHECK_GT( solver3.GetResult().Zdiff, 50.0 );
+    BOOST_CHECK_LT( solver3.GetResult().Zdiff, 200.0 );
+
+    // The neighbor changes the coupling environment, so Zdiff should differ
+    // (neighbor adds capacitive loading, typically reducing Zdiff slightly)
+    BOOST_CHECK_NE( solver2.GetResult().Zdiff, solver3.GetResult().Zdiff );
+}
+
+
+/**
  * Groundwire regression: a geometry with no ground conductors should produce
  * the same result as before the groundwire feature was added.
  */
@@ -750,6 +839,196 @@ BOOST_AUTO_TEST_CASE( WideGroundwireMatchesImageGround )
     // The groundwire has edge fringing that an infinite plane doesn't,
     // so it slightly over-estimates capacitance (lower Z₀).
     BOOST_CHECK_CLOSE( z0GW, z0Ref, 10.0 );
+}
+
+
+/**
+ * Coupled stripline: two traces between two ground planes.
+ * Zdiff should be lower than coupled microstrip (more confinement).
+ */
+BOOST_AUTO_TEST_CASE( CoupledStripline )
+{
+    double w = 0.1e-3;
+    double s = 0.15e-3;
+    double t = 35e-6;
+    double h = 0.2e-3;  // total dielectric thickness (signal centered)
+    double er = 4.4;
+
+    XS_GEOMETRY geom;
+
+    double condY = -h / 2.0;
+
+    XS_CONDUCTOR c0;
+    c0.centerX = -( s / 2.0 + w / 2.0 );
+    c0.centerY = condY;
+    c0.width = w;
+    c0.thickness = t;
+    geom.conductors.push_back( c0 );
+
+    XS_CONDUCTOR c1;
+    c1.centerX = ( s / 2.0 + w / 2.0 );
+    c1.centerY = condY;
+    c1.width = w;
+    c1.thickness = t;
+    geom.conductors.push_back( c1 );
+
+    geom.groundY = 0.0;
+    geom.hasUpperGround = true;
+    geom.upperGroundY = -h;
+    geom.epsilonR = er;
+
+    XS_DIELECTRIC_REGION diel;
+    diel.yTop = -h;
+    diel.yBottom = 0.0;
+    diel.epsilonR = er;
+    geom.dielectrics.push_back( diel );
+
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( geom );
+    solver.SetPanelsPerEdge( 15 );
+    BOOST_REQUIRE( solver.Solve() );
+
+    BOOST_TEST_MESSAGE( "Coupled stripline:" );
+    BOOST_TEST_MESSAGE( "  Z0 = " << solver.GetResult().Z0 << " Ohm" );
+    BOOST_TEST_MESSAGE( "  Zdiff = " << solver.GetResult().Zdiff << " Ohm" );
+
+    BOOST_CHECK_GT( solver.GetResult().Zdiff, 0.0 );
+    BOOST_CHECK_GT( solver.GetResult().Z0, 0.0 );
+    BOOST_CHECK_LT( solver.GetResult().Zdiff, 2.0 * solver.GetResult().Z0 );
+
+    // erEff should be close to er for stripline (no air)
+    BOOST_CHECK_CLOSE( solver.GetResult().erEff, er, 15.0 );
+}
+
+
+/**
+ * Zdiff symmetry: swapping the two conductors' x-positions should
+ * give identical Z0 and Zdiff (the pair is symmetric).
+ */
+BOOST_AUTO_TEST_CASE( ZdiffSymmetry )
+{
+    double w = 0.1e-3;
+    double s = 0.15e-3;
+    double t = 35e-6;
+    double h = 0.1e-3;
+    double er = 4.4;
+
+    auto makeGeom = [&]( bool swapped ) -> XS_GEOMETRY
+    {
+        XS_GEOMETRY geom;
+
+        double xLeft = -( s / 2.0 + w / 2.0 );
+        double xRight = ( s / 2.0 + w / 2.0 );
+
+        XS_CONDUCTOR c0;
+        c0.centerX = swapped ? xRight : xLeft;
+        c0.centerY = -( h + t / 2.0 );
+        c0.width = w;
+        c0.thickness = t;
+        geom.conductors.push_back( c0 );
+
+        XS_CONDUCTOR c1;
+        c1.centerX = swapped ? xLeft : xRight;
+        c1.centerY = -( h + t / 2.0 );
+        c1.width = w;
+        c1.thickness = t;
+        geom.conductors.push_back( c1 );
+
+        geom.groundY = 0.0;
+        geom.epsilonR = er;
+
+        XS_DIELECTRIC_REGION dielAbove, dielBelow;
+        dielAbove.yTop = -10e-3;
+        dielAbove.yBottom = -h;
+        dielAbove.epsilonR = 1.0;
+        dielBelow.yTop = -h;
+        dielBelow.yBottom = 0.0;
+        dielBelow.epsilonR = er;
+        geom.dielectrics.push_back( dielAbove );
+        geom.dielectrics.push_back( dielBelow );
+
+        return geom;
+    };
+
+    BEM_2D_SOLVER solverA;
+    solverA.SetGeometry( makeGeom( false ) );
+    solverA.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverA.Solve() );
+
+    BEM_2D_SOLVER solverB;
+    solverB.SetGeometry( makeGeom( true ) );
+    solverB.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverB.Solve() );
+
+    BOOST_TEST_MESSAGE( "Normal: Z0=" << solverA.GetResult().Z0
+                        << " Zdiff=" << solverA.GetResult().Zdiff );
+    BOOST_TEST_MESSAGE( "Swapped: Z0=" << solverB.GetResult().Z0
+                        << " Zdiff=" << solverB.GetResult().Zdiff );
+
+    BOOST_CHECK_CLOSE( solverA.GetResult().Zdiff, solverB.GetResult().Zdiff, 0.01 );
+    BOOST_CHECK_CLOSE( solverA.GetResult().Z0, solverB.GetResult().Z0, 0.01 );
+}
+
+
+/**
+ * Asymmetric diff pair: traces of different widths.
+ * Zdiff should still be computed, and Z0 should differ between the two conductors.
+ */
+BOOST_AUTO_TEST_CASE( AsymmetricDiffPair )
+{
+    double w1 = 0.1e-3;
+    double w2 = 0.15e-3;
+    double s = 0.15e-3;
+    double t = 35e-6;
+    double h = 0.1e-3;
+    double er = 4.4;
+
+    XS_GEOMETRY geom;
+
+    XS_CONDUCTOR c0;
+    c0.centerX = -( s / 2.0 + w1 / 2.0 );
+    c0.centerY = -( h + t / 2.0 );
+    c0.width = w1;
+    c0.thickness = t;
+    geom.conductors.push_back( c0 );
+
+    XS_CONDUCTOR c1;
+    c1.centerX = ( s / 2.0 + w2 / 2.0 );
+    c1.centerY = -( h + t / 2.0 );
+    c1.width = w2;
+    c1.thickness = t;
+    geom.conductors.push_back( c1 );
+
+    geom.groundY = 0.0;
+    geom.epsilonR = er;
+
+    XS_DIELECTRIC_REGION dielAbove, dielBelow;
+    dielAbove.yTop = -10e-3;
+    dielAbove.yBottom = -h;
+    dielAbove.epsilonR = 1.0;
+    dielBelow.yTop = -h;
+    dielBelow.yBottom = 0.0;
+    dielBelow.epsilonR = er;
+    geom.dielectrics.push_back( dielAbove );
+    geom.dielectrics.push_back( dielBelow );
+
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( geom );
+    solver.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver.Solve() );
+
+    BOOST_TEST_MESSAGE( "Asymmetric diff pair: Z0=" << solver.GetResult().Z0
+                        << " Zdiff=" << solver.GetResult().Zdiff );
+
+    // Zdiff should still be computed
+    BOOST_CHECK_GT( solver.GetResult().Zdiff, 0.0 );
+    BOOST_CHECK_LT( solver.GetResult().Zdiff, 2.0 * solver.GetResult().Z0 );
+
+    // C matrix should be asymmetric: C(0,0) != C(1,1) because widths differ
+    BOOST_CHECK_NE( solver.GetResult().C( 0, 0 ), solver.GetResult().C( 1, 1 ) );
+
+    // But mutual capacitance should still be symmetric
+    BOOST_CHECK_CLOSE( solver.GetResult().C( 0, 1 ), solver.GetResult().C( 1, 0 ), 0.1 );
 }
 
 

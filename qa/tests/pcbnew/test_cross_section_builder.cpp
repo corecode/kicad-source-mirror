@@ -1341,4 +1341,520 @@ BOOST_AUTO_TEST_CASE( RealBoardSDRAM_D5 )
 }
 
 
+// ============================================================================
+// Differential pair tests
+// ============================================================================
+
+/**
+ * FindDiffPairConductor: basic parallel partner detection.
+ * Two parallel horizontal traces on different nets.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairParallelDetected )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    addTrack( VECTOR2I( 0, 400000 ), VECTOR2I( 10000000, 400000 ),
+              150000, F_Cu, 2 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    params.coupledNetCode = 2;
+
+    auto dp = builder.FindDiffPairConductor( params );
+
+    BOOST_CHECK( dp.found );
+    BOOST_CHECK_CLOSE( (double) std::abs( dp.lateralNm ), 400000.0, 5.0 );
+    BOOST_CHECK_EQUAL( dp.widthNm, 150000 );
+
+    BOOST_TEST_MESSAGE( "DiffPair parallel: lateral=" << dp.lateralNm
+                        << "nm  width=" << dp.widthNm << "nm" );
+}
+
+
+/**
+ * FindDiffPairConductor: no coupled net specified — should return not found.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairNoCoupledNet )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    addTrack( VECTOR2I( 0, 400000 ), VECTOR2I( 10000000, 400000 ),
+              150000, F_Cu, 2 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    params.coupledNetCode = 0;
+
+    auto dp = builder.FindDiffPairConductor( params );
+
+    BOOST_CHECK( !dp.found );
+}
+
+
+/**
+ * FindDiffPairConductor: perpendicular partner.
+ * Signal goes right, partner goes up — the cut line (vertical) should still
+ * intersect the partner if it's close enough.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairPerpendicularPartner )
+{
+    // Signal: horizontal at y=0
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Partner: vertical, crossing through x=5mm, y from -1mm to 1mm.
+    // At sample x=5mm, the vertical cut line should intersect this.
+    addTrack( VECTOR2I( 5000000, -1000000 ), VECTOR2I( 5000000, 1000000 ),
+              150000, F_Cu, 2 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    params.coupledNetCode = 2;
+
+    auto dp = builder.FindDiffPairConductor( params );
+
+    // The perpendicular partner is right on the signal — lateral distance is ~0.
+    // Whether it's found depends on the MIN_EDGE_TO_EDGE check.
+    // With both at x=5mm, lateralDist ≈ 0 which is < MIN_EDGE_TO_EDGE → not found.
+    // This is correct: overlapping conductors should not be detected.
+    BOOST_TEST_MESSAGE( "Perpendicular partner: found=" << dp.found
+                        << " lateral=" << dp.lateralNm );
+}
+
+
+/**
+ * FindDiffPairConductor: perpendicular partner offset laterally.
+ * Signal goes right, partner goes up at 300µm offset from the sample point.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairPerpendicularOffset )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Partner: vertical at x=5mm, y=300µm (offset from signal).
+    // It runs from y=200µm to y=2mm.
+    addTrack( VECTOR2I( 5000000, 200000 ), VECTOR2I( 5000000, 2000000 ),
+              150000, F_Cu, 2 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    params.coupledNetCode = 2;
+
+    auto dp = builder.FindDiffPairConductor( params );
+
+    // The cut line at x=5mm is vertical (perpendicular to horizontal signal).
+    // The partner track is also vertical at x=5mm. The Collide test checks
+    // if the partner's stadium shape intersects the cut segment.
+    // Since they share x=5mm, the stadium (width 150µm) overlaps the cut line.
+    // The "nearest" point will be at the partner's start (closest to signal).
+    // Lateral distance = projection onto normal (0,1) = ~200µm.
+    BOOST_TEST_MESSAGE( "Perpendicular offset: found=" << dp.found
+                        << " lateral=" << dp.lateralNm );
+
+    if( dp.found )
+    {
+        BOOST_CHECK_GT( std::abs( dp.lateralNm ), 100000 ); // >100µm
+        BOOST_CHECK_LT( std::abs( dp.lateralNm ), 500000 ); // <500µm
+    }
+}
+
+
+/**
+ * FindDiffPairConductor: partner beyond coupling horizon — should not be found.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairOutOfRange )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Partner at 5mm away — beyond typical coupling horizon
+    addTrack( VECTOR2I( 0, 5000000 ), VECTOR2I( 10000000, 5000000 ),
+              150000, F_Cu, 2 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ),
+                              1000000 ); // 1mm coupling horizon
+    params.coupledNetCode = 2;
+
+    auto dp = builder.FindDiffPairConductor( params );
+
+    BOOST_CHECK( !dp.found );
+}
+
+
+/**
+ * FindDiffPairConductor: multiple coupled-net tracks, closest is picked.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairClosestPicked )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Two tracks on the coupled net at different distances
+    addTrack( VECTOR2I( 0, 300000 ), VECTOR2I( 10000000, 300000 ),
+              150000, F_Cu, 2 ); // closer
+
+    addTrack( VECTOR2I( 0, 800000 ), VECTOR2I( 10000000, 800000 ),
+              150000, F_Cu, 2 ); // farther
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    params.coupledNetCode = 2;
+
+    auto dp = builder.FindDiffPairConductor( params );
+
+    BOOST_CHECK( dp.found );
+    // Should pick the 300µm one, not the 800µm one
+    BOOST_CHECK_CLOSE( (double) std::abs( dp.lateralNm ), 300000.0, 10.0 );
+
+    BOOST_TEST_MESSAGE( "Closest picked: lateral=" << dp.lateralNm << "nm" );
+}
+
+
+/**
+ * BuildGeometry with diff pair: partner placed as conductors[1],
+ * duplicate neighbor removed.
+ */
+BOOST_AUTO_TEST_CASE( BuildGeometryDiffPair )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Coupled net track (will appear as both neighbor and diff pair candidate)
+    addTrack( VECTOR2I( 0, 400000 ), VECTOR2I( 10000000, 400000 ),
+              150000, F_Cu, 2 );
+
+    // Third-party neighbor on net 3
+    addTrack( VECTOR2I( 0, -600000 ), VECTOR2I( 10000000, -600000 ),
+              150000, F_Cu, 3 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    params.coupledNetCode = 2;
+
+    auto neighbors = builder.FindNeighbors( params );
+    auto dpCond = builder.FindDiffPairConductor( params );
+
+    BOOST_REQUIRE( dpCond.found );
+
+    // Build geometry with diff pair
+    auto xs = builder.BuildGeometry( params, neighbors, {}, &dpCond );
+
+    // conductors[0] = signal at x=0
+    // conductors[1] = diff pair partner (must be before regular neighbors)
+    // conductors[2] = the other neighbor on net 3
+    // The partner should NOT appear twice (deduplicated from neighbors)
+    BOOST_TEST_MESSAGE( "Conductor count: " << xs.conductors.size() );
+
+    for( size_t i = 0; i < xs.conductors.size(); i++ )
+    {
+        BOOST_TEST_MESSAGE( "  [" << i << "] x=" << xs.conductors[i].centerX * 1e6
+                            << "µm  ground=" << xs.conductors[i].isGround );
+    }
+
+    BOOST_REQUIRE_GE( xs.conductors.size(), 3 ); // signal + partner + other neighbor
+
+    // Signal at x=0
+    BOOST_CHECK_CLOSE( xs.conductors[0].centerX, 0.0, 0.1 );
+    BOOST_CHECK( !xs.conductors[0].isGround );
+
+    // Diff pair partner at conductors[1] — at ~400µm
+    BOOST_CHECK_CLOSE( std::abs( xs.conductors[1].centerX ), 400e-6, 5.0 );
+    BOOST_CHECK( !xs.conductors[1].isGround );
+
+    // No duplicate: the partner should not appear again
+    int countAt400um = 0;
+
+    for( const auto& c : xs.conductors )
+    {
+        if( std::abs( std::abs( c.centerX ) - 400e-6 ) < 50e-6 )
+            countAt400um++;
+    }
+
+    BOOST_CHECK_EQUAL( countAt400um, 1 );
+}
+
+
+/**
+ * BuildGeometry without diff pair: same net 2 track appears as a regular neighbor.
+ * Verifies backward compatibility.
+ */
+BOOST_AUTO_TEST_CASE( BuildGeometryNoDiffPair )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    addTrack( VECTOR2I( 0, 400000 ), VECTOR2I( 10000000, 400000 ),
+              150000, F_Cu, 2 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    // coupledNetCode stays 0 — no diff pair
+
+    auto neighbors = builder.FindNeighbors( params );
+    auto xs = builder.BuildGeometry( params, neighbors );
+
+    BOOST_REQUIRE_GE( xs.conductors.size(), 2 ); // signal + neighbor
+
+    // Signal at x=0
+    BOOST_CHECK_CLOSE( xs.conductors[0].centerX, 0.0, 0.1 );
+
+    // Net 2 track is a plain neighbor at conductors[1]
+    BOOST_CHECK_CLOSE( std::abs( xs.conductors[1].centerX ), 400e-6, 5.0 );
+}
+
+
+/**
+ * Full diff pair pipeline: FindDiffPairConductor + BuildGeometry + BEM solve.
+ * Verify that Zdiff is computed and has a reasonable value.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairEndToEnd )
+{
+    // 150µm traces, 250µm gap (edge-to-edge), on F_Cu
+    int trW = 150000;
+    int gap = 250000;
+    int centerSep = gap + trW; // 400µm center-to-center
+
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               trW, F_Cu, 1 );
+
+    addTrack( VECTOR2I( 0, centerSep ), VECTOR2I( 10000000, centerSep ),
+              trW, F_Cu, 2 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    params.coupledNetCode = 2;
+
+    auto neighbors = builder.FindNeighbors( params );
+    auto dpCond = builder.FindDiffPairConductor( params );
+    BOOST_REQUIRE( dpCond.found );
+
+    auto xs = builder.BuildGeometry( params, neighbors, {}, &dpCond );
+
+    // Solve with BEM
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( xs );
+    solver.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver.Solve() );
+
+    const RLGC_RESULT& result = solver.GetResult();
+
+    BOOST_TEST_MESSAGE( "DiffPair end-to-end:" );
+    BOOST_TEST_MESSAGE( "  Z0 = " << result.Z0 << " Ohm" );
+    BOOST_TEST_MESSAGE( "  Zdiff = " << result.Zdiff << " Ohm" );
+    BOOST_TEST_MESSAGE( "  erEff = " << result.erEff );
+
+    // Zdiff should be positive and reasonable
+    BOOST_CHECK_GT( result.Zdiff, 50.0 );
+    BOOST_CHECK_LT( result.Zdiff, 200.0 );
+
+    // Zdiff < 2*Z0 (coupling reduces Zdiff)
+    BOOST_CHECK_LT( result.Zdiff, 2.0 * result.Z0 );
+
+    // C matrix should be 2x2 (signal + diff pair partner)
+    // with negative off-diagonal (mutual capacitance)
+    BOOST_CHECK_EQUAL( result.C.rows(), 2 );
+    BOOST_CHECK_LT( result.C( 0, 1 ), 0.0 );
+}
+
+
+/**
+ * Diff pair with additional neighbor: Zdiff should still be valid.
+ * Adding a third conductor near the pair should change Zdiff slightly.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairWithNeighbor )
+{
+    int trW = 150000;
+    int gap = 250000;
+    int centerSep = gap + trW;
+
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               trW, F_Cu, 1 );
+
+    addTrack( VECTOR2I( 0, centerSep ), VECTOR2I( 10000000, centerSep ),
+              trW, F_Cu, 2 ); // diff pair partner
+
+    addTrack( VECTOR2I( 0, -500000 ), VECTOR2I( 10000000, -500000 ),
+              150000, F_Cu, 3 ); // unrelated neighbor
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    params.coupledNetCode = 2;
+
+    auto neighbors = builder.FindNeighbors( params );
+    auto dpCond = builder.FindDiffPairConductor( params );
+    BOOST_REQUIRE( dpCond.found );
+
+    auto xs = builder.BuildGeometry( params, neighbors, {}, &dpCond );
+
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( xs );
+    solver.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver.Solve() );
+
+    // Zdiff should be valid even with 3 signal conductors
+    BOOST_CHECK_GT( solver.GetResult().Zdiff, 50.0 );
+    BOOST_CHECK_LT( solver.GetResult().Zdiff, 200.0 );
+
+    // The 3x3 matrix should have the diff pair coupling in C(0,1)
+    BOOST_CHECK_EQUAL( solver.GetResult().C.rows(), 3 );
+    BOOST_CHECK_LT( solver.GetResult().C( 0, 1 ), 0.0 );
+
+    BOOST_TEST_MESSAGE( "DiffPair with neighbor: Zdiff="
+                        << solver.GetResult().Zdiff << " Z0="
+                        << solver.GetResult().Z0 );
+}
+
+
+/**
+ * Diff pair sign convention: selecting P or N should give the same Zdiff.
+ * Walk from net 1 → net 2 is diff pair partner, and vice versa.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairSymmetry )
+{
+    int trW = 150000;
+    int centerSep = 400000;
+
+    PCB_TRACK* trP = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                                trW, F_Cu, 1 );
+
+    PCB_TRACK* trN = addTrack( VECTOR2I( 0, centerSep ), VECTOR2I( 10000000, centerSep ),
+                                trW, F_Cu, 2 );
+
+    // Analyze from P side
+    auto builderP = makeBuilder( trP );
+    auto paramsP = makeParams( trP, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+    paramsP.coupledNetCode = 2;
+
+    auto neighborsP = builderP.FindNeighbors( paramsP );
+    auto dpP = builderP.FindDiffPairConductor( paramsP );
+    BOOST_REQUIRE( dpP.found );
+
+    auto xsP = builderP.BuildGeometry( paramsP, neighborsP, {}, &dpP );
+
+    BEM_2D_SOLVER solverP;
+    solverP.SetGeometry( xsP );
+    solverP.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverP.Solve() );
+
+    // Analyze from N side
+    auto builderN = makeBuilder( trN );
+    auto paramsN = makeParams( trN, VECTOR2I( 5000000, centerSep ), VECTOR2D( 1.0, 0.0 ) );
+    paramsN.coupledNetCode = 1;
+
+    auto neighborsN = builderN.FindNeighbors( paramsN );
+    auto dpN = builderN.FindDiffPairConductor( paramsN );
+    BOOST_REQUIRE( dpN.found );
+
+    auto xsN = builderN.BuildGeometry( paramsN, neighborsN, {}, &dpN );
+
+    BEM_2D_SOLVER solverN;
+    solverN.SetGeometry( xsN );
+    solverN.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverN.Solve() );
+
+    BOOST_TEST_MESSAGE( "From P: Zdiff=" << solverP.GetResult().Zdiff
+                        << " Z0=" << solverP.GetResult().Z0 );
+    BOOST_TEST_MESSAGE( "From N: Zdiff=" << solverN.GetResult().Zdiff
+                        << " Z0=" << solverN.GetResult().Z0 );
+
+    // Zdiff must be identical regardless of which side we analyze from
+    BOOST_CHECK_CLOSE( solverP.GetResult().Zdiff, solverN.GetResult().Zdiff, 0.1 );
+    BOOST_CHECK_CLOSE( solverP.GetResult().Z0, solverN.GetResult().Z0, 0.1 );
+}
+
+
+/**
+ * Diff pair gap sweep: tighter gap → lower Zdiff, wider gap → Zdiff approaches 2×Z0.
+ * End-to-end through FindDiffPairConductor + BuildGeometry + BEM.
+ */
+BOOST_AUTO_TEST_CASE( DiffPairGapSweep )
+{
+    int trW = 150000;
+
+    double prevZdiff = 0.0;
+
+    for( int gapNm : { 100000, 200000, 400000, 800000 } )
+    {
+        // Fresh board per iteration (tracks at different spacings)
+        auto board = std::make_unique<BOARD>();
+        auto rtree = std::make_unique<DRC_RTREE>();
+
+        for( int i = 1; i <= 3; i++ )
+        {
+            board->Add( new NETINFO_ITEM( board.get(),
+                                           wxString::Format( wxS( "Net%d" ), i ), i ) );
+        }
+
+        int centerSep = gapNm + trW;
+
+        PCB_TRACK* sig = new PCB_TRACK( board.get() );
+        sig->SetStart( VECTOR2I( 0, 0 ) );
+        sig->SetEnd( VECTOR2I( 10000000, 0 ) );
+        sig->SetWidth( trW );
+        sig->SetLayer( F_Cu );
+        sig->SetNet( board->GetNetInfo().GetNetItem( 1 ) );
+        board->Add( sig );
+        rtree->Insert( sig, F_Cu );
+
+        PCB_TRACK* partner = new PCB_TRACK( board.get() );
+        partner->SetStart( VECTOR2I( 0, centerSep ) );
+        partner->SetEnd( VECTOR2I( 10000000, centerSep ) );
+        partner->SetWidth( trW );
+        partner->SetLayer( F_Cu );
+        partner->SetNet( board->GetNetInfo().GetNetItem( 2 ) );
+        board->Add( partner );
+        rtree->Insert( partner, F_Cu );
+
+        CROSS_SECTION_BUILDER builder;
+        builder.SetSpatialIndex( rtree.get() );
+        builder.SetBoard( board.get() );
+        builder.SetSignalTrack( sig );
+
+        XS_BUILD_PARAMS params;
+        params.samplePos = VECTOR2I( 5000000, 0 );
+        params.sampleTangent = VECTOR2D( 1.0, 0.0 );
+        params.signalLayer = F_Cu;
+        params.signalNetCode = 1;
+        params.signalWidth = trW;
+        params.couplingHorizon = 1500000;
+        params.coupledNetCode = 2;
+        params.layerGeom.traceWidth = trW * 1e-9;
+        params.layerGeom.traceThickness = 35e-6;
+        params.layerGeom.hBelow = 0.1e-3;
+        params.layerGeom.erBelow = 4.4;
+        params.layerGeom.hasRefBelow = true;
+
+        auto neighbors = builder.FindNeighbors( params );
+        auto dpCond = builder.FindDiffPairConductor( params );
+        BOOST_REQUIRE( dpCond.found );
+
+        auto xs = builder.BuildGeometry( params, neighbors, {}, &dpCond );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double zdiff = solver.GetResult().Zdiff;
+        double z0 = solver.GetResult().Z0;
+
+        BOOST_TEST_MESSAGE( "gap=" << gapNm / 1000 << "µm  Zdiff=" << zdiff
+                            << "  Z0=" << z0
+                            << "  ratio=" << zdiff / ( 2.0 * z0 ) );
+
+        BOOST_CHECK_GT( zdiff, 0.0 );
+        BOOST_CHECK_LT( zdiff, 2.0 * z0 + 1.0 ); // allow small tolerance
+
+        // Zdiff should increase monotonically with gap
+        if( prevZdiff > 0.0 )
+            BOOST_CHECK_GT( zdiff, prevZdiff );
+
+        prevZdiff = zdiff;
+    }
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

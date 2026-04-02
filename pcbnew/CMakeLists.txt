@@ -432,6 +432,7 @@ set( PCBNEW_CLASS_SRCS
     sipi/analytical_impedance.cpp
     sipi/bem_2d_solver.cpp
     sipi/cross_section_builder.cpp
+    sipi/impedance_profile.cpp
     sipi/stackup_reader.cpp
     sipi/trace_path_walker.cpp
 
