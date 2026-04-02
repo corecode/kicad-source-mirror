@@ -44,6 +44,55 @@ static constexpr double C_LIGHT_M_S = 299792458.0;
 
 
 // ============================================================================
+// Tangent blending at bend vertices
+// ============================================================================
+
+struct TANGENT_BOUNDARY
+{
+    double   dist;           // Path distance at the bend vertex (nm)
+    VECTOR2D tangentBefore;  // Incoming segment tangent (unit)
+    VECTOR2D tangentAfter;   // Outgoing segment tangent (unit)
+    double   blendRadius;    // Transition half-width (nm)
+};
+
+
+static VECTOR2D blendTangent( double aSampleDist, const VECTOR2D& aDefaultTangent,
+                              const std::vector<TANGENT_BOUNDARY>& aBoundaries )
+{
+    const TANGENT_BOUNDARY* nearest = nullptr;
+    double                  nearestAbsDist = std::numeric_limits<double>::max();
+
+    for( const TANGENT_BOUNDARY& bnd : aBoundaries )
+    {
+        double absDist = std::abs( aSampleDist - bnd.dist );
+
+        if( absDist < bnd.blendRadius && absDist < nearestAbsDist )
+        {
+            nearestAbsDist = absDist;
+            nearest = &bnd;
+        }
+    }
+
+    if( !nearest )
+        return aDefaultTangent;
+
+    double d = aSampleDist - nearest->dist;
+    double t = std::clamp( ( d + nearest->blendRadius ) / ( 2.0 * nearest->blendRadius ), 0.0,
+                           1.0 );
+
+    VECTOR2D blended( ( 1.0 - t ) * nearest->tangentBefore.x + t * nearest->tangentAfter.x,
+                      ( 1.0 - t ) * nearest->tangentBefore.y + t * nearest->tangentAfter.y );
+
+    double len = blended.EuclideanNorm();
+
+    if( len < 1e-12 )
+        return aDefaultTangent;
+
+    return blended / len;
+}
+
+
+// ============================================================================
 // SE_PROFILE
 // ============================================================================
 
@@ -180,6 +229,63 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode,
         return false;
     }
 
+    // Detect bend vertices where the tangent changes direction.
+    // Build a list of tangent boundaries for smooth blending.
+    std::vector<TANGENT_BOUNDARY> tangentBoundaries;
+
+    for( int i = 0; i + 1 < (int) segs.size(); i++ )
+    {
+        if( segs[i].track == segs[i + 1].track )
+            continue;
+
+        double dot = segs[i].tangent.x * segs[i + 1].tangent.x
+                     + segs[i].tangent.y * segs[i + 1].tangent.y;
+
+        if( dot > 0.9999 )
+            continue;
+
+        TANGENT_BOUNDARY bnd;
+        bnd.dist = segs[i + 1].dist;
+        bnd.tangentBefore = segs[i].tangent;
+        bnd.tangentAfter = segs[i + 1].tangent;
+
+        // Compute adjacent segment lengths for blend radius clamping
+        double segLenBefore = 0.0;
+
+        for( int j = i; j >= 0; j-- )
+        {
+            if( segs[j].track == segs[i].track )
+                segLenBefore = segs[i].dist - segs[j].dist;
+            else
+                break;
+        }
+
+        double segLenAfter = 0.0;
+
+        for( int j = i + 1; j < (int) segs.size(); j++ )
+        {
+            if( segs[j].track == segs[i + 1].track )
+                segLenAfter = segs[j].dist - segs[i + 1].dist;
+            else
+                break;
+        }
+
+        double traceWidth = std::max( segs[i].track->GetWidth(),
+                                      segs[i + 1].track->GetWidth() );
+        bnd.blendRadius = 1.0 * traceWidth;
+
+        if( segLenBefore > 0.0 )
+            bnd.blendRadius = std::min( bnd.blendRadius, segLenBefore / 2.0 );
+
+        if( segLenAfter > 0.0 )
+            bnd.blendRadius = std::min( bnd.blendRadius, segLenAfter / 2.0 );
+
+        if( bnd.blendRadius < 1000.0 )
+            continue;
+
+        tangentBoundaries.push_back( bnd );
+    }
+
     // Map path items → path distance for topological neighbor exclusion
     std::map<BOARD_CONNECTED_ITEM*, double> pathItemDist;
 
@@ -224,7 +330,8 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode,
             }
         }
 
-        VECTOR2D   sampleTangent = seg.tangent;
+        VECTOR2D   sampleTangent = blendTangent( sampleDist, seg.tangent,
+                                                    tangentBoundaries );
         PCB_TRACK* track = seg.track;
         int        signalWidth = track->GetWidth();
 
@@ -492,8 +599,14 @@ bool DIFF_PROFILE::Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN )
         return false;
     }
 
-    // Walk N (SE only) for skew and Z0_N fallback
-    if( !m_profileN.Compute( aBoard, aNetCodeN, VECTOR2I( 0, 0 ), &rtree ) )
+    // Walk N from the same physical end as P so distance axes align.
+    // Also pass P as coupled net so N sees the same neighbor environment.
+    VECTOR2I nFrom( 0, 0 );
+
+    if( m_profileP.GetStartPad() )
+        nFrom = m_profileP.GetStartPad()->GetPosition();
+
+    if( !m_profileN.Compute( aBoard, aNetCodeN, nFrom, &rtree, aNetCodeP ) )
     {
         m_error = wxS( "N: " ) + m_profileN.GetError();
         return false;
@@ -512,6 +625,107 @@ void DIFF_PROFILE::buildFromProfiles()
     const auto& pSamples = m_profileP.GetSamples();
     const auto& nSamples = m_profileN.GetSamples();
 
+    if( pSamples.empty() || nSamples.empty() )
+        return;
+
+    // Build anchor points at coupled samples where we know the exact P↔N
+    // correspondence.  At coupled points the traces are close and parallel,
+    // so board-position proximity reliably finds the matching N sample.
+    // Between coupled regions (pad fan-out, via transitions, serpentine
+    // offsets) we interpolate the path-distance offset from anchors.
+    struct ANCHOR
+    {
+        double pDist;   // P path distance (nm)
+        double nDist;   // Corresponding N path distance (nm)
+    };
+
+    std::vector<ANCHOR> anchors;
+
+    for( const IMPEDANCE_SAMPLE& sp : pSamples )
+    {
+        if( !sp.isDiffPair )
+            continue;
+
+        double bestBoardDist = 1e18;
+        double bestNDist = sp.distNm;
+
+        for( const IMPEDANCE_SAMPLE& sn : nSamples )
+        {
+            double d = VECTOR2D( sp.boardPos - sn.boardPos ).EuclideanNorm();
+
+            if( d < bestBoardDist )
+            {
+                bestBoardDist = d;
+                bestNDist = sn.distNm;
+            }
+        }
+
+        anchors.push_back( { sp.distNm, bestNDist } );
+    }
+
+    // Helper: interpolate N path distance for a given P path distance
+    // using the anchor points.  Extrapolates with nearest anchor's offset.
+    auto interpNDist = [&]( double aPDist ) -> double
+    {
+        if( anchors.empty() )
+            return aPDist;  // no coupled points — assume 1:1
+
+        if( aPDist <= anchors.front().pDist )
+        {
+            // Before first anchor — use first anchor's offset
+            return aPDist + ( anchors.front().nDist - anchors.front().pDist );
+        }
+
+        if( aPDist >= anchors.back().pDist )
+        {
+            // After last anchor — use last anchor's offset
+            return aPDist + ( anchors.back().nDist - anchors.back().pDist );
+        }
+
+        // Between anchors — binary search then lerp
+        auto it = std::lower_bound( anchors.begin(), anchors.end(), aPDist,
+                                    []( const ANCHOR& a, double d )
+                                    { return a.pDist < d; } );
+
+        if( it == anchors.begin() )
+            return aPDist + ( it->nDist - it->pDist );
+
+        const ANCHOR& hi = *it;
+        const ANCHOR& lo = *std::prev( it );
+        double frac = ( aPDist - lo.pDist ) / ( hi.pDist - lo.pDist );
+
+        double loOffset = lo.nDist - lo.pDist;
+        double hiOffset = hi.nDist - hi.pDist;
+
+        return aPDist + loOffset + frac * ( hiOffset - loOffset );
+    };
+
+    // Helper: look up Z0 on N at an arbitrary path distance by linear
+    // interpolation between surrounding N samples.
+    auto lookupN = [&]( double aNDist ) -> double
+    {
+        auto it = std::lower_bound( nSamples.begin(), nSamples.end(), aNDist,
+                                    []( const IMPEDANCE_SAMPLE& s, double d )
+                                    { return s.distNm < d; } );
+
+        if( it == nSamples.begin() )
+            return it->z0;
+
+        if( it == nSamples.end() )
+            return nSamples.back().z0;
+
+        const IMPEDANCE_SAMPLE& hi = *it;
+        const IMPEDANCE_SAMPLE& lo = *std::prev( it );
+        double span = hi.distNm - lo.distNm;
+
+        if( span < 1.0 )
+            return lo.z0;
+
+        double frac = ( aNDist - lo.distNm ) / span;
+        return lo.z0 + frac * ( hi.z0 - lo.z0 );
+    };
+
+    // Build diff samples
     for( const IMPEDANCE_SAMPLE& sp : pSamples )
     {
         DIFF_SAMPLE ds;
@@ -523,34 +737,18 @@ void DIFF_PROFILE::buildFromProfiles()
 
         if( sp.isDiffPair )
         {
-            // Coupled: Zdiff already computed by BEM in SE_PROFILE
             ds.coupled = true;
             ds.zdiff = sp.zdiff;
             ds.erEffOdd = sp.erEffOdd;
             ds.gapUm = sp.dpGapUm;
         }
 
-        // Look up Z0_N from the nearest N sample by board distance
-        double bestDist = 1e18;
-        double z0N = sp.z0; // fallback: assume symmetric
-
-        for( const IMPEDANCE_SAMPLE& sn : nSamples )
-        {
-            double d = VECTOR2D( sp.boardPos - sn.boardPos ).EuclideanNorm();
-
-            if( d < bestDist )
-            {
-                bestDist = d;
-                z0N = sn.z0;
-            }
-        }
-
-        ds.z0N = z0N;
+        double nDist = interpNDist( sp.distNm );
+        ds.z0N = lookupN( nDist );
 
         if( !ds.coupled )
         {
-            // Uncoupled: Zdiff = Z0_P + Z0_N
-            ds.zdiff = sp.z0 + z0N;
+            ds.zdiff = sp.z0 + ds.z0N;
             ds.erEffOdd = sp.erEff;
         }
 

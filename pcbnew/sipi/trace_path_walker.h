@@ -164,6 +164,12 @@ private:
                                 std::optional<PATH_JUNCTION>& aJunction );
 
     /**
+     * Reverse the walked path so that the start and end terminals swap.
+     * Flips tangent vectors and re-numbers cumulative distances.
+     */
+    void reversePath();
+
+    /**
      * Get the "other" endpoint of a track segment given one endpoint.
      * For vias, both endpoints are the same (the via position).
      */

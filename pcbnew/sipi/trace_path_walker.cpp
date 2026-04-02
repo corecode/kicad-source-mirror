@@ -261,7 +261,41 @@ bool TRACE_PATH_WALKER::WalkNet( int aNetCode, const VECTOR2I& aFrom )
     if( !bestTrack )
         return false;
 
-    return Walk( bestTrack );
+    if( !Walk( bestTrack ) )
+        return false;
+
+    // Normalize direction: ensure path start is the terminal closest to aFrom.
+    if( m_path.size() >= 2 )
+    {
+        double startDist = VECTOR2D( m_path.front().position - aFrom ).EuclideanNorm();
+        double endDist = VECTOR2D( m_path.back().position - aFrom ).EuclideanNorm();
+
+        if( endDist < startDist )
+            reversePath();
+    }
+
+    return true;
+}
+
+
+void TRACE_PATH_WALKER::reversePath()
+{
+    if( m_path.empty() )
+        return;
+
+    double totalLen = m_path.back().distFromStart;
+
+    std::reverse( m_path.begin(), m_path.end() );
+
+    for( auto& pt : m_path )
+    {
+        pt.distFromStart = totalLen - pt.distFromStart;
+        pt.tangent = -pt.tangent;
+    }
+
+    std::swap( m_startPad, m_endPad );
+    std::swap( m_result.startTerminus, m_result.endTerminus );
+    std::swap( m_result.startJunction, m_result.endJunction );
 }
 
 
