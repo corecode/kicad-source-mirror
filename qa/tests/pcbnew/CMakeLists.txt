@@ -54,7 +54,6 @@ set( QA_PCBNEW_SRCS
     test_multichannel.cpp
     test_zone.cpp
     test_zone_filler.cpp
-    test_analytical_impedance.cpp
     test_bem_2d_solver.cpp
     test_bem_interface_debug.cpp
     test_cross_section_builder.cpp

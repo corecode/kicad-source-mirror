@@ -429,7 +429,6 @@ set( PCBNEW_CLASS_SRCS
     widgets/pcb_net_inspector_panel.cpp
     widgets/impedance_profiler_panel.cpp
 
-    sipi/analytical_impedance.cpp
     sipi/bem_2d_solver.cpp
     sipi/cross_section_builder.cpp
     sipi/impedance_profile.cpp

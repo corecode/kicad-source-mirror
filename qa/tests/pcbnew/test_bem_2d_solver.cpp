@@ -24,7 +24,6 @@
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
 #include <sipi/bem_2d_solver.h>
-#include <sipi/analytical_impedance.h>
 
 #include <cmath>
 
@@ -91,12 +90,8 @@ BOOST_AUTO_TEST_CASE( MicrostripVsAnalytical )
     const RLGC_RESULT& result = solver.GetResult();
 
     double bemZ0 = result.Z0;
-    double analyticalZ0 = ANALYTICAL_IMPEDANCE::MicrostripZ0( w, h, er, t );
 
     BOOST_TEST_MESSAGE( "Microstrip BEM Z0 = " << bemZ0 << " Ohm" );
-    BOOST_TEST_MESSAGE( "Microstrip analytical Z0 = " << analyticalZ0 << " Ohm" );
-    BOOST_TEST_MESSAGE( "Difference: " << std::abs( bemZ0 - analyticalZ0 ) / analyticalZ0 * 100.0
-                        << "%" );
     BOOST_TEST_MESSAGE( "er_eff = " << result.erEff );
 
     BOOST_CHECK_GT( result.erEff, 1.0 );

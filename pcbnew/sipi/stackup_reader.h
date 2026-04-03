@@ -110,14 +110,6 @@ public:
     LAYER_GEOMETRY GetLayerGeometry( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition,
                                     int aTraceWidth );
 
-    /**
-     * Compute Z₀ for the given layer geometry using analytical formulas.
-     * Automatically selects microstrip or stripline based on reference planes.
-     *
-     * @return Impedance in Ohms, or 0 if geometry is invalid
-     */
-    static double ComputeZ0( const LAYER_GEOMETRY& aGeom );
-
 private:
     struct COPPER_LAYER_INFO
     {

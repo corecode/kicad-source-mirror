@@ -1129,8 +1129,6 @@ BOOST_AUTO_TEST_CASE( RealBoardSDRAM )
 
         if( bemOk && solver.GetResult().Z0 > 0.0 )
             z0 = solver.GetResult().Z0;
-        else
-            z0 = STACKUP_READER::ComputeZ0( geom );
 
         BOOST_TEST_MESSAGE( "d=" << d / 1e6 << "mm pos=(" << pos.x / 1e6 << ","
                             << pos.y / 1e6 << ") t=(" << segs[diagSegIdx].tangent.x
@@ -1296,8 +1294,6 @@ BOOST_AUTO_TEST_CASE( RealBoardSDRAM_D5 )
 
         if( bemOk && solver.GetResult().Z0 > 0.0 )
             z0 = solver.GetResult().Z0;
-        else
-            z0 = STACKUP_READER::ComputeZ0( geom );
 
         // Flag spikes > 3Ω
         bool spike = ( prevZ0 > 0 && std::abs( z0 - prevZ0 ) > 3.0 );

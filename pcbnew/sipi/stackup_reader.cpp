@@ -22,7 +22,6 @@
  */
 
 #include "stackup_reader.h"
-#include "analytical_impedance.h"
 
 #include <board.h>
 #include <board_design_settings.h>
@@ -334,44 +333,3 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
 }
 
 
-double STACKUP_READER::ComputeZ0( const LAYER_GEOMETRY& aGeom )
-{
-    if( aGeom.traceWidth <= 0.0 )
-        return 0.0;
-
-    bool hasAbove = ( aGeom.hAbove > 0.0 );
-    bool hasBelow = ( aGeom.hBelow > 0.0 );
-
-    if( hasAbove && hasBelow )
-    {
-        // Stripline (two reference planes)
-        if( std::abs( aGeom.hAbove - aGeom.hBelow ) < 0.01e-3
-            && std::abs( aGeom.erAbove - aGeom.erBelow ) < 0.1 )
-        {
-            // Symmetric stripline
-            return ANALYTICAL_IMPEDANCE::StriplineZ0( aGeom.traceWidth, aGeom.hAbove,
-                                                      aGeom.erAbove, aGeom.traceThickness );
-        }
-        else
-        {
-            // Asymmetric stripline
-            return ANALYTICAL_IMPEDANCE::AsymmetricStriplineZ0(
-                    aGeom.traceWidth, aGeom.hAbove, aGeom.hBelow,
-                    aGeom.erAbove, aGeom.erBelow, aGeom.traceThickness );
-        }
-    }
-    else if( hasBelow )
-    {
-        // Microstrip (trace on top, ground below)
-        return ANALYTICAL_IMPEDANCE::MicrostripZ0( aGeom.traceWidth, aGeom.hBelow,
-                                                   aGeom.erBelow, aGeom.traceThickness );
-    }
-    else if( hasAbove )
-    {
-        // Inverted microstrip (trace on bottom, ground above)
-        return ANALYTICAL_IMPEDANCE::MicrostripZ0( aGeom.traceWidth, aGeom.hAbove,
-                                                   aGeom.erAbove, aGeom.traceThickness );
-    }
-
-    return 0.0; // No reference plane found
-}
