@@ -125,7 +125,7 @@ static void buildRtree( const BOARD* aBoard, DRC_RTREE& aRtree )
 }
 
 
-bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode,
+bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
                            const VECTOR2I& aFrom, DRC_RTREE* aRtree,
                            int aCoupledNetCode )
 {
@@ -167,27 +167,7 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode,
 
     STACKUP_READER stackup( aBoard );
 
-    // Cache keyed on quantized cross-section to avoid redundant BEM solves.
-    struct XS_KEY
-    {
-        PCB_LAYER_ID       layer;
-        int                width;
-        bool               refAbove;
-        bool               refBelow;
-        std::vector<int>   neighborKeys;
-
-        bool operator<( const XS_KEY& o ) const
-        {
-            if( layer != o.layer ) return layer < o.layer;
-            if( width != o.width ) return width < o.width;
-            if( refAbove != o.refAbove ) return refAbove < o.refAbove;
-            if( refBelow != o.refBelow ) return refBelow < o.refBelow;
-            return neighborKeys < o.neighborKeys;
-        }
-    };
-
-    struct XS_CACHED { double z0; double erEff; double zdiff; double erEffOdd; };
-    std::map<XS_KEY, XS_CACHED> cache;
+    BEM_CACHE& cache = aCache;
 
     // Sample at uniform distance intervals along the path
     double totalLen = walker.GetTotalLength(); // nm
@@ -415,7 +395,7 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode,
                                                                      : nullptr );
 
         // Build cache key
-        XS_KEY key;
+        BEM_CACHE::KEY key;
         key.layer = track->GetLayer();
         key.width = signalWidth;
         key.refAbove = geom.hasRefAbove;
@@ -444,14 +424,15 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode,
         double erEff = 1.0;
         double zdiff = 0.0;
         double erEffOdd = 0.0;
-        auto cacheIt = cache.find( key );
 
-        if( cacheIt != cache.end() )
+        const BEM_CACHE::VALUE* cached = cache.Find( key );
+
+        if( cached )
         {
-            z0 = cacheIt->second.z0;
-            erEff = cacheIt->second.erEff;
-            zdiff = cacheIt->second.zdiff;
-            erEffOdd = cacheIt->second.erEffOdd;
+            z0 = cached->z0;
+            erEff = cached->erEff;
+            zdiff = cached->zdiff;
+            erEffOdd = cached->erEffOdd;
         }
         else
         {
@@ -467,7 +448,7 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode,
                 erEffOdd = solver.GetResult().erEffOdd;
             }
 
-            cache[key] = { z0, erEff, zdiff, erEffOdd };
+            cache.Insert( key, { z0, erEff, zdiff, erEffOdd } );
         }
 
         // Accumulate propagation delay
@@ -576,7 +557,8 @@ IMPEDANCE_SAMPLE SE_PROFILE::AtDelay( double aDelayPs ) const
 DIFF_PROFILE::DIFF_PROFILE() = default;
 
 
-bool DIFF_PROFILE::Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN )
+bool DIFF_PROFILE::Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN,
+                             BEM_CACHE& aCache )
 {
     m_diffSamples.clear();
     m_skewPs = 0.0;
@@ -593,7 +575,8 @@ bool DIFF_PROFILE::Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN )
     buildRtree( aBoard, rtree );
 
     // Walk P with diff-pair detection (finds N geometrically on the cut line)
-    if( !m_profileP.Compute( aBoard, aNetCodeP, VECTOR2I( 0, 0 ), &rtree, aNetCodeN ) )
+    if( !m_profileP.Compute( aBoard, aNetCodeP, aCache, VECTOR2I( 0, 0 ), &rtree,
+                             aNetCodeN ) )
     {
         m_error = wxS( "P: " ) + m_profileP.GetError();
         return false;
@@ -606,7 +589,7 @@ bool DIFF_PROFILE::Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN )
     if( m_profileP.GetStartPad() )
         nFrom = m_profileP.GetStartPad()->GetPosition();
 
-    if( !m_profileN.Compute( aBoard, aNetCodeN, nFrom, &rtree, aNetCodeP ) )
+    if( !m_profileN.Compute( aBoard, aNetCodeN, aCache, nFrom, &rtree, aNetCodeP ) )
     {
         m_error = wxS( "N: " ) + m_profileN.GetError();
         return false;

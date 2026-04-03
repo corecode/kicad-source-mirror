@@ -29,6 +29,8 @@
 #include <layer_ids.h>
 #include <math/vector2d.h>
 
+#include <list>
+#include <map>
 #include <vector>
 
 #include <wx/string.h>
@@ -36,6 +38,98 @@
 class BOARD;
 class DRC_RTREE;
 class PAD;
+
+
+/**
+ * Size-limited cache for BEM cross-section results.
+ *
+ * Keyed on quantized cross-section geometry so that identical geometries
+ * (same layer, width, reference planes, neighbor configuration) reuse
+ * a previous BEM solve.  Shared across multiple Compute() calls to avoid
+ * redundant solves when re-analyzing or profiling several nets.
+ */
+class BEM_CACHE
+{
+public:
+    struct KEY
+    {
+        PCB_LAYER_ID     layer;
+        int              width;
+        bool             refAbove;
+        bool             refBelow;
+        std::vector<int> neighborKeys;
+
+        bool operator<( const KEY& o ) const
+        {
+            if( layer != o.layer )       return layer < o.layer;
+            if( width != o.width )       return width < o.width;
+            if( refAbove != o.refAbove ) return refAbove < o.refAbove;
+            if( refBelow != o.refBelow ) return refBelow < o.refBelow;
+            return neighborKeys < o.neighborKeys;
+        }
+    };
+
+    struct VALUE
+    {
+        double z0;
+        double erEff;
+        double zdiff;
+        double erEffOdd;
+    };
+
+    explicit BEM_CACHE( size_t aMaxEntries = 2048 ) : m_maxEntries( aMaxEntries ) {}
+
+    const VALUE* Find( const KEY& aKey ) const
+    {
+        auto it = m_map.find( aKey );
+
+        if( it == m_map.end() )
+            return nullptr;
+
+        // Move to front of LRU list
+        m_lru.splice( m_lru.begin(), m_lru, it->second.lruIt );
+        return &it->second.value;
+    }
+
+    void Insert( const KEY& aKey, const VALUE& aValue )
+    {
+        auto it = m_map.find( aKey );
+
+        if( it != m_map.end() )
+        {
+            it->second.value = aValue;
+            m_lru.splice( m_lru.begin(), m_lru, it->second.lruIt );
+            return;
+        }
+
+        // Evict oldest if at capacity
+        while( m_map.size() >= m_maxEntries && !m_lru.empty() )
+        {
+            m_map.erase( m_lru.back() );
+            m_lru.pop_back();
+        }
+
+        m_lru.push_front( aKey );
+
+        ENTRY entry;
+        entry.value = aValue;
+        entry.lruIt = m_lru.begin();
+        m_map[aKey] = entry;
+    }
+
+    size_t Size() const { return m_map.size(); }
+
+private:
+    struct ENTRY
+    {
+        VALUE                          value;
+        std::list<KEY>::iterator       lruIt;
+    };
+
+    size_t                    m_maxEntries;
+    mutable std::list<KEY>    m_lru;       // front = most recently used
+    std::map<KEY, ENTRY>      m_map;
+};
 
 
 /**
@@ -107,7 +201,7 @@ public:
      * @param aCoupledNetCode  Coupled diff-pair net (0 = single-ended only).
      * @return true on success, false on error (check GetError()).
      */
-    bool Compute( const BOARD* aBoard, int aNetCode,
+    bool Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
                   const VECTOR2I& aFrom = VECTOR2I( 0, 0 ),
                   DRC_RTREE* aRtree = nullptr,
                   int aCoupledNetCode = 0 );
@@ -143,7 +237,7 @@ class DIFF_PROFILE
 public:
     DIFF_PROFILE();
 
-    bool Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN );
+    bool Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN, BEM_CACHE& aCache );
 
     const SE_PROFILE& GetProfileP() const { return m_profileP; }
     const SE_PROFILE& GetProfileN() const { return m_profileN; }

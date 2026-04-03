@@ -124,6 +124,7 @@ private:
     // Analysis results
     std::unique_ptr<SE_PROFILE>   m_seProfile;
     std::unique_ptr<DIFF_PROFILE> m_diffProfile;
+    BEM_CACHE                     m_bemCache;     ///< Shared across re-analyze and net changes
     int             m_selectedSample;
 
     // State

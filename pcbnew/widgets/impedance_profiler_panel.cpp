@@ -798,7 +798,7 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     {
         m_diffProfile = std::make_unique<DIFF_PROFILE>();
 
-        if( !m_diffProfile->Compute( board, aNetCode, m_coupledNetCode ) )
+        if( !m_diffProfile->Compute( board, aNetCode, m_coupledNetCode, m_bemCache ) )
         {
             updateStatus( m_diffProfile->GetError() );
             return;
@@ -808,7 +808,7 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     {
         m_seProfile = std::make_unique<SE_PROFILE>();
 
-        if( !m_seProfile->Compute( board, aNetCode ) )
+        if( !m_seProfile->Compute( board, aNetCode, m_bemCache ) )
         {
             updateStatus( m_seProfile->GetError() );
             return;
