@@ -71,7 +71,7 @@ static VRM_PARAMS readVrmParams( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aShe
 
             try
             {
-                double zout = SPICE_VALUE( val ).ToDouble();
+                double zout = SPICE_VALUE( val, SPICE_VALUE::NOTATION_SI ).ToDouble();
 
                 if( zout > 0.0 )
                 {
@@ -93,7 +93,7 @@ static VRM_PARAMS readVrmParams( SCH_SYMBOL* aSymbol, const SCH_SHEET_PATH& aShe
 
             try
             {
-                double bw = SPICE_VALUE( val ).ToDouble();
+                double bw = SPICE_VALUE( val, SPICE_VALUE::NOTATION_SI ).ToDouble();
 
                 if( bw > 0.0 )
                     params.bandwidth = bw;
@@ -421,7 +421,7 @@ void PDN_ANALYZER::FindPDNNetworks()
         wxString valueStr = ref.GetValue();
         wxString footprint = ref.GetFootprint();
 
-        double capacitance = SPICE_VALUE( valueStr ).ToDouble();
+        double capacitance = SPICE_VALUE( valueStr, SPICE_VALUE::NOTATION_SI ).ToDouble();
 
         if( capacitance <= 0.0 )
         {
@@ -656,7 +656,7 @@ void PDN_ANALYZER::FindPDNNetworks()
 
                 try
                 {
-                    elem.resistance = SPICE_VALUE( valueStr ).ToDouble();
+                    elem.resistance = SPICE_VALUE( valueStr, SPICE_VALUE::NOTATION_SI ).ToDouble();
 
                     if( elem.resistance <= 0.0 )
                     {

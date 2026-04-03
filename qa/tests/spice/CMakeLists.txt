@@ -64,6 +64,7 @@ set( QA_SPICE_SRCS
     test_kibis.cpp
 
     test_ngspice_helpers.cpp
+    test_spice_value.cpp
 )
 
 if( WIN32 )

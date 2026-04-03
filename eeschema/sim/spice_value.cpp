@@ -72,7 +72,7 @@ void SPICE_VALUE_FORMAT::UpdateUnits( const wxString& aUnits )
 }
 
 
-SPICE_VALUE::SPICE_VALUE( const wxString& aString ) :
+SPICE_VALUE::SPICE_VALUE( const wxString& aString, NOTATION aNotation ) :
         m_base( 0.0 ),
         m_prefix( PFX_NONE ),
         m_spiceStr( false )
@@ -83,7 +83,66 @@ SPICE_VALUE::SPICE_VALUE( const wxString& aString ) :
     char      units[8] = { 0, };
     LOCALE_IO dummy;              // Numeric values must be in "C" locale ('.' decimal separator)
 
-    sscanf( (const char*) aString.c_str(), "%lf%7s", &m_base, units );
+    // Handle engineering notation where a letter serves as decimal point and SI prefix:
+    // "4k7" → "4.7k", "2u2" → "2.2u", "4R7" → "4.7", "0R1" → "0.1", "100R" → "100"
+    wxString processed = aString;
+
+    size_t letterPos = wxString::npos;
+
+    for( size_t i = 0; i < processed.length(); i++ )
+    {
+        if( wxIsalpha( processed[i] ) )
+        {
+            letterPos = i;
+            break;
+        }
+    }
+
+    if( letterPos != wxString::npos && letterPos > 0
+        && processed.Left( letterPos ).Find( '.' ) == wxNOT_FOUND )
+    {
+        char lower = tolower( processed[letterPos] );
+        bool isPrefix = ( lower == 'f' || lower == 'p' || lower == 'n' || lower == 'u'
+                          || lower == 'm' || lower == 'k' || lower == 'g' || lower == 't' );
+
+        if( lower == 'r' || isPrefix )
+        {
+            bool hasTrailingDigits = ( letterPos + 1 < processed.length()
+                                       && wxIsdigit( processed[letterPos + 1] ) );
+
+            if( hasTrailingDigits )
+            {
+                wxString before = processed.Left( letterPos );
+                wxString after = processed.Mid( letterPos + 1 );
+
+                if( lower == 'r' )
+                {
+                    // R is just a decimal point with no SI prefix
+                    processed = before + wxT( "." ) + after;
+                }
+                else
+                {
+                    // Letter serves as both decimal point and SI prefix.
+                    // Split trailing part into fractional digits and remainder.
+                    size_t digitEnd = 0;
+
+                    while( digitEnd < after.length() && wxIsdigit( after[digitEnd] ) )
+                        digitEnd++;
+
+                    wxString fracDigits = after.Left( digitEnd );
+                    wxString rest = after.Mid( digitEnd );
+                    processed = before + wxT( "." ) + fracDigits + processed[letterPos] + rest;
+                }
+            }
+            else if( lower == 'r' )
+            {
+                // Bare R without trailing digits (e.g. "100R", "0R") — strip the R
+                processed = processed.Left( letterPos ) + processed.Mid( letterPos + 1 );
+            }
+        }
+    }
+
+    sscanf( (const char*) processed.c_str(), "%lf%7s", &m_base, units );
 
     if( *units == 0 )
     {
@@ -93,26 +152,54 @@ SPICE_VALUE::SPICE_VALUE( const wxString& aString ) :
 
     m_spiceStr = true;
 
-    for( char* bufPtr = units; *bufPtr; ++bufPtr )
-        *bufPtr = tolower( *bufPtr );
-
-    if( strcmp( units, "meg" ) == 0 )
+    if( aNotation == NOTATION_SI )
     {
-        m_prefix = PFX_MEGA;
+        // SI convention: case-sensitive.  M = mega, m = milli.
+        if( strncmp( units, "Meg", 3 ) == 0 || units[0] == 'M' )
+        {
+            m_prefix = PFX_MEGA;
+        }
+        else
+        {
+            switch( units[0] )
+            {
+                case 'f': m_prefix = PFX_FEMTO; break;
+                case 'p': m_prefix = PFX_PICO; break;
+                case 'n': m_prefix = PFX_NANO; break;
+                case 'u': m_prefix = PFX_MICRO; break;
+                case 'm': m_prefix = PFX_MILI; break;
+                case 'k':
+                case 'K': m_prefix = PFX_KILO; break;
+                case 'G': m_prefix = PFX_GIGA; break;
+                case 'T': m_prefix = PFX_TERA; break;
+                default:  m_prefix = PFX_NONE; break;
+            }
+        }
     }
     else
     {
-        switch( units[0] )
+        // SPICE convention: case-insensitive.  m/M = milli, Meg = mega.
+        for( char* bufPtr = units; *bufPtr; ++bufPtr )
+            *bufPtr = tolower( *bufPtr );
+
+        if( strcmp( units, "meg" ) == 0 )
         {
-            case 'f': m_prefix = PFX_FEMTO; break;
-            case 'p': m_prefix = PFX_PICO; break;
-            case 'n': m_prefix = PFX_NANO; break;
-            case 'u': m_prefix = PFX_MICRO; break;
-            case 'm': m_prefix = PFX_MILI; break;
-            case 'k': m_prefix = PFX_KILO; break;
-            case 'g': m_prefix = PFX_GIGA; break;
-            case 't': m_prefix = PFX_TERA; break;
-            default:  m_prefix = PFX_NONE; break;
+            m_prefix = PFX_MEGA;
+        }
+        else
+        {
+            switch( units[0] )
+            {
+                case 'f': m_prefix = PFX_FEMTO; break;
+                case 'p': m_prefix = PFX_PICO; break;
+                case 'n': m_prefix = PFX_NANO; break;
+                case 'u': m_prefix = PFX_MICRO; break;
+                case 'm': m_prefix = PFX_MILI; break;
+                case 'k': m_prefix = PFX_KILO; break;
+                case 'g': m_prefix = PFX_GIGA; break;
+                case 't': m_prefix = PFX_TERA; break;
+                default:  m_prefix = PFX_NONE; break;
+            }
         }
     }
 

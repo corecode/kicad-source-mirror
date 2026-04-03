@@ -69,13 +69,19 @@ public:
         PFX_TERA    = 12
     };
 
+    enum NOTATION
+    {
+        NOTATION_SPICE, ///< Case-insensitive: m/M = milli, Meg = mega (SPICE convention)
+        NOTATION_SI     ///< Case-sensitive: m = milli, M = mega (SI/schematic convention)
+    };
+
     SPICE_VALUE()
         : m_base( 0 ), m_prefix( PFX_NONE ), m_spiceStr( false )
     {
     }
 
-    ///< Parses the string to create a Spice value (e.g. 100n)
-    SPICE_VALUE( const wxString& aString );
+    ///< Parses the string to create a Spice value (e.g. 100n, 4k7, 0R1)
+    SPICE_VALUE( const wxString& aString, NOTATION aNotation = NOTATION_SPICE );
 
     SPICE_VALUE( int aInt, UNIT_PREFIX aPrefix = PFX_NONE )
         : m_base( aInt ), m_prefix( aPrefix ), m_spiceStr( false )
