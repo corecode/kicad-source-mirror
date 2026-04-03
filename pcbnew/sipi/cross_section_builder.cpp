@@ -29,7 +29,9 @@
 #include <pcb_track.h>
 #include <zone.h>
 
+#include <geometry/seg.h>
 #include <geometry/shape.h>
+#include <geometry/shape_arc.h>
 #include <geometry/shape_poly_set.h>
 
 #include <algorithm>
@@ -37,6 +39,32 @@
 
 
 static constexpr int MIN_EDGE_TO_EDGE = 10000; // 10µm in nm
+
+
+/// Candidate neighbor track for per-net deduplication.
+struct NB_CANDIDATE
+{
+    int    netCode;
+    int    lateralNm;
+    int    widthNm;
+    double dist;
+};
+
+
+/**
+ * Nearest point on a track's centerline to an external point.
+ */
+static VECTOR2I nearestPointOnTrack( const PCB_TRACK* aTrack, const VECTOR2I& aPos )
+{
+    if( aTrack->Type() == PCB_ARC_T )
+    {
+        const PCB_ARC* arc = static_cast<const PCB_ARC*>( aTrack );
+        SHAPE_ARC       shapeArc( arc->GetStart(), arc->GetMid(), arc->GetEnd(), 0 );
+        return shapeArc.NearestPoint( aPos );
+    }
+
+    return SEG( aTrack->GetStart(), aTrack->GetEnd() ).NearestPoint( aPos );
+}
 
 
 CROSS_SECTION_BUILDER::CROSS_SECTION_BUILDER() :
@@ -109,15 +137,7 @@ XS_DIFF_PAIR_CONDUCTOR CROSS_SECTION_BUILDER::FindDiffPairConductor(
     if( aParams.coupledNetCode <= 0 || !m_rtree )
         return result;
 
-    VECTOR2D normal( -aParams.sampleTangent.y, aParams.sampleTangent.x );
-
-    VECTOR2I cutA( aParams.samplePos.x - (int) ( normal.x * aParams.couplingHorizon ),
-                   aParams.samplePos.y - (int) ( normal.y * aParams.couplingHorizon ) );
-    VECTOR2I cutB( aParams.samplePos.x + (int) ( normal.x * aParams.couplingHorizon ),
-                   aParams.samplePos.y + (int) ( normal.y * aParams.couplingHorizon ) );
-    SEG cutSeg( cutA, cutB );
-
-    double bestAbsDist = 1e18;
+    double bestDist = 1e18;
 
     auto nearbyItems = m_rtree->GetObjectsAt( aParams.samplePos, aParams.signalLayer,
                                                aParams.couplingHorizon );
@@ -132,30 +152,27 @@ XS_DIFF_PAIR_CONDUCTOR CROSS_SECTION_BUILDER::FindDiffPairConductor(
         if( other->GetNetCode() != aParams.coupledNetCode )
             continue;
 
-        std::shared_ptr<SHAPE> shape = other->GetEffectiveShape( aParams.signalLayer );
+        VECTOR2I nearPt = nearestPointOnTrack( other, aParams.samplePos );
+        VECTOR2D delta( nearPt.x - aParams.samplePos.x,
+                        nearPt.y - aParams.samplePos.y );
+        double dist = delta.EuclideanNorm();
 
-        if( !shape )
+        if( dist < 1.0 )
             continue;
 
-        VECTOR2I nearest;
-
-        if( !shape->Collide( cutSeg, 0, nullptr, &nearest ) )
-            continue;
-
-        VECTOR2D delta( nearest.x - aParams.samplePos.x,
-                        nearest.y - aParams.samplePos.y );
-        double lateralDist = delta.x * normal.x + delta.y * normal.y;
-        double edgeToEdge = std::abs( lateralDist )
-                            - aParams.signalWidth / 2.0
-                            - other->GetWidth() / 2.0;
+        double edgeToEdge = dist - aParams.signalWidth / 2.0 - other->GetWidth() / 2.0;
 
         if( edgeToEdge < MIN_EDGE_TO_EDGE || edgeToEdge > aParams.couplingHorizon )
             continue;
 
-        if( std::abs( lateralDist ) < bestAbsDist )
+        if( dist < bestDist )
         {
-            bestAbsDist = std::abs( lateralDist );
-            result.lateralNm = static_cast<int>( lateralDist );
+            bestDist = dist;
+
+            double cross = aParams.sampleTangent.x * delta.y
+                           - aParams.sampleTangent.y * delta.x;
+
+            result.lateralNm = static_cast<int>( ( cross >= 0 ) ? dist : -dist );
             result.widthNm = other->GetWidth();
             result.found = true;
         }
@@ -176,6 +193,11 @@ void CROSS_SECTION_BUILDER::findTrackNeighbors( const XS_BUILD_PARAMS& aParams,
     auto nearbyItems = m_rtree->GetObjectsAt( aParams.samplePos, aParams.signalLayer,
                                                aParams.couplingHorizon );
 
+    // Per-net best candidate: keep only the closest segment from each net
+    // on each side.  With closest-point detection, multiple segments of the
+    // same net (e.g., before/after a bend) may all be within coupling horizon.
+    std::vector<NB_CANDIDATE> candidates;
+
     for( BOARD_ITEM* item : nearbyItems )
     {
         if( item->Type() != PCB_TRACE_T && item->Type() != PCB_ARC_T )
@@ -186,57 +208,55 @@ void CROSS_SECTION_BUILDER::findTrackNeighbors( const XS_BUILD_PARAMS& aParams,
         if( other == m_signalTrack )
             continue;
 
-        // Same-net path-distance check: exclude topological neighbors (bends)
-        // but keep coupling neighbors (serpentine return legs).
-        if( m_pathItemDist )
-        {
-            auto pathIt = m_pathItemDist->find( other );
-
-            if( pathIt != m_pathItemDist->end() )
-            {
-                double pathSep = std::abs( pathIt->second - aParams.sampleDist );
-
-                if( pathSep < aParams.couplingHorizon * 2.0 )
-                    continue;
-            }
-        }
-
-        // Same-net non-track items (pads on signal net) — skip
+        // Skip all same-net tracks.  The BEM models neighbors at ground
+        // potential, which is correct for different-net conductors but wrong
+        // for same-net segments (serpentine return legs, connected bends) —
+        // those carry the same signal and don't act as ground references.
         if( other->GetNetCode() == aParams.signalNetCode )
-        {
-            // Only allow same-net tracks that passed the path-distance check above
-            // (i.e., they're far on the path — serpentine return legs).
-            // If they're not in pathItemDist at all (not on the walked path),
-            // they could be branches — exclude them for safety.
-            if( !m_pathItemDist || m_pathItemDist->find( other ) == m_pathItemDist->end() )
-                continue;
-        }
-
-        // Use the effective shape (stadium = centerline + half-width endcaps)
-        // to test intersection with the cross-section cut line.
-        std::shared_ptr<SHAPE> shape = other->GetEffectiveShape( aParams.signalLayer );
-
-        if( !shape )
             continue;
 
-        VECTOR2I nearest;
+        // Closest-point distance: find the nearest point on the neighbor's
+        // centerline to the sample position.  This is independent of the
+        // cut-line orientation, so it works correctly at arc bends where
+        // the perpendicular cut-line rotates away from the actual neighbor.
+        VECTOR2I nearPt = nearestPointOnTrack( other, aParams.samplePos );
+        VECTOR2D delta( nearPt.x - aParams.samplePos.x,
+                        nearPt.y - aParams.samplePos.y );
+        double dist = delta.EuclideanNorm();
 
-        if( !shape->Collide( aCutSeg, 0, nullptr, &nearest ) )
+        if( dist < 1.0 )
             continue;
 
-        // nearest is the closest point on the neighbor's centerline to the cut seg.
-        // Project onto the normal to get signed lateral (center-to-center) distance.
-        VECTOR2D delta( nearest.x - aParams.samplePos.x,
-                        nearest.y - aParams.samplePos.y );
-        double lateralDist = delta.x * aNormal.x + delta.y * aNormal.y;
-        double edgeToEdge = std::abs( lateralDist )
-                            - aParams.signalWidth / 2.0
-                            - other->GetWidth() / 2.0;
+        double edgeToEdge = dist - aParams.signalWidth / 2.0 - other->GetWidth() / 2.0;
 
         if( edgeToEdge < MIN_EDGE_TO_EDGE || edgeToEdge > aParams.couplingHorizon )
             continue;
 
-        aNeighbors.push_back( { static_cast<int>( lateralDist ), other->GetWidth() } );
+        double cross = aParams.sampleTangent.x * delta.y
+                       - aParams.sampleTangent.y * delta.x;
+        int lateralNm = static_cast<int>( ( cross >= 0 ) ? dist : -dist );
+
+        candidates.push_back( { other->GetNetCode(), lateralNm, other->GetWidth(), dist } );
+    }
+
+    // Keep only the closest segment per net per side
+    std::sort( candidates.begin(), candidates.end(),
+               []( const NB_CANDIDATE& a, const NB_CANDIDATE& b )
+               { return a.dist < b.dist; } );
+
+    // Track which (net, side) pairs we've already emitted
+    std::set<std::pair<int, bool>> seen;
+
+    for( const NB_CANDIDATE& c : candidates )
+    {
+        bool side = ( c.lateralNm >= 0 );
+        auto key = std::make_pair( c.netCode, side );
+
+        if( seen.count( key ) )
+            continue;
+
+        seen.insert( key );
+        aNeighbors.push_back( { c.lateralNm, c.widthNm } );
     }
 }
 

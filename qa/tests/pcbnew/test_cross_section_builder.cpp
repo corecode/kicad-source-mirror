@@ -405,33 +405,27 @@ BOOST_AUTO_TEST_CASE( SameNetBendExcluded )
 /**
  * Test 7: Same-net serpentine return leg — IS detected (far path distance).
  */
-BOOST_AUTO_TEST_CASE( SerpentineReturnDetected )
+BOOST_AUTO_TEST_CASE( SameNetExcluded )
 {
-    // Two parallel horizontal segments of the same net, 500µm apart
+    // Two parallel horizontal segments of the same net, 500µm apart.
+    // Same-net tracks are excluded from neighbor detection because the BEM
+    // models neighbors at ground potential, which is wrong for same-net
+    // conductors that carry the same signal.
     PCB_TRACK* segA = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
                                 150000, F_Cu, 1 );
 
-    PCB_TRACK* segB = addTrack( VECTOR2I( 10000000, 500000 ), VECTOR2I( 0, 500000 ),
-                                150000, F_Cu, 1 );
-
-    // Path distances: segA at 0, segB at 25mm (far — full serpentine loop)
-    std::map<BOARD_CONNECTED_ITEM*, double> pathDist;
-    pathDist[segA] = 0.0;
-    pathDist[segB] = 25000000.0;
+    addTrack( VECTOR2I( 10000000, 500000 ), VECTOR2I( 0, 500000 ),
+              150000, F_Cu, 1 );
 
     auto builder = makeBuilder( segA );
-    builder.SetPathItemDistances( &pathDist );
 
     auto params = makeParams( segA, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
-    params.sampleDist = 5000000.0;
-
     auto neighbors = builder.FindNeighbors( params );
 
-    BOOST_TEST_MESSAGE( "Serpentine: " << neighbors.size() << " neighbors" );
+    BOOST_TEST_MESSAGE( "Same-net: " << neighbors.size() << " neighbors" );
 
-    // segB should be detected — pathSep = |25mm - 5mm| = 20mm >> 2mm threshold
-    BOOST_REQUIRE_EQUAL( neighbors.size(), 1 );
-    BOOST_CHECK_CLOSE( std::abs( (double) neighbors[0].distNm ), 500000.0, 5.0 );
+    // Same-net segments should not be detected as coupling neighbors
+    BOOST_CHECK_EQUAL( neighbors.size(), 0 );
 }
 
 
@@ -722,8 +716,9 @@ BOOST_AUTO_TEST_CASE( NeighborShortJog )
             BOOST_CHECK_GT( std::abs( nb.distNm ), 100000 );
         }
 
-        // Should always find exactly 1 neighbor (even during the jog)
-        BOOST_CHECK_EQUAL( neighbors.size(), 1 );
+        // At least 1 neighbor; closest-point detection may see both sides
+        // of a lane-change jog simultaneously (both are physically present)
+        BOOST_CHECK_GE( neighbors.size(), 1 );
     }
 }
 
