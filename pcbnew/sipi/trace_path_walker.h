@@ -33,6 +33,7 @@
 
 class BOARD;
 class BOARD_CONNECTED_ITEM;
+class PCB_ARC;
 class PCB_TRACK;
 class PCB_VIA;
 class PAD;
@@ -98,7 +99,6 @@ struct PATH_POINT
  * of PATH_POINTs from one end to the other.
  *
  * Current limitations (MVP):
- * - Straight segments and vias only; arcs treated as chords
  * - Single path; stops at T-junctions (degree > 2) rather than branching
  * - No differential pair detection (added in Stage 5)
  */
@@ -176,9 +176,21 @@ private:
     VECTOR2I otherEnd( BOARD_CONNECTED_ITEM* aItem, const VECTOR2I& aFrom ) const;
 
     /**
-     * Get the length of a track item (segment or arc chord).
+     * Get the length of a track item (segment or arc).
      */
     double itemLength( BOARD_CONNECTED_ITEM* aItem ) const;
+
+    /**
+     * Emit interpolated PATH_POINTs along a PCB_ARC, with correct tangent
+     * directions perpendicular to the arc radius at each sample point.
+     *
+     * @param aArc       The arc to interpolate along.
+     * @param aEntryPos  The endpoint where we enter the arc.
+     * @param aPoints    Output points appended here.
+     * @param aCumulDist Running cumulative distance (updated in place).
+     */
+    void emitArcPoints( PCB_ARC* aArc, const VECTOR2I& aEntryPos,
+                        std::vector<PATH_POINT>& aPoints, double& aCumulDist );
 
     /**
      * Find the pad at the given position on the given net, if any.

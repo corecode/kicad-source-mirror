@@ -29,6 +29,7 @@
 #include <core/typeinfo.h>
 
 #include <algorithm>
+#include <cmath>
 
 
 TRACE_PATH_WALKER::TRACE_PATH_WALKER( const BOARD* aBoard ) :
@@ -148,38 +149,59 @@ bool TRACE_PATH_WALKER::Walk( PCB_TRACK* aStartTrack )
     // Assemble the full path: backward + start track + forward
     m_path = std::move( backwardPoints );
 
-    // Add start track's start point
-    VECTOR2D tangent;
     bool isVia = ( aStartTrack->Type() == PCB_VIA_T );
 
-    if( !isVia && startPos != endPos )
+    if( aStartTrack->Type() == PCB_ARC_T )
     {
-        VECTOR2D dir( endPos.x - startPos.x, endPos.y - startPos.y );
-        double len = dir.EuclideanNorm();
-
-        if( len > 0 )
-            tangent = dir / len;
+        // Arc start track: interpolate along arc geometry
+        double arcDist = totalBack;
+        emitArcPoints( static_cast<PCB_ARC*>( aStartTrack ), startPos, m_path, arcDist );
     }
-
-    PATH_POINT startPt;
-    startPt.position = startPos;
-    startPt.tangent = tangent;
-    startPt.layer = aStartTrack->GetLayer();
-    startPt.distFromStart = totalBack;
-    startPt.item = aStartTrack;
-    startPt.isVia = isVia;
-    m_path.push_back( startPt );
-
-    if( !isVia && startPos != endPos )
+    else if( isVia )
     {
-        PATH_POINT endPt;
-        endPt.position = endPos;
-        endPt.tangent = tangent;
-        endPt.layer = aStartTrack->GetLayer();
-        endPt.distFromStart = totalBack + startTrackLen;
-        endPt.item = aStartTrack;
-        endPt.isVia = false;
-        m_path.push_back( endPt );
+        PATH_POINT viaPt;
+        viaPt.position = startPos;
+        viaPt.tangent = VECTOR2D( 0, 0 );
+        viaPt.layer = aStartTrack->GetLayer();
+        viaPt.distFromStart = totalBack;
+        viaPt.item = aStartTrack;
+        viaPt.isVia = true;
+        m_path.push_back( viaPt );
+    }
+    else
+    {
+        // Straight segment start track
+        VECTOR2D tangent;
+
+        if( startPos != endPos )
+        {
+            VECTOR2D dir( endPos.x - startPos.x, endPos.y - startPos.y );
+            double len = dir.EuclideanNorm();
+
+            if( len > 0 )
+                tangent = dir / len;
+        }
+
+        PATH_POINT startPt;
+        startPt.position = startPos;
+        startPt.tangent = tangent;
+        startPt.layer = aStartTrack->GetLayer();
+        startPt.distFromStart = totalBack;
+        startPt.item = aStartTrack;
+        startPt.isVia = false;
+        m_path.push_back( startPt );
+
+        if( startPos != endPos )
+        {
+            PATH_POINT endPt;
+            endPt.position = endPos;
+            endPt.tangent = tangent;
+            endPt.layer = aStartTrack->GetLayer();
+            endPt.distFromStart = totalBack + startTrackLen;
+            endPt.item = aStartTrack;
+            endPt.isVia = false;
+            m_path.push_back( endPt );
+        }
     }
 
     double baseForward = totalBack + startTrackLen;
@@ -373,9 +395,15 @@ PATH_TERMINUS TRACE_PATH_WALKER::walkDirection( const VECTOR2I& aStartPos,
 
             currentPos = via->GetPosition();
         }
+        else if( current->Type() == PCB_ARC_T )
+        {
+            // Arc segment: interpolate along actual arc geometry
+            emitArcPoints( static_cast<PCB_ARC*>( current ), currentPos, aPoints, aCumulDist );
+            currentPos = otherEnd( current, currentPos );
+        }
         else
         {
-            // Track or arc segment
+            // Straight track segment
             PCB_TRACK* track = static_cast<PCB_TRACK*>( current );
 
             VECTOR2I otherPos = otherEnd( current, currentPos );
@@ -487,6 +515,68 @@ double TRACE_PATH_WALKER::itemLength( BOARD_CONNECTED_ITEM* aItem ) const
 
     PCB_TRACK* track = static_cast<PCB_TRACK*>( aItem );
     return track->GetLength();
+}
+
+
+void TRACE_PATH_WALKER::emitArcPoints( PCB_ARC* aArc, const VECTOR2I& aEntryPos,
+                                       std::vector<PATH_POINT>& aPoints,
+                                       double& aCumulDist )
+{
+    VECTOR2D center( aArc->GetPosition() );
+    double   radius = aArc->GetRadius();
+    double   totalAngle = aArc->GetAngle().AsRadians(); // signed: positive = CCW
+
+    // Determine walk direction: entering at Start walks the arc forward
+    bool enterAtStart = ( aEntryPos == aArc->GetStart() );
+
+    VECTOR2D entryVec = VECTOR2D( aEntryPos ) - center;
+    double   entryAngle = std::atan2( entryVec.y, entryVec.x );
+
+    // Sweep: start→end uses totalAngle, end→start uses -totalAngle
+    double sweepAngle = enterAtStart ? totalAngle : -totalAngle;
+
+    // Arc-length step ≈ one trace width (floor 0.25mm to avoid excessive subdivision)
+    double arcLengthStep = std::max( static_cast<double>( aArc->GetWidth() ), 250000.0 );
+    double stepAngleRad = arcLengthStep / radius;
+    int    nSteps = std::max( 1, static_cast<int>(
+                                         std::ceil( std::abs( sweepAngle ) / stepAngleRad ) ) );
+    nSteps = std::min( nSteps, 72 );
+
+    double arcLen = radius * std::abs( sweepAngle );
+    double stepAngle = sweepAngle / nSteps;
+    double stepLen = arcLen / nSteps;
+
+    VECTOR2I exitPos = enterAtStart ? aArc->GetEnd() : aArc->GetStart();
+
+    for( int i = 0; i <= nSteps; i++ )
+    {
+        double theta = entryAngle + i * stepAngle;
+
+        VECTOR2I pos;
+
+        if( i == 0 )
+            pos = aEntryPos;
+        else if( i == nSteps )
+            pos = exitPos;
+        else
+            pos = VECTOR2I( KiROUND( center.x + radius * std::cos( theta ) ),
+                            KiROUND( center.y + radius * std::sin( theta ) ) );
+
+        // Tangent: perpendicular to radius, oriented in sweep direction
+        double   sign = ( sweepAngle > 0 ) ? 1.0 : -1.0;
+        VECTOR2D tangent( sign * -std::sin( theta ), sign * std::cos( theta ) );
+
+        PATH_POINT pt;
+        pt.position = pos;
+        pt.tangent = tangent;
+        pt.layer = aArc->GetLayer();
+        pt.distFromStart = aCumulDist + i * stepLen;
+        pt.item = aArc;
+        pt.isVia = false;
+        aPoints.push_back( pt );
+    }
+
+    aCumulDist += arcLen;
 }
 
 

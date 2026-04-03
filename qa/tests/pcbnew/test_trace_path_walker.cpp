@@ -339,4 +339,135 @@ BOOST_AUTO_TEST_CASE( LengthMatchesTrackSum_ArcsViasBoard )
 }
 
 
+/**
+ * Test that arc interpolation produces correct tangent directions.
+ * For arc path points, the tangent should be perpendicular to the radius
+ * (i.e. dot product of tangent and radius direction should be ~0).
+ */
+BOOST_AUTO_TEST_CASE( ArcTangentPerpendicularity )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "tracks_arcs_vias", m_board );
+    m_board->BuildConnectivity();
+
+    // Find a net that has arcs
+    int arcNetCode = -1;
+    int arcCount = 0;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->Type() == PCB_ARC_T && track->GetNetCode() > 0 )
+        {
+            arcNetCode = track->GetNetCode();
+            arcCount++;
+        }
+    }
+
+    if( arcNetCode < 0 )
+    {
+        BOOST_TEST_MESSAGE( "No arcs found in test board — skipping" );
+        return;
+    }
+
+    BOOST_TEST_MESSAGE( "Found " << arcCount << " arcs, testing net " << arcNetCode );
+
+    TRACE_PATH_WALKER walker( m_board.get() );
+    BOOST_REQUIRE( walker.WalkNet( arcNetCode ) );
+
+    const auto& path = walker.GetPath();
+    int         arcPoints = 0;
+    double      maxDot = 0.0;
+
+    // For each arc item, find its center and check tangent perpendicularity
+    for( const PATH_POINT& pt : path )
+    {
+        if( pt.isVia || pt.item->Type() != PCB_ARC_T )
+            continue;
+
+        PCB_ARC* arc = static_cast<PCB_ARC*>( pt.item );
+        VECTOR2D center( arc->GetPosition() );
+        VECTOR2D radial = VECTOR2D( pt.position ) - center;
+        double   radLen = radial.EuclideanNorm();
+
+        if( radLen < 1.0 )
+            continue;
+
+        // Normalize radial
+        radial = radial / radLen;
+
+        // Tangent should be perpendicular to radial: |dot| ≈ 0
+        double dot = std::abs( radial.x * pt.tangent.x + radial.y * pt.tangent.y );
+        maxDot = std::max( maxDot, dot );
+
+        // Allow small tolerance for integer rounding of interpolated positions
+        BOOST_CHECK_SMALL( dot, 0.01 );
+        arcPoints++;
+    }
+
+    BOOST_TEST_MESSAGE( "Checked " << arcPoints << " arc path points, max |dot| = " << maxDot );
+    BOOST_CHECK_GT( arcPoints, 0 );
+}
+
+
+/**
+ * Test that arc interpolation produces the expected number of intermediate points.
+ * Checks arcs that were actually visited by the walker.
+ */
+BOOST_AUTO_TEST_CASE( ArcInterpolationPointCount )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "tracks_arcs_vias", m_board );
+    m_board->BuildConnectivity();
+
+    // Walk all nets and check arc point counts
+    std::set<int> netCodes;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() > 0 )
+            netCodes.insert( track->GetNetCode() );
+    }
+
+    int arcsChecked = 0;
+
+    for( int nc : netCodes )
+    {
+        TRACE_PATH_WALKER walker( m_board.get() );
+
+        if( !walker.WalkNet( nc ) )
+            continue;
+
+        // Find arcs in the walked path and verify point counts
+        std::map<BOARD_CONNECTED_ITEM*, int> arcPointCounts;
+
+        for( const PATH_POINT& pt : walker.GetPath() )
+        {
+            if( !pt.isVia && pt.item->Type() == PCB_ARC_T )
+                arcPointCounts[pt.item]++;
+        }
+
+        for( auto& [item, count] : arcPointCounts )
+        {
+            PCB_ARC* arc = static_cast<PCB_ARC*>( item );
+            double   angleDeg = std::abs( arc->GetAngle().AsDegrees() );
+
+            double radius = arc->GetRadius();
+            double arcLenStep = std::max( (double) arc->GetWidth(), 250000.0 );
+            double stepAngle = arcLenStep / radius;
+            double sweepRad = std::abs( arc->GetAngle().AsRadians() );
+            int    expectedSteps = std::max( 1, static_cast<int>(
+                                                        std::ceil( sweepRad / stepAngle ) ) );
+            expectedSteps = std::min( expectedSteps, 72 );
+            int expectedPoints = expectedSteps + 1;
+
+            BOOST_TEST_MESSAGE( "Arc " << angleDeg << "°: " << count
+                                << " points (expected " << expectedPoints << ")" );
+            BOOST_CHECK_EQUAL( count, expectedPoints );
+            arcsChecked++;
+        }
+    }
+
+    BOOST_TEST_MESSAGE( "Checked " << arcsChecked << " walked arcs" );
+    BOOST_CHECK_GT( arcsChecked, 0 );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()
