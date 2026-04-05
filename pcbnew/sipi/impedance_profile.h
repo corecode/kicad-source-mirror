@@ -25,6 +25,7 @@
 #define IMPEDANCE_PROFILE_H
 
 #include <sipi/cross_section.h>
+#include <sipi/via_model.h>
 
 #include <layer_ids.h>
 #include <math/vector2d.h>
@@ -158,6 +159,10 @@ struct IMPEDANCE_SAMPLE
     double       erEffOdd = 0.0;      ///< Odd-mode εr_eff
     bool         isDiffPair = false;   ///< True if coupled partner found at this sample
     double       dpGapUm = 0.0;       ///< Edge-to-edge gap P↔N (µm)
+
+    // Via model (populated at via transitions)
+    bool                              isVia = false;    ///< True at via transition points
+    std::shared_ptr<VIA_CLUSTER_RESULT> viaModel;       ///< Via parasitics (null if not a via)
 };
 
 

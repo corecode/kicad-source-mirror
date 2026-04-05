@@ -629,7 +629,8 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
 
         // Fast check via R-tree: are there pads or vias on the reference layer
         // near the sample point?  Antipads extend beyond the pad by the zone
-        // clearance, so search with extra margin.
+        // clearance, so search with extra margin.  This avoids expensive span
+        // scans in areas where the reference is contiguous.
         static constexpr int ANTIPAD_MARGIN = 1000000; // 1mm
 
         bool hasNearbyObstacle = false;
@@ -822,15 +823,42 @@ XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
         condY = -geom.traceThickness / 2.0;
         xs.epsilonR = geom.erAbove;
 
-        XS_DIELECTRIC_REGION diel, air;
-        diel.yTop = xs.groundY;
-        diel.yBottom = -geom.traceThickness;
-        diel.epsilonR = geom.erAbove;
-        air.yTop = -geom.traceThickness;
-        air.yBottom = 10e-3;
-        air.epsilonR = 1.0;
-        xs.dielectrics.push_back( diel );
-        xs.dielectrics.push_back( air );
+        if( geom.hOrigAbove > 0.0 )
+        {
+            // Demoted reference above: substrate (original εr) from signal to
+            // original reference level, air from there to virtual earth above.
+            double origRefY = -( geom.hOrigAbove + geom.traceThickness );
+
+            XS_DIELECTRIC_REGION airAbove, substrate, airBelow;
+            airAbove.yTop = xs.groundY;
+            airAbove.yBottom = origRefY;
+            airAbove.epsilonR = 1.0;
+
+            substrate.yTop = origRefY;
+            substrate.yBottom = -geom.traceThickness;
+            substrate.epsilonR = geom.erOrigAbove;
+
+            airBelow.yTop = -geom.traceThickness;
+            airBelow.yBottom = 10e-3;
+            airBelow.epsilonR = 1.0;
+
+            xs.dielectrics.push_back( airAbove );
+            xs.dielectrics.push_back( substrate );
+            xs.dielectrics.push_back( airBelow );
+            xs.epsilonR = geom.erOrigAbove;
+        }
+        else
+        {
+            XS_DIELECTRIC_REGION diel, air;
+            diel.yTop = xs.groundY;
+            diel.yBottom = -geom.traceThickness;
+            diel.epsilonR = geom.erAbove;
+            air.yTop = -geom.traceThickness;
+            air.yBottom = 10e-3;
+            air.epsilonR = 1.0;
+            xs.dielectrics.push_back( diel );
+            xs.dielectrics.push_back( air );
+        }
     }
 
     // Signal conductor at x=0 (conductors[0])

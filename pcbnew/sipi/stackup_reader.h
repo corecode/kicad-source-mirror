@@ -24,6 +24,8 @@
 #ifndef STACKUP_READER_H
 #define STACKUP_READER_H
 
+#include <sipi/via_model.h>
+
 #include <layer_ids.h>
 #include <math/vector2d.h>
 #include <vector>
@@ -110,6 +112,25 @@ public:
     LAYER_GEOMETRY GetLayerGeometry( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition,
                                     int aTraceWidth );
 
+    /**
+     * Get via geometry parameters for the analytical via model.
+     *
+     * Computes barrel height (sum of dielectric thicknesses between top and bottom
+     * layers), plane crossings with per-crossing εr and antipad radius, and adjacent
+     * reference planes for pad capacitance.
+     *
+     * @param aTopLayer     Via top copper layer
+     * @param aBottomLayer  Via bottom copper layer
+     * @param aSignalLayer  The layer the signal enters/exits (for stub calculation)
+     * @param aPosition     Board position (for antipad radius detection)
+     * @param aDrillRadius  Drill radius (m) for antipad fallback
+     * @param aPadRadius    Pad radius (m)
+     * @return VIA_PARAMS with stackup fields populated (position/role not set)
+     */
+    VIA_PARAMS GetViaGeometry( PCB_LAYER_ID aTopLayer, PCB_LAYER_ID aBottomLayer,
+                               PCB_LAYER_ID aSignalLayer, const VECTOR2I& aPosition,
+                               double aDrillRadius, double aPadRadius );
+
 private:
     struct COPPER_LAYER_INFO
     {
@@ -128,6 +149,10 @@ private:
 
     void buildLayerModel();
     bool isReferencePlane( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition ) const;
+    bool isReferencePlaneNearby( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition,
+                                 int aSearchRadius ) const;
+    double findAntipadRadius( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition,
+                              double aFallback ) const;
 
     const BOARD* m_board;
 

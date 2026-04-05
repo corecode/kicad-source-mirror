@@ -450,8 +450,10 @@ PATH_TERMINUS TRACE_PATH_WALKER::walkDirection( const VECTOR2I& aStartPos,
         if( m_padMap.count( currentPos ) )
             return PATH_TERMINUS::PAD;
 
-        // Find the next unvisited neighbor at currentPos
+        // Find the next unvisited neighbor at currentPos.
+        // Prefer vias first — a via is a layer transition, not a branch.
         BOARD_CONNECTED_ITEM* next = nullptr;
+        BOARD_CONNECTED_ITEM* nextVia = nullptr;
         int                   unvisitedDegree = 0;
 
         auto it = m_adjacency.find( currentPos );
@@ -462,13 +464,28 @@ PATH_TERMINUS TRACE_PATH_WALKER::walkDirection( const VECTOR2I& aStartPos,
             {
                 if( aVisited.count( neighbor ) == 0 )
                 {
-                    unvisitedDegree++;
-                    next = neighbor;
+                    if( neighbor->Type() == PCB_VIA_T )
+                    {
+                        nextVia = neighbor;
+                    }
+                    else
+                    {
+                        unvisitedDegree++;
+                        next = neighbor;
+                    }
                 }
             }
         }
 
-        // Stop at junctions (more than 1 unvisited neighbor = T-junction)
+        // If there's an unvisited via at this position, always take it next.
+        // The via is a layer transition — it doesn't count as a branch.
+        if( nextVia )
+        {
+            current = nextVia;
+            continue;
+        }
+
+        // Stop at junctions (more than 1 unvisited non-via neighbor = T-junction)
         if( unvisitedDegree > 1 )
         {
             PATH_JUNCTION jct;

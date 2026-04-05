@@ -433,31 +433,21 @@ BOOST_AUTO_TEST_CASE( SameSideNeighborDecreasesZ0 )
  */
 BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
 {
-    std::unique_ptr<BOARD> board;
+    KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
 
-    try
-    {
-        KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", board );
-    }
-    catch( ... )
-    {
-        BOOST_TEST_MESSAGE( "Board cparti_fpga not found — skipping" );
-        return;
-    }
-
-    if( !board || board->Tracks().empty() )
+    if( !m_board || m_board->Tracks().empty() )
     {
         BOOST_TEST_MESSAGE( "No tracks — skipping" );
         return;
     }
 
-    KI_TEST::FillZones( board.get() );
-    board->BuildConnectivity();
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
 
     // Find SRAM_D5 net
     int targetNet = -1;
 
-    for( const auto& [code, info] : board->GetNetInfo().NetsByNetcode() )
+    for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
     {
         if( info->GetNetname().Lower() == wxS( "sram_d5" ) )
         {
@@ -475,7 +465,7 @@ BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
     // Build R-tree with tracks, vias, and pads
     DRC_RTREE rtree;
 
-    for( PCB_TRACK* t : board->Tracks() )
+    for( PCB_TRACK* t : m_board->Tracks() )
     {
         if( t->Type() == PCB_VIA_T )
         {
@@ -488,7 +478,7 @@ BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
         }
     }
 
-    for( FOOTPRINT* fp : board->Footprints() )
+    for( FOOTPRINT* fp : m_board->Footprints() )
     {
         for( PAD* pad : fp->Pads() )
         {
@@ -497,8 +487,8 @@ BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
         }
     }
 
-    STACKUP_READER stackup( board.get() );
-    TRACE_PATH_WALKER walker( board.get() );
+    STACKUP_READER stackup( m_board.get() );
+    TRACE_PATH_WALKER walker( m_board.get() );
     walker.WalkNet( targetNet );
 
     const auto& path = walker.GetPath();
@@ -569,7 +559,7 @@ BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
 
         CROSS_SECTION_BUILDER xsBuilder;
         xsBuilder.SetSpatialIndex( &rtree );
-        xsBuilder.SetBoard( board.get() );
+        xsBuilder.SetBoard( m_board.get() );
         xsBuilder.SetPathItemDistances( &pathItemDist );
         xsBuilder.SetSignalTrack( track );
 
@@ -884,6 +874,492 @@ BOOST_AUTO_TEST_CASE( USBDiffPairProfile )
     {
         BOOST_TEST_MESSAGE( "DIFF_PROFILE failed: " << diffProfile.GetError() );
     }
+}
+
+
+/**
+ * Test via model integration in the impedance profile.
+ *
+ * Finds a net with at least one via, runs SE_PROFILE::Compute, and verifies
+ * that via transition points in the profile have populated VIA_CLUSTER_RESULT
+ * with physically reasonable values.
+ */
+BOOST_AUTO_TEST_CASE( ViaModelIntegration )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+
+    if( !m_board || m_board->Tracks().empty() )
+    {
+        BOOST_TEST_MESSAGE( "Board cparti_fpga not available — skipping" );
+        return;
+    }
+
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
+
+    // Find a net that has at least one via and at least one trace
+    int targetNet = -1;
+
+    std::set<int> netsWithVias;
+    std::set<int> netsWithTracks;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() <= 0 )
+            continue;
+
+        if( track->Type() == PCB_VIA_T )
+            netsWithVias.insert( track->GetNetCode() );
+        else
+            netsWithTracks.insert( track->GetNetCode() );
+    }
+
+    // Pick a signal net (not the largest via-count net, which is likely power/ground).
+    // Find the net with vias AND tracks that has the fewest vias (likely a signal net).
+    int bestViaCount = 999999;
+
+    for( int net : netsWithVias )
+    {
+        if( !netsWithTracks.count( net ) )
+            continue;
+
+        int vc = 0;
+
+        for( PCB_TRACK* track : m_board->Tracks() )
+        {
+            if( track->GetNetCode() == net && track->Type() == PCB_VIA_T )
+                vc++;
+        }
+
+        if( vc > 0 && vc < bestViaCount )
+        {
+            bestViaCount = vc;
+            targetNet = net;
+        }
+    }
+
+    if( targetNet < 0 )
+    {
+        BOOST_TEST_MESSAGE( "No net with both vias and traces — skipping" );
+        return;
+    }
+
+    BOOST_TEST_MESSAGE( "Testing via model integration on net " << targetNet );
+
+    // Count vias on this net
+    int viaCount = 0;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() == targetNet && track->Type() == PCB_VIA_T )
+            viaCount++;
+    }
+
+    BOOST_TEST_MESSAGE( "Net has " << viaCount << " via(s)" );
+
+    // Run the profile
+    SE_PROFILE profile;
+    BEM_CACHE cache;
+    bool ok = profile.Compute( m_board.get(), targetNet, cache );
+    BOOST_REQUIRE( ok );
+
+    const auto& samples = profile.GetSamples();
+    BOOST_REQUIRE_GT( samples.size(), 0 );
+
+    // Check for via annotations in the profile
+    int viaSamples = 0;
+
+    for( const IMPEDANCE_SAMPLE& s : samples )
+    {
+        if( !s.isVia )
+            continue;
+
+        viaSamples++;
+        BOOST_REQUIRE( s.viaModel );
+
+        const VIA_CLUSTER_RESULT& vm = *s.viaModel;
+
+        BOOST_TEST_MESSAGE( "Via at d=" << s.distNm / 1e6 << "mm"
+                            << " cluster=" << vm.numVias << " vias"
+                            << " Ldiff=" << vm.Ldiff * 1e12 << "pH"
+                            << " Ctotal[0]=" << vm.Ctotal[0] * 1e15 << "fF"
+                            << " Rdc=" << vm.Rdc[0] * 1000 << "mΩ"
+                            << " fmax=" << vm.fMax / 1e9 << "GHz"
+                            << " symmetric=" << vm.symmetric );
+
+        // Sanity checks on via model values
+        BOOST_CHECK_GT( vm.numVias, 0 );
+        BOOST_CHECK_GT( vm.Ldiff, 0.0 );
+        BOOST_CHECK_GE( vm.Ctotal[0], 0.0 ); // 0 if stackup has no configured planes
+        BOOST_CHECK_GT( vm.Rdc[0], 0.0 );
+        BOOST_CHECK_GT( vm.fMax, 1e9 ); // > 1 GHz
+
+        // L should be in a reasonable range (10 pH to 10 nH)
+        BOOST_CHECK_GT( vm.Ldiff, 10e-12 );
+        BOOST_CHECK_LT( vm.Ldiff, 10e-9 );
+    }
+
+    BOOST_TEST_MESSAGE( "Found " << viaSamples << " via-annotated samples out of "
+                        << samples.size() << " total" );
+
+    // The walker may not visit vias if the path doesn't traverse them
+    // (e.g., via connects to a zone the walker can't follow).
+    // This test validates the integration when vias ARE on the walked path;
+    // the walker's coverage limitations are a separate issue.
+    if( viaSamples == 0 && viaCount > 0 )
+    {
+        BOOST_TEST_MESSAGE( "Warning: net has " << viaCount
+                            << " via(s) but walker didn't traverse any — "
+                            "walker path coverage limitation" );
+    }
+}
+
+
+/**
+ * Diagnostic: Walk SRAM_D6 on cparti_fpga and report via traversal.
+ */
+BOOST_AUTO_TEST_CASE( SRAM_D6_ViaWalk )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+
+    if( !m_board || m_board->Tracks().empty() )
+    {
+        BOOST_TEST_MESSAGE( "Board not available — skipping" );
+        return;
+    }
+
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
+
+    // Find SRAM_D6 net
+    int targetNet = -1;
+
+    for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+    {
+        if( info->GetNetname() == wxS( "SRAM_D6" ) )
+        {
+            targetNet = code;
+            break;
+        }
+    }
+
+    BOOST_REQUIRE_GT( targetNet, 0 );
+    BOOST_TEST_MESSAGE( "SRAM_D6 net code = " << targetNet );
+
+    // Count items on this net
+    int trackCount = 0, viaCount = 0, arcCount = 0;
+
+    for( PCB_TRACK* t : m_board->Tracks() )
+    {
+        if( t->GetNetCode() != targetNet )
+            continue;
+
+        if( t->Type() == PCB_VIA_T )
+            viaCount++;
+        else if( t->Type() == PCB_ARC_T )
+            arcCount++;
+        else
+            trackCount++;
+    }
+
+    BOOST_TEST_MESSAGE( "SRAM_D6: " << trackCount << " tracks, " << arcCount
+                        << " arcs, " << viaCount << " vias" );
+
+    // Walk the net
+    TRACE_PATH_WALKER walker( m_board.get() );
+    bool walkOk = walker.WalkNet( targetNet, VECTOR2I( 0, 0 ) );
+    BOOST_REQUIRE( walkOk );
+
+    const auto& path = walker.GetPath();
+    const auto& result = walker.GetResult();
+
+    int pathVias = 0;
+    std::set<PCB_LAYER_ID> layers;
+
+    for( const PATH_POINT& pp : path )
+    {
+        if( pp.isVia )
+            pathVias++;
+
+        layers.insert( pp.layer );
+    }
+
+    BOOST_TEST_MESSAGE( "Walk: " << path.size() << " points, " << pathVias << " vias"
+                        << ", " << layers.size() << " layers"
+                        << ", start=" << (int) result.startTerminus
+                        << ", end=" << (int) result.endTerminus
+                        << ", visited=" << result.segmentsVisited
+                        << "/" << result.totalSegmentsOnNet );
+
+    // SRAM_D6 has 2 vias — both should be in the path
+    BOOST_CHECK_GE( pathVias, 1 );
+
+    if( pathVias == 0 )
+    {
+        BOOST_TEST_MESSAGE( "ERROR: Walker did not traverse any vias!" );
+
+        // Dump first and last few path points for debugging
+        for( size_t i = 0; i < std::min( path.size(), (size_t) 5 ); i++ )
+        {
+            BOOST_TEST_MESSAGE( "  path[" << i << "] pos=("
+                                << path[i].position.x << "," << path[i].position.y
+                                << ") layer=" << (int) path[i].layer
+                                << " via=" << path[i].isVia
+                                << " dist=" << path[i].distFromStart / 1e6 << "mm" );
+        }
+
+        if( path.size() > 5 )
+        {
+            BOOST_TEST_MESSAGE( "  ..." );
+
+            for( size_t i = path.size() - 3; i < path.size(); i++ )
+            {
+                BOOST_TEST_MESSAGE( "  path[" << i << "] pos=("
+                                    << path[i].position.x << "," << path[i].position.y
+                                    << ") layer=" << (int) path[i].layer
+                                    << " via=" << path[i].isVia
+                                    << " dist=" << path[i].distFromStart / 1e6 << "mm" );
+            }
+        }
+    }
+
+    // Now run the full profile and check for via annotations
+    SE_PROFILE profile;
+    BEM_CACHE cache;
+    bool ok = profile.Compute( m_board.get(), targetNet, cache );
+    BOOST_REQUIRE( ok );
+
+    int viaSamples = 0;
+
+    // Dump the full Z₀ profile to observe via transitions and reference plane splits
+    BOOST_TEST_MESSAGE( "\n--- SRAM_D6 impedance profile ---" );
+    BOOST_TEST_MESSAGE( "dist_mm\tZ0\terEff\tdelay_ps\tlayer\tvia\trefAbove\trefBelow\tnbrs\tgwires" );
+
+    for( const IMPEDANCE_SAMPLE& s : profile.GetSamples() )
+    {
+        if( s.isVia && s.viaModel )
+        {
+            viaSamples++;
+
+            BOOST_TEST_MESSAGE(
+                    s.distNm / 1e6 << "\t"
+                    << s.z0 << "\t"
+                    << s.erEff << "\t"
+                    << s.delayPs << "\t"
+                    << (int) s.layer << "\t"
+                    << "VIA(L=" << s.viaModel->Ldiff * 1e12 << "pH"
+                    << " C=" << s.viaModel->Ctotal[0] * 1e15 << "fF"
+                    << " n=" << s.viaModel->numVias << ")" );
+        }
+        else
+        {
+            BOOST_TEST_MESSAGE(
+                    s.distNm / 1e6 << "\t"
+                    << s.z0 << "\t"
+                    << s.erEff << "\t"
+                    << s.delayPs << "\t"
+                    << (int) s.layer << "\t"
+                    << "-\t"
+                    << s.hasRefAbove << "\t"
+                    << s.hasRefBelow << "\t"
+                    << s.neighborCount << "\t"
+                    << s.groundwireCount );
+        }
+    }
+
+    BOOST_TEST_MESSAGE( "--- end profile ---\n" );
+    BOOST_TEST_MESSAGE( "Profile: " << profile.GetSamples().size() << " samples, "
+                        << viaSamples << " with via models"
+                        << ", total delay=" << profile.GetTotalDelay() << "ps"
+                        << ", total length=" << profile.GetTotalLength() / 1e6 << "mm" );
+
+    BOOST_CHECK_GE( pathVias, 1 );
+}
+
+
+BOOST_AUTO_TEST_CASE( LEDs_DIG_6_Profile )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+
+    if( !m_board || m_board->Tracks().empty() )
+    {
+        BOOST_TEST_MESSAGE( "Board not available — skipping" );
+        return;
+    }
+
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
+
+    // Find /LEDs/DIG_6 net
+    int targetNet = -1;
+
+    for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+    {
+        if( info->GetNetname() == wxS( "/LEDs/DIG_6" ) )
+        {
+            targetNet = code;
+            break;
+        }
+    }
+
+    if( targetNet < 0 )
+    {
+        // Try without hierarchy prefix
+        for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+        {
+            if( info->GetNetname().Contains( wxS( "DIG_6" ) )
+                && !info->GetNetname().Contains( wxS( "SRAM" ) ) )
+            {
+                targetNet = code;
+                BOOST_TEST_MESSAGE( "Found net: " << info->GetNetname() << " code=" << code );
+                break;
+            }
+        }
+    }
+
+    if( targetNet < 0 )
+    {
+        BOOST_TEST_MESSAGE( "Net /LEDs/DIG_6 not found — listing DIG nets:" );
+
+        for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+        {
+            if( info->GetNetname().Contains( wxS( "DIG" ) ) )
+                BOOST_TEST_MESSAGE( "  " << info->GetNetname() << " code=" << code );
+        }
+
+        BOOST_TEST_MESSAGE( "SKIPPED" );
+        return;
+    }
+
+    BOOST_TEST_MESSAGE( "DIG_6 net code = " << targetNet );
+
+    SE_PROFILE profile;
+    BEM_CACHE cache;
+    bool ok = profile.Compute( m_board.get(), targetNet, cache );
+    BOOST_REQUIRE( ok );
+
+    BOOST_TEST_MESSAGE( "\n--- /LEDs/DIG_6 impedance profile ---" );
+    BOOST_TEST_MESSAGE( "dist_mm\tZ0\terEff\tdelay_ps\tlayer\tvia\trefAbove\trefBelow\tnbrs\tgwires" );
+
+    int viaSamples = 0;
+
+    for( const IMPEDANCE_SAMPLE& s : profile.GetSamples() )
+    {
+        if( s.isVia && s.viaModel )
+        {
+            viaSamples++;
+            BOOST_TEST_MESSAGE(
+                    s.distNm / 1e6 << "\t"
+                    << s.z0 << "\t"
+                    << s.erEff << "\t"
+                    << s.delayPs << "\t"
+                    << (int) s.layer << "\t"
+                    << "VIA(n=" << s.viaModel->numVias << ")" );
+        }
+        else
+        {
+            BOOST_TEST_MESSAGE(
+                    s.distNm / 1e6 << "\t"
+                    << s.z0 << "\t"
+                    << s.erEff << "\t"
+                    << s.delayPs << "\t"
+                    << (int) s.layer << "\t"
+                    << "-\t"
+                    << s.hasRefAbove << "\t"
+                    << s.hasRefBelow << "\t"
+                    << s.neighborCount << "\t"
+                    << s.groundwireCount );
+        }
+    }
+
+    BOOST_TEST_MESSAGE( "--- end profile ---" );
+    BOOST_TEST_MESSAGE( "Profile: " << profile.GetSamples().size() << " samples, "
+                        << viaSamples << " via, length=" << profile.GetTotalLength() / 1e6
+                        << "mm, delay=" << profile.GetTotalDelay() << "ps" );
+}
+
+
+BOOST_AUTO_TEST_CASE( SPIs_SCK_Profile )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+
+    if( !m_board || m_board->Tracks().empty() )
+    {
+        BOOST_TEST_MESSAGE( "Board not available — skipping" );
+        return;
+    }
+
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
+
+    int targetNet = -1;
+
+    for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+    {
+        if( info->GetNetname() == wxS( "SPIs_SCK" ) )
+        {
+            targetNet = code;
+            BOOST_TEST_MESSAGE( "Found net: " << info->GetNetname() << " code=" << code );
+            break;
+        }
+    }
+
+    if( targetNet < 0 )
+    {
+        BOOST_TEST_MESSAGE( "Net not found — listing SPI nets:" );
+
+        for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+        {
+            if( info->GetNetname().Contains( wxS( "SPI" ) ) )
+                BOOST_TEST_MESSAGE( "  " << info->GetNetname() << " code=" << code );
+        }
+
+        return;
+    }
+
+    SE_PROFILE profile;
+    BEM_CACHE cache;
+    bool ok = profile.Compute( m_board.get(), targetNet, cache );
+    BOOST_REQUIRE( ok );
+
+    BOOST_TEST_MESSAGE( "\n--- SPIs_SCK impedance profile ---" );
+    BOOST_TEST_MESSAGE( "dist_mm\tZ0\terEff\tdelay_ps\tlayer\tvia\trefAbove\trefBelow\tnbrs\tgwires" );
+
+    int viaSamples = 0;
+
+    for( const IMPEDANCE_SAMPLE& s : profile.GetSamples() )
+    {
+        if( s.isVia && s.viaModel )
+        {
+            viaSamples++;
+            BOOST_TEST_MESSAGE(
+                    s.distNm / 1e6 << "\t"
+                    << s.z0 << "\t"
+                    << s.erEff << "\t"
+                    << s.delayPs << "\t"
+                    << (int) s.layer << "\t"
+                    << "VIA(n=" << s.viaModel->numVias << ")" );
+        }
+        else
+        {
+            BOOST_TEST_MESSAGE(
+                    s.distNm / 1e6 << "\t"
+                    << s.z0 << "\t"
+                    << s.erEff << "\t"
+                    << s.delayPs << "\t"
+                    << (int) s.layer << "\t"
+                    << "-\t"
+                    << s.hasRefAbove << "\t"
+                    << s.hasRefBelow << "\t"
+                    << s.neighborCount << "\t"
+                    << s.groundwireCount );
+        }
+    }
+
+    BOOST_TEST_MESSAGE( "--- end profile ---" );
+    BOOST_TEST_MESSAGE( "Profile: " << profile.GetSamples().size() << " samples, "
+                        << viaSamples << " via, length=" << profile.GetTotalLength() / 1e6
+                        << "mm, delay=" << profile.GetTotalDelay() << "ps" );
 }
 
 

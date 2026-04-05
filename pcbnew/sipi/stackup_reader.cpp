@@ -121,6 +121,14 @@ void STACKUP_READER::buildLayerModel()
                  m_copperLayers[i].thickness * 1e6 );
     }
 
+    for( size_t i = 0; i < m_dielectrics.size(); i++ )
+    {
+        fprintf( stderr, "  Diel[%d]: z=%.4f-%.4fmm er=%.2f tanD=%.4f\n",
+                 (int) i,
+                 m_dielectrics[i].zTop * 1e3, m_dielectrics[i].zBottom * 1e3,
+                 m_dielectrics[i].epsilonR, m_dielectrics[i].lossTangent );
+    }
+
     fprintf( stderr, "  Zones on board: %d\n", (int) m_board->Zones().size() );
 
     for( ZONE* zone : m_board->Zones() )
@@ -333,3 +341,268 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
 }
 
 
+bool STACKUP_READER::isReferencePlaneNearby( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition,
+                                              int aSearchRadius ) const
+{
+    // For via modeling: a layer is a reference plane if a filled zone exists
+    // nearby, even if the exact via position is inside an antipad void.
+    // The zone is still the reference — the antipad is just the clearance hole.
+    for( ZONE* zone : m_board->Zones() )
+    {
+        if( !zone->IsOnLayer( aLayer ) )
+            continue;
+
+        if( zone->GetIsRuleArea() )
+            continue;
+
+        const std::shared_ptr<SHAPE_POLY_SET>& fill = zone->GetFilledPolysList( aLayer );
+
+        if( !fill || fill->IsEmpty() )
+            continue;
+
+        // Check if the zone fill edge is within the search radius.
+        // SquaredDistance returns 0 if the point is inside the fill.
+        SEG::ecoord d2 = fill->SquaredDistance( aPosition );
+
+        if( d2 <= (SEG::ecoord) aSearchRadius * aSearchRadius )
+            return true;
+    }
+
+    return false;
+}
+
+
+double STACKUP_READER::findAntipadRadius( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition,
+                                          double aFallback ) const
+{
+    // Find the nearest zone fill edge on this layer at this position.
+    // The via sits inside the antipad (clearance hole), so the nearest fill edge
+    // gives the antipad radius.
+    double bestDistSq = 1e30;
+
+    for( ZONE* zone : m_board->Zones() )
+    {
+        if( !zone->IsOnLayer( aLayer ) )
+            continue;
+
+        if( zone->GetIsRuleArea() )
+            continue;
+
+        const std::shared_ptr<SHAPE_POLY_SET>& fill = zone->GetFilledPolysList( aLayer );
+
+        if( !fill || fill->IsEmpty() )
+            continue;
+
+        SEG::ecoord d2 = fill->SquaredDistance( aPosition );
+
+        if( d2 < bestDistSq )
+            bestDistSq = d2;
+    }
+
+    if( bestDistSq < 1e29 )
+    {
+        double distNm = std::sqrt( (double) bestDistSq );
+        double distM = distNm * 1e-9;
+
+        if( distM > 0.0 )
+            return distM;
+    }
+
+    return aFallback;
+}
+
+
+VIA_PARAMS STACKUP_READER::GetViaGeometry( PCB_LAYER_ID aTopLayer, PCB_LAYER_ID aBottomLayer,
+                                            PCB_LAYER_ID aSignalLayer,
+                                            const VECTOR2I& aPosition,
+                                            double aDrillRadius, double aPadRadius )
+{
+    buildLayerModel();
+
+    VIA_PARAMS params;
+    params.drillRadius = aDrillRadius;
+    params.barrelOuterRadius = aDrillRadius + 25e-6; // 25µm typical plating
+    params.padRadius = aPadRadius;
+
+    // Default antipad fallback: 1.5× drill diameter = 3× drill radius
+    double antipadFallback = aDrillRadius * 3.0;
+
+    // Find indices of top and bottom layers in our copper layer list
+    int topIdx = -1;
+    int bottomIdx = -1;
+
+    for( int i = 0; i < (int) m_copperLayers.size(); i++ )
+    {
+        if( m_copperLayers[i].layerId == aTopLayer )
+            topIdx = i;
+
+        if( m_copperLayers[i].layerId == aBottomLayer )
+            bottomIdx = i;
+    }
+
+    if( topIdx < 0 || bottomIdx < 0 || topIdx >= bottomIdx )
+    {
+        // Can't determine stackup geometry — return defaults
+        params.barrelHeight = 1.6e-3;
+        params.epsilonReff = 4.4;
+        return params;
+    }
+
+    // Find signal layer index for stub calculation
+    int signalIdx = -1;
+
+    for( int i = 0; i < (int) m_copperLayers.size(); i++ )
+    {
+        if( m_copperLayers[i].layerId == aSignalLayer )
+        {
+            signalIdx = i;
+            break;
+        }
+    }
+
+    // Barrel height = sum of dielectric thicknesses between top and bottom layer
+    double barrelH = 0.0;
+    double erSum = 0.0;
+
+    for( const DIELECTRIC_INFO& diel : m_dielectrics )
+    {
+        double dielCenter = ( diel.zTop + diel.zBottom ) / 2.0;
+        double topZ = m_copperLayers[topIdx].zPosition;
+        double botZ = m_copperLayers[bottomIdx].zPosition;
+
+        if( dielCenter > topZ && dielCenter < botZ )
+        {
+            double thickness = diel.zBottom - diel.zTop;
+            barrelH += thickness;
+            erSum += diel.epsilonR * thickness;
+        }
+    }
+
+    params.barrelHeight = barrelH;
+    params.epsilonReff = ( barrelH > 0.0 ) ? erSum / barrelH : 4.4;
+
+    // Via-specific reference plane detection: use "nearby" test because the via
+    // position is inside the antipad void, not inside the zone fill copper.
+    // The zone is still a reference plane — the antipad is just the clearance hole.
+    static constexpr int VIA_PLANE_SEARCH_RADIUS = 2000000; // 2mm in nm
+
+    // Plane crossings: each copper layer between top and bottom (exclusive)
+    // that is a reference plane near this position
+    for( int i = topIdx + 1; i < bottomIdx; i++ )
+    {
+        if( isReferencePlaneNearby( m_copperLayers[i].layerId, aPosition,
+                                     VIA_PLANE_SEARCH_RADIUS ) )
+        {
+            VIA_PLANE_CROSSING pc;
+
+            // Find dielectric around this plane
+            for( const DIELECTRIC_INFO& diel : m_dielectrics )
+            {
+                double dielCenter = ( diel.zTop + diel.zBottom ) / 2.0;
+                double planeZ = m_copperLayers[i].zPosition;
+
+                // Use the dielectric closest to this plane
+                if( std::abs( dielCenter - planeZ ) < 0.5e-3 )
+                {
+                    pc.epsilonR = diel.epsilonR;
+                    pc.dielectricThickness = diel.zBottom - diel.zTop;
+                    break;
+                }
+            }
+
+            pc.antipadRadius = findAntipadRadius( m_copperLayers[i].layerId,
+                                                   aPosition, antipadFallback );
+
+            params.planeCrossings.push_back( pc );
+        }
+    }
+
+    // Pad-to-plane capacitance: the via has a pad on every copper layer it spans.
+    // Each non-reference-plane layer contributes C_pad to its nearest reference
+    // plane above and below.  All contributions sum into C_total for the lumped
+    // pi-model (no sectioning — valid up to f_max).
+    for( int i = topIdx; i <= bottomIdx; i++ )
+    {
+        // Reference planes contribute barrel C (already in planeCrossings), not pad C
+        if( i > topIdx && i < bottomIdx
+            && isReferencePlaneNearby( m_copperLayers[i].layerId, aPosition,
+                                        VIA_PLANE_SEARCH_RADIUS ) )
+        {
+            continue;
+        }
+
+        // Find nearest reference plane above this layer
+        for( int j = i - 1; j >= topIdx; j-- )
+        {
+            if( !isReferencePlaneNearby( m_copperLayers[j].layerId, aPosition,
+                                          VIA_PLANE_SEARCH_RADIUS ) )
+                continue;
+
+            for( const DIELECTRIC_INFO& diel : m_dielectrics )
+            {
+                double dielCenter = ( diel.zTop + diel.zBottom ) / 2.0;
+
+                if( dielCenter > m_copperLayers[j].zPosition
+                    && dielCenter < m_copperLayers[i].zPosition )
+                {
+                    VIA_PAD_PLANE pp;
+                    pp.epsilonR = diel.epsilonR;
+                    pp.thickness = diel.zBottom - diel.zTop;
+                    pp.antipadRadius = findAntipadRadius( m_copperLayers[j].layerId,
+                                                           aPosition, antipadFallback );
+                    params.adjacentPlanes.push_back( pp );
+                    break;
+                }
+            }
+
+            break; // nearest plane above only
+        }
+
+        // Find nearest reference plane below this layer
+        for( int j = i + 1; j <= bottomIdx; j++ )
+        {
+            if( !isReferencePlaneNearby( m_copperLayers[j].layerId, aPosition,
+                                          VIA_PLANE_SEARCH_RADIUS ) )
+                continue;
+
+            for( const DIELECTRIC_INFO& diel : m_dielectrics )
+            {
+                double dielCenter = ( diel.zTop + diel.zBottom ) / 2.0;
+
+                if( dielCenter > m_copperLayers[i].zPosition
+                    && dielCenter < m_copperLayers[j].zPosition )
+                {
+                    VIA_PAD_PLANE pp;
+                    pp.epsilonR = diel.epsilonR;
+                    pp.thickness = diel.zBottom - diel.zTop;
+                    pp.antipadRadius = findAntipadRadius( m_copperLayers[j].layerId,
+                                                           aPosition, antipadFallback );
+                    params.adjacentPlanes.push_back( pp );
+                    break;
+                }
+            }
+
+            break; // nearest plane below only
+        }
+    }
+
+    // Stub length: barrel below the signal exit layer
+    if( signalIdx >= 0 && signalIdx < bottomIdx )
+    {
+        double stubH = 0.0;
+
+        for( const DIELECTRIC_INFO& diel : m_dielectrics )
+        {
+            double dielCenter = ( diel.zTop + diel.zBottom ) / 2.0;
+            double sigZ = m_copperLayers[signalIdx].zPosition;
+            double botZ = m_copperLayers[bottomIdx].zPosition;
+
+            if( dielCenter > sigZ && dielCenter < botZ )
+                stubH += diel.zBottom - diel.zTop;
+        }
+
+        params.stubLength = stubH;
+    }
+
+    return params;
+}

@@ -434,6 +434,7 @@ set( PCBNEW_CLASS_SRCS
     sipi/impedance_profile.cpp
     sipi/stackup_reader.cpp
     sipi/trace_path_walker.cpp
+    sipi/via_model.cpp
 
     )
 
