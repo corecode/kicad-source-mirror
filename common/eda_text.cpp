@@ -125,22 +125,26 @@ EDA_TEXT::EDA_TEXT( const EDA_TEXT& aText ) :
     m_pos = aText.m_pos;
     m_visible = aText.m_visible;
 
-    m_render_cache_font = aText.m_render_cache_font;
-    m_render_cache_text = aText.m_render_cache_text;
-    m_render_cache_angle = aText.m_render_cache_angle;
-    m_render_cache_offset = aText.m_render_cache_offset;
-
-    m_render_cache.clear();
-
-    for( const std::unique_ptr<KIFONT::GLYPH>& glyph : aText.m_render_cache )
     {
-        if( KIFONT::OUTLINE_GLYPH* outline = dynamic_cast<KIFONT::OUTLINE_GLYPH*>( glyph.get() ) )
-            m_render_cache.emplace_back( std::make_unique<KIFONT::OUTLINE_GLYPH>( *outline ) );
-        else if( KIFONT::STROKE_GLYPH* stroke = dynamic_cast<KIFONT::STROKE_GLYPH*>( glyph.get() ) )
-            m_render_cache.emplace_back( std::make_unique<KIFONT::STROKE_GLYPH>( *stroke ) );
-    }
+        std::lock_guard<std::mutex> lock( aText.m_cache_mutex );
 
-    m_bbox_cache = aText.m_bbox_cache;
+        m_render_cache_font = aText.m_render_cache_font;
+        m_render_cache_text = aText.m_render_cache_text;
+        m_render_cache_angle = aText.m_render_cache_angle;
+        m_render_cache_offset = aText.m_render_cache_offset;
+
+        m_render_cache.clear();
+
+        for( const std::unique_ptr<KIFONT::GLYPH>& glyph : aText.m_render_cache )
+        {
+            if( KIFONT::OUTLINE_GLYPH* outline = dynamic_cast<KIFONT::OUTLINE_GLYPH*>( glyph.get() ) )
+                m_render_cache.emplace_back( std::make_unique<KIFONT::OUTLINE_GLYPH>( *outline ) );
+            else if( KIFONT::STROKE_GLYPH* stroke = dynamic_cast<KIFONT::STROKE_GLYPH*>( glyph.get() ) )
+                m_render_cache.emplace_back( std::make_unique<KIFONT::STROKE_GLYPH>( *stroke ) );
+        }
+
+        m_bbox_cache = aText.m_bbox_cache;
+    }
 
     m_unresolvedFontName = aText.m_unresolvedFontName;
 }
@@ -161,22 +165,26 @@ EDA_TEXT& EDA_TEXT::operator=( const EDA_TEXT& aText )
     m_pos = aText.m_pos;
     m_visible = aText.m_visible;
 
-    m_render_cache_font = aText.m_render_cache_font;
-    m_render_cache_text = aText.m_render_cache_text;
-    m_render_cache_angle = aText.m_render_cache_angle;
-    m_render_cache_offset = aText.m_render_cache_offset;
-
-    m_render_cache.clear();
-
-    for( const std::unique_ptr<KIFONT::GLYPH>& glyph : aText.m_render_cache )
     {
-        if( KIFONT::OUTLINE_GLYPH* outline = dynamic_cast<KIFONT::OUTLINE_GLYPH*>( glyph.get() ) )
-            m_render_cache.emplace_back( std::make_unique<KIFONT::OUTLINE_GLYPH>( *outline ) );
-        else if( KIFONT::STROKE_GLYPH* stroke = dynamic_cast<KIFONT::STROKE_GLYPH*>( glyph.get() ) )
-            m_render_cache.emplace_back( std::make_unique<KIFONT::STROKE_GLYPH>( *stroke ) );
-    }
+        std::lock_guard<std::mutex> lock( aText.m_cache_mutex );
 
-    m_bbox_cache = aText.m_bbox_cache;
+        m_render_cache_font = aText.m_render_cache_font;
+        m_render_cache_text = aText.m_render_cache_text;
+        m_render_cache_angle = aText.m_render_cache_angle;
+        m_render_cache_offset = aText.m_render_cache_offset;
+
+        m_render_cache.clear();
+
+        for( const std::unique_ptr<KIFONT::GLYPH>& glyph : aText.m_render_cache )
+        {
+            if( KIFONT::OUTLINE_GLYPH* outline = dynamic_cast<KIFONT::OUTLINE_GLYPH*>( glyph.get() ) )
+                m_render_cache.emplace_back( std::make_unique<KIFONT::OUTLINE_GLYPH>( *outline ) );
+            else if( KIFONT::STROKE_GLYPH* stroke = dynamic_cast<KIFONT::STROKE_GLYPH*>( glyph.get() ) )
+                m_render_cache.emplace_back( std::make_unique<KIFONT::STROKE_GLYPH>( *stroke ) );
+        }
+
+        m_bbox_cache = aText.m_bbox_cache;
+    }
 
     m_unresolvedFontName = aText.m_unresolvedFontName;
 
@@ -655,12 +663,14 @@ const KIFONT::METRICS& EDA_TEXT::getFontMetrics() const
 
 void EDA_TEXT::ClearRenderCache()
 {
+    std::lock_guard<std::mutex> lock( m_cache_mutex );
     m_render_cache.clear();
 }
 
 
 void EDA_TEXT::ClearBoundingBoxCache()
 {
+    std::lock_guard<std::mutex> lock( m_cache_mutex );
     m_bbox_cache.clear();
 }
 
@@ -671,6 +681,7 @@ EDA_TEXT::GetRenderCache( const KIFONT::FONT* aFont, const wxString& forResolved
 {
     if( aFont->IsOutline() )
     {
+        std::lock_guard<std::mutex> lock( m_cache_mutex );
         EDA_ANGLE resolvedAngle = GetDrawRotation();
 
         if( m_render_cache.empty()
@@ -704,6 +715,7 @@ EDA_TEXT::GetRenderCache( const KIFONT::FONT* aFont, const wxString& forResolved
 void EDA_TEXT::SetupRenderCache( const wxString& aResolvedText, const KIFONT::FONT* aFont,
                                  const EDA_ANGLE& aAngle, const VECTOR2I& aOffset )
 {
+    std::lock_guard<std::mutex> lock( m_cache_mutex );
     m_render_cache_text = aResolvedText;
     m_render_cache_font = aFont;
     m_render_cache_angle = aAngle;
@@ -714,6 +726,7 @@ void EDA_TEXT::SetupRenderCache( const wxString& aResolvedText, const KIFONT::FO
 
 void EDA_TEXT::AddRenderCacheGlyph( const SHAPE_POLY_SET& aPoly )
 {
+    std::lock_guard<std::mutex> lock( m_cache_mutex );
     m_render_cache.emplace_back( std::make_unique<KIFONT::OUTLINE_GLYPH>( aPoly ) );
     static_cast<KIFONT::OUTLINE_GLYPH*>( m_render_cache.back().get() )->CacheTriangulation();
 }
@@ -727,6 +740,7 @@ int EDA_TEXT::GetInterline( const RENDER_SETTINGS* aSettings ) const
 
 BOX2I EDA_TEXT::GetTextBox( const RENDER_SETTINGS* aSettings, int aLine ) const
 {
+    std::lock_guard<std::mutex> lock( m_cache_mutex );
     VECTOR2I drawPos = GetDrawPos();
 
     auto cache_it = m_bbox_cache.find( aLine );

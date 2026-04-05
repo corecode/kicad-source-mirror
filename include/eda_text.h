@@ -26,6 +26,7 @@
 #define EDA_TEXT_H_
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include <outline_mode.h>
@@ -461,6 +462,7 @@ private:
     };
 
     mutable std::map<int, BBOX_CACHE_ENTRY> m_bbox_cache;
+    mutable std::mutex                      m_cache_mutex;
 
     TEXT_ATTRIBUTES  m_attributes;
     wxString         m_unresolvedFontName;

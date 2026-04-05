@@ -1124,6 +1124,7 @@ private:
     mutable int            m_textExcludedBBoxCacheTimeStamp;
     mutable SHAPE_POLY_SET m_cachedHull;
     mutable int            m_hullCacheTimeStamp;
+    mutable std::mutex     m_bbox_cache_mutex;
 
     // A list of pad groups, each of which is allowed to short nets within their group.
     // A pad group is a comma-separated list of pad numbers.

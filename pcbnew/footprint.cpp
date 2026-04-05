@@ -1030,9 +1030,12 @@ void FOOTPRINT::CopyFrom( const BOARD_ITEM* aOther )
 
 void FOOTPRINT::InvalidateGeometryCaches()
 {
-    m_boundingBoxCacheTimeStamp = 0;
-    m_textExcludedBBoxCacheTimeStamp = 0;
-    m_hullCacheTimeStamp = 0;
+    {
+        std::lock_guard<std::mutex> lock( m_bbox_cache_mutex );
+        m_boundingBoxCacheTimeStamp = 0;
+        m_textExcludedBBoxCacheTimeStamp = 0;
+        m_hullCacheTimeStamp = 0;
+    }
 
     m_courtyard_cache_back_hash.Clear();
     m_courtyard_cache_front_hash.Clear();
@@ -1453,6 +1456,7 @@ const BOX2I FOOTPRINT::GetBoundingBox() const
 
 const BOX2I FOOTPRINT::GetBoundingBox( bool aIncludeText ) const
 {
+    std::lock_guard<std::mutex> lock( m_bbox_cache_mutex );
     const BOARD* board = GetBoard();
 
     if( board )
@@ -1640,6 +1644,7 @@ const BOX2I FOOTPRINT::GetLayerBoundingBox( LSET aLayers ) const
 
 SHAPE_POLY_SET FOOTPRINT::GetBoundingHull() const
 {
+    std::lock_guard<std::mutex> lock( m_bbox_cache_mutex );
     const BOARD* board = GetBoard();
     bool         isFPEdit = board && board->IsFootprintHolder();
 
@@ -2540,10 +2545,12 @@ void FOOTPRINT::Flip( const VECTOR2I& aCentre, FLIP_DIRECTION aFlipDirection )
     if( aFlipDirection == FLIP_DIRECTION::LEFT_RIGHT )
         Rotate( aCentre, ANGLE_180 );
 
-    m_boundingBoxCacheTimeStamp = 0;
-    m_textExcludedBBoxCacheTimeStamp = 0;
-
-    m_cachedHull.Mirror( m_pos, aFlipDirection );
+    {
+        std::lock_guard<std::mutex> bboxLock( m_bbox_cache_mutex );
+        m_boundingBoxCacheTimeStamp = 0;
+        m_textExcludedBBoxCacheTimeStamp = 0;
+        m_cachedHull.Mirror( m_pos, aFlipDirection );
+    }
 
     // The courtyard caches must be rebuilt after geometry change
     BuildCourtyardCaches();
@@ -2571,9 +2578,12 @@ void FOOTPRINT::SetPosition( const VECTOR2I& aPos )
     for( BOARD_ITEM* item : m_drawings )
         item->Move( delta );
 
-    m_cachedBoundingBox.Move( delta );
-    m_cachedTextExcludedBBox.Move( delta );
-    m_cachedHull.Move( delta );
+    {
+        std::lock_guard<std::mutex> bboxLock( m_bbox_cache_mutex );
+        m_cachedBoundingBox.Move( delta );
+        m_cachedTextExcludedBBox.Move( delta );
+        m_cachedHull.Move( delta );
+    }
 
     // The geometry work has been conserved by using Move(). But the hashes
     // need to be updated, otherwise the cached polygons will still be rebuild.
@@ -2625,9 +2635,12 @@ void FOOTPRINT::MoveAnchorPosition( const VECTOR2I& aMoveVector )
         model.m_Offset.y -= pcbIUScale.IUTomm( moveVector.y );
     }
 
-    m_cachedBoundingBox.Move( moveVector );
-    m_cachedTextExcludedBBox.Move( moveVector );
-    m_cachedHull.Move( moveVector );
+    {
+        std::lock_guard<std::mutex> bboxLock( m_bbox_cache_mutex );
+        m_cachedBoundingBox.Move( moveVector );
+        m_cachedTextExcludedBBox.Move( moveVector );
+        m_cachedHull.Move( moveVector );
+    }
 
     // The geometry work have been conserved by using Move(). But the hashes
     // need to be updated, otherwise the cached polygons will still be rebuild.
@@ -2660,9 +2673,12 @@ void FOOTPRINT::SetOrientation( const EDA_ANGLE& aNewAngle )
     for( BOARD_ITEM* item : m_drawings )
         item->Rotate( GetPosition(), angleChange );
 
-    m_boundingBoxCacheTimeStamp = 0;
-    m_textExcludedBBoxCacheTimeStamp = 0;
-    m_hullCacheTimeStamp = 0;
+    {
+        std::lock_guard<std::mutex> bboxLock( m_bbox_cache_mutex );
+        m_boundingBoxCacheTimeStamp = 0;
+        m_textExcludedBBoxCacheTimeStamp = 0;
+        m_hullCacheTimeStamp = 0;
+    }
 
     // The courtyard caches need to be rebuilt, as the geometry has changed
     BuildCourtyardCaches();
