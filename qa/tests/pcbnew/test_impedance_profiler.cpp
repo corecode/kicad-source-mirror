@@ -1438,8 +1438,8 @@ BOOST_AUTO_TEST_CASE( ProfilePerformance )
     BOOST_TEST_MESSAGE( "Zone fill + connectivity: " << fillMs << "ms" );
     BOOST_TEST_MESSAGE( "Profile best of " << RUNS << ": " << bestMs << "ms" );
 
-    // Profile must complete in under 3 seconds (typical ~1.5s)
-    BOOST_CHECK_LT( bestMs, 3000 );
+    // Profile must complete in under 2 seconds (typical ~0.9s)
+    BOOST_CHECK_LT( bestMs, 2000 );
 }
 
 

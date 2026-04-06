@@ -92,8 +92,8 @@ static const double GAUSS_WTS_6[6] = {
 // ---------------------------------------------------------------------------
 
 BEM_2D_SOLVER::BEM_2D_SOLVER() :
-        m_panelsPerEdge( 5 ),
-        m_edgeSingularity( true ),
+        m_panelsPerEdge( 1 ),
+        m_edgeSingularity( false ),
         m_fineInterfaceGrid( false ),
         m_intfGridOverride( false ),
         m_intfExtentMult( 5.0 ),
@@ -114,7 +114,7 @@ void BEM_2D_SOLVER::SetGeometry( const XS_GEOMETRY& aGeometry )
 
 void BEM_2D_SOLVER::SetPanelsPerEdge( int aCount )
 {
-    m_panelsPerEdge = std::max( aCount, 3 );
+    m_panelsPerEdge = std::max( aCount, 1 );
 }
 
 
@@ -606,7 +606,7 @@ void BEM_2D_SOLVER::buildElements()
 
         // Groundwires have smooth charge distributions — use fewer panels.
         int ppe = cond.isGround ? std::max( m_panelsPerEdge / 2, 4 ) : m_panelsPerEdge;
-        int nHoriz = std::clamp( ppe, 3, 50 );
+        int nHoriz = std::clamp( ppe, 1, 50 );
         int nVert  = std::clamp( (int) round( ppe * cond.thickness
                                                / cond.width ), 2, 20 );
 

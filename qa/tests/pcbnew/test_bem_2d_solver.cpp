@@ -1191,6 +1191,94 @@ BOOST_AUTO_TEST_CASE( InterfaceGridSensitivity )
 
 
 /**
+ * Panel count and edge singularity: accuracy vs runtime tradeoff.
+ * For each panel count, measure Z0 error vs fine-mesh reference and solve time,
+ * with and without edge singularity.
+ */
+BOOST_AUTO_TEST_CASE( PanelRuntimeTradeoff )
+{
+    XS_GEOMETRY geom = makeMicrostripGeom( 0.15e-3, 0.1e-3, 4.4 );
+
+    // Fine reference
+    BEM_2D_SOLVER refSolver;
+    refSolver.SetGeometry( geom );
+    refSolver.SetPanelsPerEdge( 30 );
+    BOOST_REQUIRE( refSolver.Solve() );
+    double z0Ref = refSolver.GetResult().Z0;
+
+    BOOST_TEST_MESSAGE( "" );
+    BOOST_TEST_MESSAGE( "Panel count vs runtime (typical microstrip, ref Z0="
+                        << z0Ref << ")" );
+    BOOST_TEST_MESSAGE( "panels  Z0_on     err_on   us_on    Z0_off    err_off  us_off   delta" );
+
+    for( int n : { 1, 2, 3, 4, 5, 6, 8, 10 } )
+    {
+        static constexpr int RUNS = 10;
+
+        // With edge singularity
+        double z0On = 0;
+        long   usOn = 0;
+        {
+            BEM_2D_SOLVER warmup;
+            warmup.SetGeometry( geom );
+            warmup.SetPanelsPerEdge( n );
+            warmup.Solve();
+
+            for( int r = 0; r < RUNS; r++ )
+            {
+                BEM_2D_SOLVER s;
+                s.SetGeometry( geom );
+                s.SetPanelsPerEdge( n );
+                auto t0 = std::chrono::steady_clock::now();
+                s.Solve();
+                auto t1 = std::chrono::steady_clock::now();
+                usOn += std::chrono::duration_cast<std::chrono::microseconds>( t1 - t0 ).count();
+                z0On = s.GetResult().Z0;
+            }
+
+            usOn /= RUNS;
+        }
+
+        // Without edge singularity
+        double z0Off = 0;
+        long   usOff = 0;
+        {
+            BEM_2D_SOLVER warmup;
+            warmup.SetGeometry( geom );
+            warmup.SetPanelsPerEdge( n );
+            warmup.SetEdgeSingularity( false );
+            warmup.Solve();
+
+            for( int r = 0; r < RUNS; r++ )
+            {
+                BEM_2D_SOLVER s;
+                s.SetGeometry( geom );
+                s.SetPanelsPerEdge( n );
+                s.SetEdgeSingularity( false );
+                auto t0 = std::chrono::steady_clock::now();
+                s.Solve();
+                auto t1 = std::chrono::steady_clock::now();
+                usOff += std::chrono::duration_cast<std::chrono::microseconds>( t1 - t0 ).count();
+                z0Off = s.GetResult().Z0;
+            }
+
+            usOff /= RUNS;
+        }
+
+        double errOn = 100.0 * ( z0On - z0Ref ) / z0Ref;
+        double errOff = 100.0 * ( z0Off - z0Ref ) / z0Ref;
+
+        char line[160];
+        snprintf( line, sizeof( line ),
+                  "%5d   %8.3f  %+6.3f%%  %5ld    %8.3f  %+6.3f%%  %5ld    %+6.3f%%",
+                  n, z0On, errOn, usOn, z0Off, errOff, usOff, errOn - errOff );
+
+        BOOST_TEST_MESSAGE( line );
+    }
+}
+
+
+/**
  * Edge singularity sensitivity: compare Z0 and εr_eff with and without
  * ν-exponent edge singularity across a range of panel counts and geometries.
  */
