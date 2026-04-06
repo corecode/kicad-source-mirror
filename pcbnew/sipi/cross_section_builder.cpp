@@ -416,106 +416,25 @@ void CROSS_SECTION_BUILDER::findZoneNeighbors( const XS_BUILD_PARAMS& aParams,
     if( zoneWidth < 100000 )
         zoneWidth = 100000; // min 100µm
 
-    auto intersectChain = [&]( const SHAPE_LINE_CHAIN& aChain )
+    std::vector<double> crossings = findZoneFillEdgeCrossings(
+            aCutSeg, aParams.samplePos, aNormal, aParams.signalLayer,
+            aParams.couplingHorizon );
+
+    for( double lateralDist : crossings )
     {
-        for( int ei = 0; ei < aChain.SegmentCount(); ei++ )
-        {
-            SEG edge = aChain.Segment( ei );
-            OPT_VECTOR2I intersection = aCutSeg.IntersectLines( edge );
+        double edgeToEdge = std::abs( lateralDist ) - halfTraceW;
 
-            if( !intersection )
-                continue;
-
-            if( !edge.Contains( *intersection ) )
-                continue;
-
-            VECTOR2D delta( intersection->x - aParams.samplePos.x,
-                            intersection->y - aParams.samplePos.y );
-            double lateralDist = delta.x * aNormal.x + delta.y * aNormal.y;
-            double edgeToEdge = std::abs( lateralDist ) - halfTraceW;
-
-            if( edgeToEdge > aParams.couplingHorizon || edgeToEdge < MIN_EDGE_TO_EDGE )
-                continue;
-
-            int zoneCenterDist;
-
-            if( lateralDist > 0 )
-                zoneCenterDist = (int) lateralDist + zoneWidth / 2;
-            else
-                zoneCenterDist = (int) lateralDist - zoneWidth / 2;
-
-            aNeighbors.push_back( { zoneCenterDist, zoneWidth } );
-        }
-    };
-
-    // Use the R-tree to find zones near the sample point, then intersect
-    // the cut line with their fill polygon edges.
-    if( !m_rtree )
-        return;
-
-    auto nearbyZones = m_rtree->GetObjectsAt( aParams.samplePos, aParams.signalLayer,
-                                               aParams.couplingHorizon );
-
-    // Collect unique zones (R-tree may return multiple entries per zone)
-    std::set<ZONE*> processedZones;
-
-    for( BOARD_ITEM* item : nearbyZones )
-    {
-        if( item->Type() != PCB_ZONE_T )
+        if( edgeToEdge > aParams.couplingHorizon || edgeToEdge < MIN_EDGE_TO_EDGE )
             continue;
 
-        ZONE* zone = static_cast<ZONE*>( item );
+        int zoneCenterDist;
 
-        if( zone->GetIsRuleArea() )
-            continue;
+        if( lateralDist > 0 )
+            zoneCenterDist = (int) lateralDist + zoneWidth / 2;
+        else
+            zoneCenterDist = (int) lateralDist - zoneWidth / 2;
 
-        if( !processedZones.insert( zone ).second )
-            continue; // already processed
-
-        const std::shared_ptr<SHAPE_POLY_SET>& fill =
-                zone->GetFilledPolysList( aParams.signalLayer );
-
-        if( !fill || fill->IsEmpty() )
-            continue;
-
-        for( int oi = 0; oi < fill->OutlineCount(); oi++ )
-        {
-            intersectChain( fill->Outline( oi ) );
-
-            for( int hi = 0; hi < fill->HoleCount( oi ); hi++ )
-                intersectChain( fill->Hole( oi, hi ) );
-        }
-    }
-
-    // Also check zones directly from the board if the R-tree doesn't
-    // contain zone fills (e.g., our temp R-tree only has tracks).
-    if( processedZones.empty() && m_board )
-    {
-        for( ZONE* zone : m_board->Zones() )
-        {
-            if( !zone->IsOnLayer( aParams.signalLayer ) )
-                continue;
-
-            if( zone->GetIsRuleArea() )
-                continue;
-
-            const std::shared_ptr<SHAPE_POLY_SET>& fill =
-                    zone->GetFilledPolysList( aParams.signalLayer );
-
-            if( !fill || fill->IsEmpty() )
-                continue;
-
-            // No fast rejection in fallback — we only reach here when the R-tree
-            // doesn't have zone data (temp R-tree case), so zone count is the only cost.
-
-            for( int oi = 0; oi < fill->OutlineCount(); oi++ )
-            {
-                intersectChain( fill->Outline( oi ) );
-
-                for( int hi = 0; hi < fill->HoleCount( oi ); hi++ )
-                    intersectChain( fill->Hole( oi, hi ) );
-            }
-        }
+        aNeighbors.push_back( { zoneCenterDist, zoneWidth } );
     }
 }
 

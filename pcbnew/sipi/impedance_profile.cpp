@@ -832,6 +832,9 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
 
         std::vector<PCB_LAYER_ID> precompLayers;
 
+        // Signal layer (for findZoneNeighbors)
+        precompLayers.push_back( segs[midIdx].track->GetLayer() );
+
         if( geom0.refLayerBelow != UNDEFINED_LAYER )
             precompLayers.push_back( geom0.refLayerBelow );
 
