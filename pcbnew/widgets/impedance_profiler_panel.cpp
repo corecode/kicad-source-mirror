@@ -189,12 +189,16 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
     const XS_GEOMETRY& geom = *m_geometry;
     const XS_CONDUCTOR& sig = geom.conductors[0];
 
-    // --- Compute Y extent from conductors + ground planes ---
+    // --- Compute Y extent from conductors (not image ground, which may be
+    //     at virtual earth far away) ---
     double yMin = sig.centerY - sig.thickness / 2.0;
     double yMax = sig.centerY + sig.thickness / 2.0;
 
-    yMin = std::min( yMin, geom.groundY );
-    yMax = std::max( yMax, geom.groundY );
+    for( const XS_CONDUCTOR& c : geom.conductors )
+    {
+        yMin = std::min( yMin, c.centerY - c.thickness / 2.0 );
+        yMax = std::max( yMax, c.centerY + c.thickness / 2.0 );
+    }
 
     if( geom.hasUpperGround )
     {
