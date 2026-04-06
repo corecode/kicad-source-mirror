@@ -136,13 +136,16 @@ private:
 
     // --- Assembly and solve ---
 
-    /// Assemble and solve the full system (conductor + interface elements).
-    /// Returns NxN Maxwell capacitance matrix.
-    Eigen::MatrixXd solveCapacitanceFull();
+    /// Assemble the conductor-conductor potential-kernel block (shared
+    /// between air and full solves).
+    void assembleConductorBlock( Eigen::MatrixXd& aA ) const;
 
-    /// Assemble and solve the conductor-only (free-space) system.
-    /// Returns NxN vacuum capacitance matrix.
-    Eigen::MatrixXd solveCapacitanceAir();
+    /// Solve the full system using a pre-assembled conductor block.
+    Eigen::MatrixXd solveCapacitanceFull( const Eigen::MatrixXd& aCondBlock );
+
+    /// Solve the conductor-only (free-space) system using a pre-assembled
+    /// conductor block.
+    Eigen::MatrixXd solveCapacitanceAir( const Eigen::MatrixXd& aCondBlock );
 
     /// Integrate the potential kernel G over an inner element, evaluated
     /// at observation point (x,y).  Returns value[3] for each node.

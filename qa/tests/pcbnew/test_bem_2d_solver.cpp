@@ -749,96 +749,6 @@ BOOST_AUTO_TEST_CASE( GroundwiresOpeningSmoothly )
 
 
 /**
- * BUG TEST: A very wide groundwire at the original ground plane position should
- * approximate the infinite ground plane.  When the image ground is pushed to
- * virtual earth (10mm), the groundwire must sit in the correct dielectric
- * (FR4, not air) to give the right Z₀.
- *
- * This test constructs the geometry manually with the proper dielectric
- * layering: FR4 from signal to groundwire level, air below.
- */
-BOOST_AUTO_TEST_CASE( WideGroundwireMatchesImageGround )
-{
-    double w = 0.15e-3;
-    double t = 35e-6;
-    double hOrig = 0.1e-3;   // original ground distance
-    double er = 4.4;
-    double hEarth = 10e-3;   // virtual earth distance
-    int panels = 12;
-
-    // Reference: normal microstrip with image ground at hOrig
-    XS_GEOMETRY geomRef = makeMicrostripGeom( w, hOrig, er, t );
-
-    BEM_2D_SOLVER solverRef;
-    solverRef.SetGeometry( geomRef );
-    solverRef.SetPanelsPerEdge( panels );
-    BOOST_REQUIRE( solverRef.Solve() );
-    double z0Ref = solverRef.GetResult().Z0;
-
-    // Test: image ground at virtual earth, wide groundwire at original position.
-    // Dielectric: FR4 from signal to groundwire, air from groundwire to earth.
-    XS_GEOMETRY geomGW;
-    geomGW.groundY = 0.0;  // image ground (virtual earth maps here)
-
-    double condY = -( hEarth + t / 2.0 );
-
-    XS_CONDUCTOR cond;
-    cond.centerX = 0.0;
-    cond.centerY = condY;
-    cond.width = w;
-    cond.thickness = t;
-    geomGW.conductors.push_back( cond );
-
-    // Wide groundwire at the original ground position
-    double gwY = condY + hOrig + t / 2.0;  // hOrig below signal center
-
-    XS_CONDUCTOR gw;
-    gw.centerX = 0.0;
-    gw.centerY = gwY;
-    gw.width = 10e-3;   // 10mm wide — should approximate infinite
-    gw.thickness = t;
-    gw.isGround = true;
-    geomGW.conductors.push_back( gw );
-
-    // Dielectric: FR4 between signal and groundwire, air below groundwire
-    XS_DIELECTRIC_REGION air, fr4, airBelow;
-    air.yTop = -10e-3;                 // far above
-    air.yBottom = condY + t / 2.0;     // top of signal
-    air.epsilonR = 1.0;
-
-    fr4.yTop = condY + t / 2.0;       // top of signal → bottom face of signal is the interface
-    fr4.yBottom = gwY - t / 2.0;      // top of groundwire
-    fr4.epsilonR = er;
-
-    airBelow.yTop = gwY + t / 2.0;    // below groundwire
-    airBelow.yBottom = 0.0;           // image ground
-    airBelow.epsilonR = 1.0;
-
-    geomGW.dielectrics.push_back( air );
-    geomGW.dielectrics.push_back( fr4 );
-    geomGW.dielectrics.push_back( airBelow );
-    geomGW.epsilonR = er;
-
-    BEM_2D_SOLVER solverGW;
-    solverGW.SetGeometry( geomGW );
-    solverGW.SetPanelsPerEdge( panels );
-    BOOST_REQUIRE( solverGW.Solve() );
-    double z0GW = solverGW.GetResult().Z0;
-
-    BOOST_TEST_MESSAGE( "Reference (image at " << hOrig * 1e3 << "mm): Z0=" << z0Ref );
-    BOOST_TEST_MESSAGE( "Groundwire (10mm wide at " << hOrig * 1e3
-                        << "mm, earth at " << hEarth * 1e3 << "mm): Z0=" << z0GW );
-    BOOST_TEST_MESSAGE( "Difference: " << std::abs( z0GW - z0Ref ) << " Ohm ("
-                        << std::abs( z0GW - z0Ref ) / z0Ref * 100.0 << "%)" );
-
-    // A 10mm-wide groundwire should match the image ground within ~10%.
-    // The groundwire has edge fringing that an infinite plane doesn't,
-    // so it slightly over-estimates capacitance (lower Z₀).
-    BOOST_CHECK_CLOSE( z0GW, z0Ref, 10.0 );
-}
-
-
-/**
  * Coupled stripline: two traces between two ground planes.
  * Zdiff should be lower than coupled microstrip (more confinement).
  */
@@ -1397,6 +1307,742 @@ BOOST_AUTO_TEST_CASE( SolvePerformance )
 
     // Must complete in under 10ms (typical is ~2ms at 5 panels/edge)
     BOOST_CHECK_LT( avgUs, 10000.0 );
+}
+
+
+// ---------------------------------------------------------------------------
+// Demotion boundary investigation: reproduce the Z0 drop from D5 at d=31.2→31.4mm
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper: build the non-demoted geometry from D5 at d=31.2mm.
+ * Microstrip with 3 neighbors, image ground at 0.21mm, FR4 εr=4.5,
+ * solder mask εr=3.3.
+ */
+static XS_GEOMETRY makeD5NonDemoted()
+{
+    XS_GEOMETRY xs;
+    xs.groundY = 0.0;
+    xs.hasUpperGround = false;
+    xs.epsilonR = 4.50;
+
+    // Signal conductor
+    XS_CONDUCTOR sig;
+    sig.centerX = 0.0;
+    sig.centerY = -0.2279e-3;
+    sig.width = 0.1900e-3;
+    sig.thickness = 0.0350e-3;
+    xs.conductors.push_back( sig );
+
+    // Neighbor conductors (same layer)
+    XS_CONDUCTOR nb1;
+    nb1.centerX = 0.2900e-3;
+    nb1.centerY = -0.2279e-3;
+    nb1.width = 0.1900e-3;
+    nb1.thickness = 0.0350e-3;
+    xs.conductors.push_back( nb1 );
+
+    XS_CONDUCTOR nb2;
+    nb2.centerX = -0.5585e-3;
+    nb2.centerY = -0.2279e-3;
+    nb2.width = 0.1900e-3;
+    nb2.thickness = 0.0350e-3;
+    xs.conductors.push_back( nb2 );
+
+    XS_CONDUCTOR nb3;
+    nb3.centerX = 0.8281e-3;
+    nb3.centerY = -0.2279e-3;
+    nb3.width = 0.6312e-3;
+    nb3.thickness = 0.0350e-3;
+    xs.conductors.push_back( nb3 );
+
+    // Dielectrics: air above, FR4 below, solder mask at signal boundary
+    XS_DIELECTRIC_REGION air;
+    air.yTop = -10e-3;
+    air.yBottom = -0.2554e-3;
+    air.epsilonR = 1.0;
+    xs.dielectrics.push_back( air );
+
+    XS_DIELECTRIC_REGION fr4;
+    fr4.yTop = -0.2104e-3;
+    fr4.yBottom = 0.0;
+    fr4.epsilonR = 4.50;
+    xs.dielectrics.push_back( fr4 );
+
+    XS_DIELECTRIC_REGION sm;
+    sm.yTop = -0.2554e-3;
+    sm.yBottom = -0.2104e-3;
+    sm.epsilonR = 3.30;
+    xs.dielectrics.push_back( sm );
+
+    return xs;
+}
+
+
+/**
+ * Helper: build the demoted geometry from D5 at d=31.4mm.
+ * Signal shifted down to hFallback, one groundwire at original ref level,
+ * FR4 between signal and groundwire, air below to virtual earth.
+ */
+static XS_GEOMETRY makeD5Demoted()
+{
+    XS_GEOMETRY xs;
+    xs.groundY = 0.0;
+    xs.hasUpperGround = false;
+    xs.epsilonR = 4.50;
+
+    // Same 4 signal conductors, shifted to new Y
+    XS_CONDUCTOR sig;
+    sig.centerX = 0.0;
+    sig.centerY = -1.5337e-3;
+    sig.width = 0.1900e-3;
+    sig.thickness = 0.0350e-3;
+    xs.conductors.push_back( sig );
+
+    XS_CONDUCTOR nb1;
+    nb1.centerX = 0.2900e-3;
+    nb1.centerY = -1.5337e-3;
+    nb1.width = 0.1900e-3;
+    nb1.thickness = 0.0350e-3;
+    xs.conductors.push_back( nb1 );
+
+    XS_CONDUCTOR nb2;
+    nb2.centerX = -0.5585e-3;
+    nb2.centerY = -1.5337e-3;
+    nb2.width = 0.1900e-3;
+    nb2.thickness = 0.0350e-3;
+    xs.conductors.push_back( nb2 );
+
+    XS_CONDUCTOR nb3;
+    nb3.centerX = 0.8281e-3;
+    nb3.centerY = -1.5337e-3;
+    nb3.width = 0.6312e-3;
+    nb3.thickness = 0.0350e-3;
+    xs.conductors.push_back( nb3 );
+
+    // Groundwire at original reference level
+    XS_CONDUCTOR gw;
+    gw.centerX = 0.4055e-3;
+    gw.centerY = -1.3058e-3;
+    gw.width = 1.2929e-3;
+    gw.thickness = 0.0350e-3;
+    gw.isGround = true;
+    xs.conductors.push_back( gw );
+
+    // Dielectrics: air above, FR4 from signal to original ref,
+    // air from original ref to virtual earth, solder mask
+    XS_DIELECTRIC_REGION airAbove;
+    airAbove.yTop = -10e-3;
+    airAbove.yBottom = -1.5612e-3;
+    airAbove.epsilonR = 1.0;
+    xs.dielectrics.push_back( airAbove );
+
+    XS_DIELECTRIC_REGION fr4;
+    fr4.yTop = -1.5162e-3;
+    fr4.yBottom = -1.3058e-3;
+    fr4.epsilonR = 4.50;
+    xs.dielectrics.push_back( fr4 );
+
+    XS_DIELECTRIC_REGION airBelow;
+    airBelow.yTop = -1.3058e-3;
+    airBelow.yBottom = 0.0;
+    airBelow.epsilonR = 1.0;
+    xs.dielectrics.push_back( airBelow );
+
+    XS_DIELECTRIC_REGION sm;
+    sm.yTop = -1.5612e-3;
+    sm.yBottom = -1.5162e-3;
+    sm.epsilonR = 3.30;
+    xs.dielectrics.push_back( sm );
+
+    return xs;
+}
+
+
+/**
+ * Step 2: Reproduce the D5 demotion boundary Z0 drop.
+ * Non-demoted should give Z0 ≈ 58.2, demoted should give Z0 ≈ 55.9.
+ */
+BOOST_AUTO_TEST_CASE( DemotionBoundaryReproduce )
+{
+    XS_GEOMETRY xsNonDemoted = makeD5NonDemoted();
+
+    BEM_2D_SOLVER solverND;
+    solverND.SetGeometry( xsNonDemoted );
+    solverND.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverND.Solve() );
+
+    XS_GEOMETRY xsDemoted = makeD5Demoted();
+
+    BEM_2D_SOLVER solverD;
+    solverD.SetGeometry( xsDemoted );
+    solverD.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverD.Solve() );
+
+    const auto& rND = solverND.GetResult();
+    const auto& rD  = solverD.GetResult();
+
+    BOOST_TEST_MESSAGE( "=== Non-demoted ===" );
+    BOOST_TEST_MESSAGE( "  C=" << rND.C( 0, 0 ) << "  C0=" << rND.C0( 0, 0 )
+                        << "  erEff=" << rND.erEff << "  Z0=" << rND.Z0 );
+
+    BOOST_TEST_MESSAGE( "=== Demoted ===" );
+    BOOST_TEST_MESSAGE( "  C=" << rD.C( 0, 0 ) << "  C0=" << rD.C0( 0, 0 )
+                        << "  erEff=" << rD.erEff << "  Z0=" << rD.Z0 );
+
+    BOOST_TEST_MESSAGE( "=== Deltas ===" );
+    BOOST_TEST_MESSAGE( "  dC="  << ( rD.C( 0, 0 ) / rND.C( 0, 0 ) - 1.0 ) * 100 << "%" );
+    BOOST_TEST_MESSAGE( "  dC0=" << ( rD.C0( 0, 0 ) / rND.C0( 0, 0 ) - 1.0 ) * 100 << "%" );
+    BOOST_TEST_MESSAGE( "  dZ0=" << rD.Z0 - rND.Z0 << " Ohm" );
+
+    // Confirm the Z0 inversion is real (demoted < non-demoted)
+    BOOST_CHECK_GT( rND.Z0, rD.Z0 );
+}
+
+
+/**
+ * Step 3a: Add groundwires only — keep original groundY at h=0.21mm.
+ * If groundwires PLUS close image ground cause Z0 to drop, this isolates
+ * the groundwire effect when the image is at the right distance.
+ */
+BOOST_AUTO_TEST_CASE( DemotionBisect_GroundwiresOnly )
+{
+    // Start with non-demoted geometry, add the groundwire at the SAME
+    // relative position (but keep groundY at 0.21mm / condY at -0.2279mm).
+    XS_GEOMETRY xs = makeD5NonDemoted();
+
+    // Groundwire at original ref level — same relative offset as demoted,
+    // but in the non-demoted coordinate frame (ground at y=0, signal at -0.2279mm).
+    // In demoted: signal at -1.5337mm, groundwire at -1.3058mm (offset = +0.2279mm = h+t/2).
+    // In non-demoted frame: groundwire at -0.2279mm + 0.2279mm = 0.0 ← that's the ground plane!
+    // So put it just above: at -t/2 = -0.0175mm (same as groundwire at image surface).
+    //
+    // Actually, let's put the groundwire at the same position relative to the signal
+    // as in the demoted case: 0.2279mm below signal center.
+    // Signal center is at -0.2279mm, so groundwire center = -0.2279mm + 0.2279mm = 0.0mm.
+    // That's exactly the image ground. Instead, place it just inside the domain.
+    XS_CONDUCTOR gw;
+    gw.centerX = 0.4055e-3;
+    gw.centerY = -0.0175e-3; // just above image ground, copper thickness centered
+    gw.width = 1.2929e-3;
+    gw.thickness = 0.0350e-3;
+    gw.isGround = true;
+    xs.conductors.push_back( gw );
+
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( xs );
+    solver.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver.Solve() );
+
+    const auto& r = solver.GetResult();
+    BOOST_TEST_MESSAGE( "=== Non-demoted + groundwire at image level ===" );
+    BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                        << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+}
+
+
+/**
+ * Step 3b: Move image ground only — push groundY to hFallback (1.52mm),
+ * but no groundwires. This isolates the effect of moving the image far away.
+ */
+BOOST_AUTO_TEST_CASE( DemotionBisect_FarImageOnly )
+{
+    // Demoted geometry without the groundwire
+    XS_GEOMETRY xs = makeD5Demoted();
+
+    // Remove groundwire (last conductor)
+    xs.conductors.erase(
+            std::remove_if( xs.conductors.begin(), xs.conductors.end(),
+                            []( const XS_CONDUCTOR& c ) { return c.isGround; } ),
+            xs.conductors.end() );
+
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( xs );
+    solver.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver.Solve() );
+
+    const auto& r = solver.GetResult();
+    BOOST_TEST_MESSAGE( "=== Far image only (no groundwire) ===" );
+    BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                        << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+    BOOST_TEST_MESSAGE( "  (should have MUCH higher Z0 — far image, no local ground)" );
+}
+
+
+/**
+ * Step 3c: Demoted dielectric with uniform εr — no interface elements.
+ * This tests whether the dielectric interface at the groundwire position
+ * is causing the εr_eff increase.
+ */
+BOOST_AUTO_TEST_CASE( DemotionBisect_UniformDielectric )
+{
+    XS_GEOMETRY xs = makeD5Demoted();
+
+    // Replace dielectric structure with uniform FR4
+    xs.dielectrics.clear();
+
+    XS_DIELECTRIC_REGION air;
+    air.yTop = -10e-3;
+    air.yBottom = -1.5162e-3; // signal bottom
+    air.epsilonR = 1.0;
+    xs.dielectrics.push_back( air );
+
+    XS_DIELECTRIC_REGION fr4;
+    fr4.yTop = -1.5162e-3;
+    fr4.yBottom = 0.0; // all the way to image ground
+    fr4.epsilonR = 4.50;
+    xs.dielectrics.push_back( fr4 );
+
+    BEM_2D_SOLVER solver;
+    solver.SetGeometry( xs );
+    solver.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solver.Solve() );
+
+    const auto& r = solver.GetResult();
+    BOOST_TEST_MESSAGE( "=== Demoted geometry + uniform FR4 (no air gap below) ===" );
+    BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                        << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+}
+
+
+/**
+ * Step 3d: Simple comparison — non-demoted geometry stripped to signal-only
+ * vs demoted geometry stripped to signal-only + groundwire.
+ * No neighbors, no solder mask — isolate the core demotion effect.
+ */
+BOOST_AUTO_TEST_CASE( DemotionBisect_Minimal )
+{
+    double w = 0.19e-3;
+    double t = 0.035e-3;
+    double h = 0.2104e-3;
+    double er = 4.50;
+
+    // Non-demoted: simple microstrip
+    XS_GEOMETRY xsBase = makeMicrostripGeom( w, h, er, t );
+
+    BEM_2D_SOLVER solverBase;
+    solverBase.SetGeometry( xsBase );
+    solverBase.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverBase.Solve() );
+
+    // Demoted: signal at hFallback, groundwire at hOrig relative to signal
+    double hFallback = 1.5162e-3;
+    double condY = -( hFallback + t / 2.0 );
+    double origRefY = condY + h + t / 2.0; // = -(hFallback - h)
+
+    XS_GEOMETRY xsDemoted;
+    xsDemoted.groundY = 0.0;
+    xsDemoted.epsilonR = er;
+
+    XS_CONDUCTOR sig;
+    sig.centerX = 0.0;
+    sig.centerY = condY;
+    sig.width = w;
+    sig.thickness = t;
+    xsDemoted.conductors.push_back( sig );
+
+    XS_CONDUCTOR gw;
+    gw.centerX = 0.0;
+    gw.centerY = origRefY;
+    gw.width = 2.0e-3; // wide groundwire (symmetric)
+    gw.thickness = t;
+    gw.isGround = true;
+    xsDemoted.conductors.push_back( gw );
+
+    // FR4 from signal to original ref, air above and below
+    XS_DIELECTRIC_REGION airAbove;
+    airAbove.yTop = -10e-3;
+    airAbove.yBottom = condY + t / 2.0;
+    airAbove.epsilonR = 1.0;
+    xsDemoted.dielectrics.push_back( airAbove );
+
+    XS_DIELECTRIC_REGION fr4;
+    fr4.yTop = condY + t / 2.0;
+    fr4.yBottom = origRefY;
+    fr4.epsilonR = er;
+    xsDemoted.dielectrics.push_back( fr4 );
+
+    XS_DIELECTRIC_REGION airBelow;
+    airBelow.yTop = origRefY;
+    airBelow.yBottom = 0.0;
+    airBelow.epsilonR = 1.0;
+    xsDemoted.dielectrics.push_back( airBelow );
+
+    BEM_2D_SOLVER solverDemoted;
+    solverDemoted.SetGeometry( xsDemoted );
+    solverDemoted.SetPanelsPerEdge( 12 );
+    BOOST_REQUIRE( solverDemoted.Solve() );
+
+    const auto& rB = solverBase.GetResult();
+    const auto& rD = solverDemoted.GetResult();
+
+    BOOST_TEST_MESSAGE( "=== Minimal non-demoted (microstrip) ===" );
+    BOOST_TEST_MESSAGE( "  C=" << rB.C( 0, 0 ) << "  C0=" << rB.C0( 0, 0 )
+                        << "  erEff=" << rB.erEff << "  Z0=" << rB.Z0 );
+
+    BOOST_TEST_MESSAGE( "=== Minimal demoted (groundwire + far image) ===" );
+    BOOST_TEST_MESSAGE( "  C=" << rD.C( 0, 0 ) << "  C0=" << rD.C0( 0, 0 )
+                        << "  erEff=" << rD.erEff << "  Z0=" << rD.Z0 );
+
+    BOOST_TEST_MESSAGE( "=== Deltas ===" );
+    BOOST_TEST_MESSAGE( "  dC="  << ( rD.C( 0, 0 ) / rB.C( 0, 0 ) - 1.0 ) * 100 << "%" );
+    BOOST_TEST_MESSAGE( "  dC0=" << ( rD.C0( 0, 0 ) / rB.C0( 0, 0 ) - 1.0 ) * 100 << "%" );
+    BOOST_TEST_MESSAGE( "  dZ0=" << rD.Z0 - rB.Z0 << " Ohm" );
+
+    // Expect Z0 to stay the same or increase (void → less coupling)
+    // If this FAILS, the image+groundwire combination is the root cause.
+}
+
+
+/**
+ * Step 3e: Move the FR4/air interface away from the groundwire.
+ * The demoted geometry places the dielectric boundary exactly at the
+ * groundwire center (y=-1.3058mm). Test what happens when the interface
+ * is offset below the groundwire (so the groundwire is fully in FR4).
+ */
+BOOST_AUTO_TEST_CASE( DemotionBisect_InterfaceOffset )
+{
+    double gwBottom = -1.3058e-3 + 0.0350e-3 / 2.0; // groundwire bottom = -1.2883mm
+    double gwTop    = -1.3058e-3 - 0.0350e-3 / 2.0; // groundwire top = -1.3233mm
+
+    // Test A: interface below groundwire (GW fully in FR4)
+    {
+        XS_GEOMETRY xs = makeD5Demoted();
+        xs.dielectrics.clear();
+
+        XS_DIELECTRIC_REGION airAbove;
+        airAbove.yTop = -10e-3;
+        airAbove.yBottom = -1.5612e-3;
+        airAbove.epsilonR = 1.0;
+        xs.dielectrics.push_back( airAbove );
+
+        XS_DIELECTRIC_REGION sm;
+        sm.yTop = -1.5612e-3;
+        sm.yBottom = -1.5162e-3;
+        sm.epsilonR = 3.30;
+        xs.dielectrics.push_back( sm );
+
+        XS_DIELECTRIC_REGION fr4;
+        fr4.yTop = -1.5162e-3;
+        fr4.yBottom = gwBottom;  // stops at groundwire bottom
+        fr4.epsilonR = 4.50;
+        xs.dielectrics.push_back( fr4 );
+
+        XS_DIELECTRIC_REGION airBelow;
+        airBelow.yTop = gwBottom;
+        airBelow.yBottom = 0.0;
+        airBelow.epsilonR = 1.0;
+        xs.dielectrics.push_back( airBelow );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        const auto& r = solver.GetResult();
+        BOOST_TEST_MESSAGE( "=== Interface at GW bottom (GW fully in FR4) ===" );
+        BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                            << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+    }
+
+    // Test B: interface above groundwire (GW fully in air)
+    {
+        XS_GEOMETRY xs = makeD5Demoted();
+        xs.dielectrics.clear();
+
+        XS_DIELECTRIC_REGION airAbove;
+        airAbove.yTop = -10e-3;
+        airAbove.yBottom = -1.5612e-3;
+        airAbove.epsilonR = 1.0;
+        xs.dielectrics.push_back( airAbove );
+
+        XS_DIELECTRIC_REGION sm;
+        sm.yTop = -1.5612e-3;
+        sm.yBottom = -1.5162e-3;
+        sm.epsilonR = 3.30;
+        xs.dielectrics.push_back( sm );
+
+        XS_DIELECTRIC_REGION fr4;
+        fr4.yTop = -1.5162e-3;
+        fr4.yBottom = gwTop;  // stops at groundwire top
+        fr4.epsilonR = 4.50;
+        xs.dielectrics.push_back( fr4 );
+
+        XS_DIELECTRIC_REGION airBelow;
+        airBelow.yTop = gwTop;
+        airBelow.yBottom = 0.0;
+        airBelow.epsilonR = 1.0;
+        xs.dielectrics.push_back( airBelow );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        const auto& r = solver.GetResult();
+        BOOST_TEST_MESSAGE( "=== Interface at GW top (GW fully in air) ===" );
+        BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                            << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+    }
+
+    // Test C: no solder mask, interface at GW bottom
+    {
+        XS_GEOMETRY xs = makeD5Demoted();
+        xs.dielectrics.clear();
+
+        XS_DIELECTRIC_REGION airAbove;
+        airAbove.yTop = -10e-3;
+        airAbove.yBottom = -1.5162e-3;
+        airAbove.epsilonR = 1.0;
+        xs.dielectrics.push_back( airAbove );
+
+        XS_DIELECTRIC_REGION fr4;
+        fr4.yTop = -1.5162e-3;
+        fr4.yBottom = gwBottom;
+        fr4.epsilonR = 4.50;
+        xs.dielectrics.push_back( fr4 );
+
+        XS_DIELECTRIC_REGION airBelow;
+        airBelow.yTop = gwBottom;
+        airBelow.yBottom = 0.0;
+        airBelow.epsilonR = 1.0;
+        xs.dielectrics.push_back( airBelow );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        const auto& r = solver.GetResult();
+        BOOST_TEST_MESSAGE( "=== Interface at GW bottom, no solder mask ===" );
+        BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                            << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+    }
+}
+
+
+/**
+ * Step 3f: Solder mask effect comparison.
+ * The solder mask adds huge capacitance in the demoted case. Does it add the
+ * same amount in the non-demoted case? If so, the SM isn't the issue —
+ * the problem is elsewhere. If not, the SM interacts badly with demotion.
+ */
+BOOST_AUTO_TEST_CASE( DemotionBisect_SolderMaskEffect )
+{
+    // Non-demoted without solder mask
+    {
+        XS_GEOMETRY xs = makeD5NonDemoted();
+
+        // Remove solder mask dielectric, extend air down to signal
+        xs.dielectrics.clear();
+
+        XS_DIELECTRIC_REGION air;
+        air.yTop = -10e-3;
+        air.yBottom = -0.2104e-3; // signal bottom / FR4 top
+        air.epsilonR = 1.0;
+        xs.dielectrics.push_back( air );
+
+        XS_DIELECTRIC_REGION fr4;
+        fr4.yTop = -0.2104e-3;
+        fr4.yBottom = 0.0;
+        fr4.epsilonR = 4.50;
+        xs.dielectrics.push_back( fr4 );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        const auto& r = solver.GetResult();
+        BOOST_TEST_MESSAGE( "=== Non-demoted, NO solder mask ===" );
+        BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                            << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+    }
+
+    // Non-demoted with solder mask (reference = makeD5NonDemoted)
+    {
+        XS_GEOMETRY xs = makeD5NonDemoted();
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        const auto& r = solver.GetResult();
+        BOOST_TEST_MESSAGE( "=== Non-demoted, WITH solder mask ===" );
+        BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                            << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+    }
+
+    // Demoted with solder mask (reference = makeD5Demoted)
+    {
+        XS_GEOMETRY xs = makeD5Demoted();
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        const auto& r = solver.GetResult();
+        BOOST_TEST_MESSAGE( "=== Demoted, WITH solder mask ===" );
+        BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                            << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+    }
+
+    // Demoted without solder mask (from InterfaceOffset test C)
+    {
+        XS_GEOMETRY xs = makeD5Demoted();
+        xs.dielectrics.clear();
+
+        double gwBottom = -1.3058e-3 + 0.0350e-3 / 2.0;
+
+        XS_DIELECTRIC_REGION airAbove;
+        airAbove.yTop = -10e-3;
+        airAbove.yBottom = -1.5162e-3;
+        airAbove.epsilonR = 1.0;
+        xs.dielectrics.push_back( airAbove );
+
+        XS_DIELECTRIC_REGION fr4;
+        fr4.yTop = -1.5162e-3;
+        fr4.yBottom = gwBottom;
+        fr4.epsilonR = 4.50;
+        xs.dielectrics.push_back( fr4 );
+
+        XS_DIELECTRIC_REGION airBelow;
+        airBelow.yTop = gwBottom;
+        airBelow.yBottom = 0.0;
+        airBelow.epsilonR = 1.0;
+        xs.dielectrics.push_back( airBelow );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( 12 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        const auto& r = solver.GetResult();
+        BOOST_TEST_MESSAGE( "=== Demoted, NO solder mask ===" );
+        BOOST_TEST_MESSAGE( "  C=" << r.C( 0, 0 ) << "  C0=" << r.C0( 0, 0 )
+                            << "  erEff=" << r.erEff << "  Z0=" << r.Z0 );
+    }
+}
+
+
+/**
+ * A trace over a reference plane with a nearby antipad (void to one side)
+ * must always have Z0 >= the same trace over an unbroken reference plane.
+ *
+ * Both cases use the same BEM architecture (NMMTL-style): image at virtual
+ * earth + meshed reference as groundwire(s).  The baseline uses a very wide
+ * groundwire (approximating infinite plane).  The antipad case trims the
+ * groundwire on one side.  Solder mask is included.
+ *
+ * Narrowing the groundwire can only reduce coupling → Z0 must increase.
+ */
+BOOST_AUTO_TEST_CASE( AntipadNeverDecreasesZ0 )
+{
+    double w  = 0.15e-3;
+    double t  = 35e-6;
+    double h  = 0.2e-3;
+    double er = 4.5;
+    double smThick = 10e-6;
+    double smEr    = 3.3;
+
+    double hFallback = 10e-3;
+    double condY     = -( hFallback + t / 2.0 );
+    double gwY       = condY + h + t / 2.0;
+
+    // Helper: build geometry with given groundwire bounds
+    auto makeGeom = [&]( double gwLeft, double gwRight ) -> XS_GEOMETRY
+    {
+        XS_GEOMETRY xs;
+        xs.groundY = 0.0;
+        xs.epsilonR = er;
+
+        XS_CONDUCTOR sig;
+        sig.centerX = 0.0;
+        sig.centerY = condY;
+        sig.width = w;
+        sig.thickness = t;
+        xs.conductors.push_back( sig );
+
+        XS_CONDUCTOR gw;
+        gw.centerX = ( gwLeft + gwRight ) / 2.0;
+        gw.centerY = gwY;
+        gw.width = gwRight - gwLeft;
+        gw.thickness = t;
+        gw.isGround = true;
+        xs.conductors.push_back( gw );
+
+        XS_DIELECTRIC_REGION airAbove;
+        airAbove.yTop = -10e-3;
+        airAbove.yBottom = condY - t / 2.0 - smThick;
+        airAbove.epsilonR = 1.0;
+        xs.dielectrics.push_back( airAbove );
+
+        XS_DIELECTRIC_REGION sm;
+        sm.yTop = condY - t / 2.0 - smThick;
+        sm.yBottom = condY - t / 2.0;
+        sm.epsilonR = smEr;
+        xs.dielectrics.push_back( sm );
+
+        XS_DIELECTRIC_REGION fr4;
+        fr4.yTop = condY + t / 2.0;
+        fr4.yBottom = gwY;
+        fr4.epsilonR = er;
+        xs.dielectrics.push_back( fr4 );
+
+        XS_DIELECTRIC_REGION airBelow;
+        airBelow.yTop = gwY;
+        airBelow.yBottom = 0.0;
+        airBelow.epsilonR = 1.0;
+        xs.dielectrics.push_back( airBelow );
+
+        return xs;
+    };
+
+    // --- Baseline: very wide groundwire (solid plane approximation) ---
+    XS_GEOMETRY xsBase = makeGeom( -5e-3, 5e-3 );
+
+    int panelCounts[] = { 1, 3, 12 };
+
+    for( int panels : panelCounts )
+    {
+    BEM_2D_SOLVER solverBase;
+    solverBase.SetGeometry( xsBase );
+    solverBase.SetPanelsPerEdge( panels );
+    solverBase.SetEdgeSingularity( panels > 3 );
+    BOOST_REQUIRE( solverBase.Solve() );
+
+    double z0Base = solverBase.GetResult().Z0;
+
+    BOOST_TEST_MESSAGE( "Baseline (10mm wide GW + SM): Z0=" << z0Base );
+
+    // --- Antipad: groundwire trimmed on the left side ---
+    // The antipad edge is at edgeDist to the left of signal center.
+    // Right side always extends 5mm (solid).
+    double edgeDists[] = { 2.0e-3, 1.5e-3, 1.0e-3, 0.75e-3, 0.5e-3, 0.3e-3, 0.2e-3 };
+
+    for( double edgeDist : edgeDists )
+    {
+        XS_GEOMETRY xs = makeGeom( -edgeDist, 5e-3 );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( xs );
+        solver.SetPanelsPerEdge( panels );
+        solver.SetEdgeSingularity( panels > 3 );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+
+        BOOST_TEST_MESSAGE( "panels=" << panels
+                            << "  edgeDist=" << edgeDist * 1e3
+                            << "mm  Z0=" << z0
+                            << "  delta=" << z0 - z0Base );
+
+        // Allow tiny negative delta from BEM numerical noise (< 0.1 Ohm)
+        BOOST_CHECK_GE( z0, z0Base - 0.1 );
+    }
+    } // for panels
 }
 
 

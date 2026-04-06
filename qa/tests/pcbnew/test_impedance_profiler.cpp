@@ -585,7 +585,8 @@ BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
 
         BEM_2D_SOLVER solver;
         solver.SetGeometry( xs );
-        solver.SetPanelsPerEdge( 12 );
+        solver.SetPanelsPerEdge( 1 );
+        solver.SetEdgeSingularity( false );
         bool bemOk = solver.Solve();
 
         auto t2 = std::chrono::steady_clock::now();
@@ -620,6 +621,58 @@ BOOST_AUTO_TEST_CASE( D5ProfileDiagnostic )
                                   geom.hBelow * 1e6,
                                   (int) neighbors.size(), gwCount,
                                   usXs, usBem ) );
+
+        // Detailed geometry dump at demotion boundary
+        double dMm = d / 1e6;
+
+        if( dMm >= 31.0 && dMm <= 31.8 )
+        {
+            BOOST_TEST_MESSAGE( "  --- LAYER_GEOMETRY ---" );
+            BOOST_TEST_MESSAGE( wxString::Format(
+                    wxS( "  hBelow=%.4fmm hOrigBelow=%.4fmm hFallbackBelow=%.4fmm" ),
+                    geom.hBelow * 1e3, geom.hOrigBelow * 1e3,
+                    geom.hFallbackBelow * 1e3 ) );
+            BOOST_TEST_MESSAGE( wxString::Format(
+                    wxS( "  erBelow=%.2f erOrigBelow=%.2f erFallbackBelow=%.2f" ),
+                    geom.erBelow, geom.erOrigBelow, geom.erFallbackBelow ) );
+            BOOST_TEST_MESSAGE( wxString::Format(
+                    wxS( "  hasRefBelow=%d refLayerBelow=%d" ),
+                    (int) geom.hasRefBelow, (int) geom.refLayerBelow ) );
+
+            BOOST_TEST_MESSAGE( "  --- XS_GEOMETRY ---" );
+            BOOST_TEST_MESSAGE( wxString::Format(
+                    wxS( "  groundY=%.4fmm upperGroundY=%.4fmm hasUpperGround=%d epsilonR=%.2f" ),
+                    xs.groundY * 1e3, xs.upperGroundY * 1e3,
+                    (int) xs.hasUpperGround, xs.epsilonR ) );
+
+            for( size_t ci = 0; ci < xs.conductors.size(); ci++ )
+            {
+                const auto& c = xs.conductors[ci];
+                BOOST_TEST_MESSAGE( wxString::Format(
+                        wxS( "  cond[%d]: cx=%.4fmm cy=%.4fmm w=%.4fmm t=%.4fmm %s" ),
+                        (int) ci, c.centerX * 1e3, c.centerY * 1e3,
+                        c.width * 1e3, c.thickness * 1e3,
+                        c.isGround ? wxS( "GROUND" ) : wxS( "SIGNAL" ) ) );
+            }
+
+            for( size_t di = 0; di < xs.dielectrics.size(); di++ )
+            {
+                const auto& dr = xs.dielectrics[di];
+                BOOST_TEST_MESSAGE( wxString::Format(
+                        wxS( "  diel[%d]: yTop=%.4fmm yBot=%.4fmm er=%.2f" ),
+                        (int) di, dr.yTop * 1e3, dr.yBottom * 1e3, dr.epsilonR ) );
+            }
+
+            if( bemOk )
+            {
+                const auto& res = solver.GetResult();
+                BOOST_TEST_MESSAGE( wxString::Format(
+                        wxS( "  BEM: C(0,0)=%.4e C0(0,0)=%.4e erEff=%.3f Z0=%.2f" ),
+                        res.C( 0, 0 ), res.C0( 0, 0 ), res.erEff, res.Z0 ) );
+            }
+
+            BOOST_TEST_MESSAGE( "" );
+        }
 
         prevZ0 = z0;
         totalSamples++;

@@ -547,16 +547,20 @@ void BEM_2D_SOLVER::buildElements()
 
     int nodeCounter = 0;
 
-    // Helper to create elements along a straight line segment
-    auto buildFace = [&]( double x0, double y0, double x1, double y1,
-                          int nElem, double nx, double ny, int aCondIdx )
+    // Helper to create elements along a straight line segment.
+    // aBreaks is an array of nElem+1 parameter values in [0,1] defining
+    // the element boundaries along the face.
+    auto buildFaceBreaks = [&]( double x0, double y0, double x1, double y1,
+                                const std::vector<double>& aBreaks,
+                                double nx, double ny, int aCondIdx )
     {
         double er = getEpsilonR( ( y0 + y1 ) / 2.0, ny );
+        int    nElem = (int) aBreaks.size() - 1;
 
         for( int e = 0; e < nElem; e++ )
         {
-            double t0 = (double) e / nElem;
-            double t1 = (double) ( e + 1 ) / nElem;
+            double t0 = aBreaks[e];
+            double t1 = aBreaks[e + 1];
             double tm = ( t0 + t1 ) / 2.0;
 
             ELEMENT el = {};
@@ -586,6 +590,59 @@ void BEM_2D_SOLVER::buildElements()
         }
     };
 
+    // Uniform breakpoints for a face with nElem elements.
+    auto uniformBreaks = []( int nElem ) -> std::vector<double>
+    {
+        std::vector<double> b( nElem + 1 );
+
+        for( int i = 0; i <= nElem; i++ )
+            b[i] = (double) i / nElem;
+
+        return b;
+    };
+
+    // Graded breakpoints for a groundwire horizontal face.
+    // Places fine elements at each end (within edgeLen of the corners)
+    // and coarse elements in the interior.  nEdge elements per end,
+    // remaining in interior.
+    auto gradedBreaks = []( int nTotal, double faceLen,
+                            double edgeLen ) -> std::vector<double>
+    {
+        int nEdge = std::min( 2, nTotal / 2 );
+        int nInterior = std::max( nTotal - 2 * nEdge, 1 );
+
+        // Edge fraction: how much of the face each edge zone covers
+        double edgeFrac = std::min( edgeLen / faceLen, 0.25 );
+
+        std::vector<double> b;
+        b.reserve( nTotal + 1 );
+
+        // Left edge
+        for( int i = 0; i < nEdge; i++ )
+            b.push_back( edgeFrac * i / nEdge );
+
+        // Interior
+        double intStart = edgeFrac;
+        double intEnd = 1.0 - edgeFrac;
+
+        for( int i = 0; i < nInterior; i++ )
+            b.push_back( intStart + ( intEnd - intStart ) * i / nInterior );
+
+        // Right edge
+        for( int i = 0; i < nEdge; i++ )
+            b.push_back( intEnd + edgeFrac * i / nEdge );
+
+        b.push_back( 1.0 );
+        return b;
+    };
+
+    // Convenience: uniform face (wraps buildFaceBreaks)
+    auto buildFace = [&]( double x0, double y0, double x1, double y1,
+                          int nElem, double nx, double ny, int aCondIdx )
+    {
+        buildFaceBreaks( x0, y0, x1, y1, uniformBreaks( nElem ), nx, ny, aCondIdx );
+    };
+
     // Signal conductor index counter (only non-ground conductors)
     int signalIdx = 0;
 
@@ -604,14 +661,106 @@ void BEM_2D_SOLVER::buildElements()
         double yBot   = cy - ht;
         double yTop   = cy + ht;
 
-        // Groundwires have smooth charge distributions — use fewer panels.
-        int ppe = cond.isGround ? std::max( m_panelsPerEdge / 2, 4 ) : m_panelsPerEdge;
-        int nHoriz = std::clamp( ppe, 1, 50 );
-        int nVert  = std::clamp( (int) round( ppe * cond.thickness
-                                               / cond.width ), 2, 20 );
+        int ppe = m_panelsPerEdge;
+        int nVert = std::clamp( (int) round( ppe * cond.thickness
+                                              / cond.width ), 2, 20 );
 
         // Four faces: bottom, right, top (reversed), left (reversed)
         int faceStart0 = (int) m_condElements.size();
+
+        if( cond.isGround )
+        {
+            // Groundwires: graded mesh on horizontal faces.
+            // Fine elements at corners (within h of each edge) resolve the
+            // charge singularity; coarse elements in the interior keep the
+            // element count low.  The nearest signal-to-groundwire distance
+            // sets the edge zone size.
+            double nearestDist = h;
+
+            for( const XS_CONDUCTOR& sc : m_geometry.conductors )
+            {
+                if( sc.isGround )
+                    continue;
+
+                double d = std::abs( toY( sc.centerY ) - cy )
+                           - ( sc.thickness + cond.thickness ) / 2.0;
+
+                if( d > 0 )
+                    nearestDist = std::min( nearestDist, d );
+            }
+
+            // Panel count: at least ppe, but ensure no panel is wider than 2h.
+            // Wide groundwires automatically get more panels.  The 2h limit
+            // balances accuracy (charge variation scale is ~h) with performance.
+            int nBySize = (int) ceil( cond.width / ( 2.0 * nearestDist ) );
+            int nHoriz = std::clamp( std::max( ppe, nBySize ), 4, 100 );
+
+            auto hBreaks = gradedBreaks( nHoriz, cond.width, nearestDist );
+
+            buildFaceBreaks( xLeft, yBot, xRight, yBot, hBreaks,
+                             0.0, -1.0, condIdx );
+            int faceStart1 = (int) m_condElements.size();
+            buildFace( xRight, yBot, xRight, yTop, nVert, 1.0, 0.0, condIdx );
+            int faceStart2 = (int) m_condElements.size();
+            // Top face is reversed (right to left) — reverse the breaks
+            auto hBreaksRev = hBreaks;
+            std::reverse( hBreaksRev.begin(), hBreaksRev.end() );
+
+            for( double& b : hBreaksRev )
+                b = 1.0 - b;
+
+            buildFaceBreaks( xRight, yTop, xLeft, yTop, hBreaksRev,
+                             0.0, 1.0, condIdx );
+            int faceStart3 = (int) m_condElements.size();
+            buildFace( xLeft, yTop, xLeft, yBot, nVert, -1.0, 0.0, condIdx );
+            int faceEnd = (int) m_condElements.size();
+
+            // Edge singularity setup (same as below but with local scope)
+            static constexpr double THETA2_RECT = 3.0 * M_PI / 2.0;
+
+            struct CORNER
+            {
+                int    lastElem;
+                int    firstElem;
+                double cornerY;
+            };
+
+            CORNER corners[4] = {
+                { faceStart1 - 1, faceStart1, yBot },
+                { faceStart2 - 1, faceStart2, yTop },
+                { faceStart3 - 1, faceStart3, yTop },
+                { faceEnd - 1,    faceStart0, yBot },
+            };
+
+            for( const CORNER& cn : corners )
+            {
+                double eps1 = 1.0, eps2 = 1.0;
+                double theta1 = THETA2_RECT / 2.0;
+
+                for( const DIELECTRIC_BOUNDARY& db : dielectricBoundaries )
+                {
+                    if( std::abs( cn.cornerY - db.y ) < 1e-9 )
+                    {
+                        eps1 = db.epsBelow;
+                        eps2 = db.epsAbove;
+                        theta1 = M_PI;
+                        break;
+                    }
+                }
+
+                double nu = findNu( eps1, eps2, theta1, THETA2_RECT );
+
+                m_condElements[cn.lastElem].isEdge[1] = true;
+                m_condElements[cn.lastElem].nu[1] = nu;
+                m_condElements[cn.firstElem].isEdge[0] = true;
+                m_condElements[cn.firstElem].nu[0] = nu;
+            }
+
+            continue; // skip the uniform path below
+        }
+
+        int nHoriz = std::clamp( ppe, 1, 50 );
+
         buildFace( xLeft, yBot, xRight, yBot, nHoriz, 0.0, -1.0, condIdx );
         int faceStart1 = (int) m_condElements.size();
         buildFace( xRight, yBot, xRight, yTop, nVert, 1.0, 0.0, condIdx );
@@ -693,17 +842,44 @@ void BEM_2D_SOLVER::buildElements()
         xMaxAll = std::max( xMaxAll, cx + hw );
     }
 
+    // Use the nearest signal-to-ground distance for interface grid sizing,
+    // not h (which is image-to-interface distance).  When the image ground
+    // is at virtual earth, h can be very large, causing interface elements
+    // to extend far beyond conductor coverage.  The physically relevant
+    // scale is the distance from the signal to the nearest ground reference
+    // (image plane or ground conductor).
+    double hGrid = h;
+
+    for( const XS_CONDUCTOR& c : m_geometry.conductors )
+    {
+        if( c.isGround )
+            continue;
+
+        // Distance from nearest signal face to nearest ground conductor face
+        for( const XS_CONDUCTOR& gc : m_geometry.conductors )
+        {
+            if( !gc.isGround )
+                continue;
+
+            double dist = std::abs( c.centerY - gc.centerY )
+                          - ( c.thickness + gc.thickness ) / 2.0;
+
+            if( dist > 0 )
+                hGrid = std::min( hGrid, dist );
+        }
+    }
+
     // Interface element grid defaults.  Sensitivity analysis across 6 geometries
-    // (narrow/thin to 50mil FR4) shows these stay within 0.42% of the finest
+    // (narrow/thin to 50mil FR4) shows these stay within 0.77% of the finest
     // reference (8h, h/8).  See BEM2DSolver/InterfaceGridSensitivity test.
     //
     //   Grid          Max error vs 8h/h÷8 reference
-    //   5h, h/5       0.15%   (previous default)
-    //   3h, h/3       0.42%   (current default — ~3× fewer elements)
-    //   2h, h/2       0.77%
+    //   5h, h/5       0.15%
+    //   3h, h/3       0.42%
+    //   2h, h/2       0.77%   (current default)
     //   1h, h/1       1.83%
-    double extent = 3.0 * h;
-    double spacingI = h / 3.0;
+    double extent = 2.0 * hGrid;
+    double spacingI = hGrid / 2.0;
 
     for( const DIELECTRIC_BOUNDARY& db : dielectricBoundaries )
     {
@@ -712,8 +888,8 @@ void BEM_2D_SOLVER::buildElements()
 
         if( m_intfGridOverride )
         {
-            dbExtent  = m_intfExtentMult * h;
-            dbSpacing = h / m_intfSpacingDiv;
+            dbExtent  = m_intfExtentMult * hGrid;
+            dbSpacing = hGrid / m_intfSpacingDiv;
         }
         else
         {
@@ -721,8 +897,8 @@ void BEM_2D_SOLVER::buildElements()
             // the SM boundary at 0.06% error vs fine reference can be very coarse.
             bool lowContrast = !m_fineInterfaceGrid
                                && ( db.epsAbove < 4.0 && db.epsBelow < 4.0 );
-            dbExtent  = lowContrast ? 2.0 * h : extent;
-            dbSpacing = lowContrast ? h        : spacingI;
+            dbExtent  = lowContrast ? 2.0 * hGrid : extent;
+            dbSpacing = lowContrast ? hGrid        : spacingI;
         }
 
         double xStart = xMinAll - dbExtent;
@@ -1009,12 +1185,14 @@ void BEM_2D_SOLVER::extractCharge( const Eigen::VectorXd& aSigma,
 // Full-system assembly and solve (conductor + interface)
 // ---------------------------------------------------------------------------
 
-Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceFull()
-{
-    int nTotal = m_numCondNodes + m_numIntfNodes;
-    Eigen::MatrixXd A = Eigen::MatrixXd::Zero( nTotal, nTotal );
+// ---------------------------------------------------------------------------
+// Assemble the conductor-conductor matrix block.  This block is shared
+// between the air-only and full dielectric solves — building it once
+// eliminates the dominant O(nCond²) kernel evaluation from one of them.
+// ---------------------------------------------------------------------------
 
-    // --- Conductor rows (Galerkin: outer on conductor, inner on all) ---
+void BEM_2D_SOLVER::assembleConductorBlock( Eigen::MatrixXd& aA ) const
+{
     for( const ELEMENT& outerEl : m_condElements )
     {
         for( int qo = 0; qo < GAUSS_N_OUTER; qo++ )
@@ -1025,10 +1203,8 @@ Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceFull()
 
             double x, y;
             interpolate( xiOuter, outerEl, x, y );
-
             double Jo = jacobian( xiOuter, outerEl );
 
-            // Inner loop — conductor elements
             for( const ELEMENT& innerEl : m_condElements )
             {
                 double val[3];
@@ -1040,11 +1216,36 @@ Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceFull()
 
                 for( int i = 0; i < 3; i++ )
                     for( int j = 0; j < 3; j++ )
-                        A( outerEl.nodeIdx[i], innerEl.nodeIdx[j] ) +=
+                        aA( outerEl.nodeIdx[i], innerEl.nodeIdx[j] ) +=
                             INV_TWO_PI * GAUSS_WTS_10[qo] * No[i] * val[j] * Jo;
             }
+        }
+    }
+}
 
-            // Inner loop — interface elements
+
+Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceFull(
+        const Eigen::MatrixXd& aCondBlock )
+{
+    int nTotal = m_numCondNodes + m_numIntfNodes;
+    Eigen::MatrixXd A = Eigen::MatrixXd::Zero( nTotal, nTotal );
+
+    // Inject pre-computed conductor-conductor block
+    A.topLeftCorner( m_numCondNodes, m_numCondNodes ) = aCondBlock;
+
+    // --- Conductor rows × interface columns ---
+    for( const ELEMENT& outerEl : m_condElements )
+    {
+        for( int qo = 0; qo < GAUSS_N_OUTER; qo++ )
+        {
+            double xiOuter = GAUSS_PTS_10[qo];
+            double No[3];
+            shapeFunctionsEdge( xiOuter, outerEl, No );
+
+            double x, y;
+            interpolate( xiOuter, outerEl, x, y );
+            double Jo = jacobian( xiOuter, outerEl );
+
             for( const ELEMENT& innerEl : m_intfElements )
             {
                 double val[3];
@@ -1150,43 +1351,13 @@ Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceFull()
 
 
 // ---------------------------------------------------------------------------
-// Free-space (air-only) assembly and solve — conductor elements only
+// Free-space (air-only) solve — reuses the conductor-conductor block
 // ---------------------------------------------------------------------------
 
-Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceAir()
+Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceAir(
+        const Eigen::MatrixXd& aCondBlock )
 {
-    Eigen::MatrixXd A = Eigen::MatrixXd::Zero( m_numCondNodes, m_numCondNodes );
-
-    for( const ELEMENT& outerEl : m_condElements )
-    {
-        for( int qo = 0; qo < GAUSS_N_OUTER; qo++ )
-        {
-            double xiOuter = GAUSS_PTS_10[qo];
-            double No[3];
-            shapeFunctionsEdge( xiOuter, outerEl, No );
-
-            double x, y;
-            interpolate( xiOuter, outerEl, x, y );
-            double Jo = jacobian( xiOuter, outerEl );
-
-            for( const ELEMENT& innerEl : m_condElements )
-            {
-                double val[3];
-
-                if( &innerEl == &outerEl )
-                    intervalSelfConductor( x, y, innerEl, val, xiOuter );
-                else
-                    intervalConductor( x, y, innerEl, val );
-
-                for( int i = 0; i < 3; i++ )
-                    for( int j = 0; j < 3; j++ )
-                        A( outerEl.nodeIdx[i], innerEl.nodeIdx[j] ) +=
-                            INV_TWO_PI * GAUSS_WTS_10[qo] * No[i] * val[j] * Jo;
-            }
-        }
-    }
-
-    Eigen::FullPivLU<Eigen::MatrixXd> lu( A );
+    Eigen::FullPivLU<Eigen::MatrixXd> lu( aCondBlock );
     Eigen::MatrixXd Cmat( m_numConductors, m_numConductors );
     Cmat.setZero();
 
@@ -1258,8 +1429,12 @@ bool BEM_2D_SOLVER::Solve()
     if( m_condElements.empty() )
         return false;
 
+    // Assemble conductor-conductor block once — shared between both solves.
+    Eigen::MatrixXd condBlock = Eigen::MatrixXd::Zero( m_numCondNodes, m_numCondNodes );
+    assembleConductorBlock( condBlock );
+
     // Air-only solve (always needed)
-    Eigen::MatrixXd Cair = solveCapacitanceAir();
+    Eigen::MatrixXd Cair = solveCapacitanceAir( condBlock );
 
     if( Cair( 0, 0 ) <= 0.0 )
         return false;
@@ -1275,7 +1450,7 @@ bool BEM_2D_SOLVER::Solve()
     }
     else
     {
-        Cfull = solveCapacitanceFull();
+        Cfull = solveCapacitanceFull( condBlock );
 
         if( Cfull( 0, 0 ) <= 0.0 )
             return false;
