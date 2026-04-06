@@ -101,6 +101,61 @@ void CROSS_SECTION_BUILDER::SetSignalTrack( const PCB_TRACK* aTrack )
 }
 
 
+void CROSS_SECTION_BUILDER::PrecomputeNearbyFillEdges(
+        const std::vector<PCB_LAYER_ID>& aLayers,
+        const BOX2I& aTraceBBox, int aExtent )
+{
+    m_nearbyFillEdges.clear();
+
+    if( !m_board )
+        return;
+
+    BOX2I searchBox = aTraceBBox;
+    searchBox.Inflate( aExtent );
+
+    for( PCB_LAYER_ID layer : aLayers )
+    {
+        std::vector<SEG>& edges = m_nearbyFillEdges[layer];
+
+        for( ZONE* zone : m_board->Zones() )
+        {
+            if( !zone->IsOnLayer( layer ) || zone->GetIsRuleArea() )
+                continue;
+
+            const std::shared_ptr<SHAPE_POLY_SET>& fill = zone->GetFilledPolysList( layer );
+
+            if( !fill || fill->IsEmpty() )
+                continue;
+
+            for( int oi = 0; oi < fill->OutlineCount(); oi++ )
+            {
+                auto collectEdges = [&]( const SHAPE_LINE_CHAIN& aChain )
+                {
+                    for( int ei = 0; ei < aChain.SegmentCount(); ei++ )
+                    {
+                        SEG seg = aChain.CSegment( ei );
+                        BOX2I segBBox;
+                        segBBox.SetOrigin( std::min( seg.A.x, seg.B.x ),
+                                           std::min( seg.A.y, seg.B.y ) );
+                        segBBox.SetEnd( std::max( seg.A.x, seg.B.x ),
+                                        std::max( seg.A.y, seg.B.y ) );
+
+                        if( segBBox.Intersects( searchBox ) )
+                            edges.push_back( seg );
+                    }
+                };
+
+                collectEdges( fill->COutline( oi ) );
+
+                for( int hi = 0; hi < fill->HoleCount( oi ); hi++ )
+                    collectEdges( fill->CHole( oi, hi ) );
+            }
+        }
+
+    }
+}
+
+
 std::vector<XS_NEIGHBOR> CROSS_SECTION_BUILDER::FindNeighbors(
         const XS_BUILD_PARAMS& aParams ) const
 {
@@ -465,6 +520,138 @@ void CROSS_SECTION_BUILDER::findZoneNeighbors( const XS_BUILD_PARAMS& aParams,
 }
 
 
+std::vector<double> CROSS_SECTION_BUILDER::findZoneFillEdgeCrossings(
+        const SEG& aCutSeg,
+        const VECTOR2I& aSamplePos,
+        const VECTOR2D& aNormal,
+        PCB_LAYER_ID aLayer,
+        int aRadius ) const
+{
+    std::vector<double> crossings;
+
+    // Fast path: use precomputed nearby edges if available for this layer
+    auto it = m_nearbyFillEdges.find( aLayer );
+
+    if( it != m_nearbyFillEdges.end() )
+    {
+        for( const SEG& edge : it->second )
+        {
+            OPT_VECTOR2I intersection = aCutSeg.IntersectLines( edge );
+
+            if( !intersection )
+                continue;
+
+            if( !edge.Contains( *intersection ) )
+                continue;
+
+            VECTOR2D delta( intersection->x - aSamplePos.x,
+                            intersection->y - aSamplePos.y );
+            double lateralDist = delta.x * aNormal.x + delta.y * aNormal.y;
+
+            if( std::abs( lateralDist ) <= aRadius )
+                crossings.push_back( lateralDist );
+        }
+
+        std::sort( crossings.begin(), crossings.end() );
+        return crossings;
+    }
+
+    // Fallback: walk zone fill polygons directly
+    auto intersectChain = [&]( const SHAPE_LINE_CHAIN& aChain )
+    {
+        for( int ei = 0; ei < aChain.SegmentCount(); ei++ )
+        {
+            SEG edge = aChain.Segment( ei );
+            OPT_VECTOR2I intersection = aCutSeg.IntersectLines( edge );
+
+            if( !intersection )
+                continue;
+
+            if( !edge.Contains( *intersection ) )
+                continue;
+
+            VECTOR2D delta( intersection->x - aSamplePos.x,
+                            intersection->y - aSamplePos.y );
+            double lateralDist = delta.x * aNormal.x + delta.y * aNormal.y;
+
+            if( std::abs( lateralDist ) <= aRadius )
+                crossings.push_back( lateralDist );
+        }
+    };
+
+    // Bounding box of the cut line for fast rejection of distant polygons
+    BOX2I cutBBox;
+    cutBBox.SetOrigin( std::min( aCutSeg.A.x, aCutSeg.B.x ),
+                       std::min( aCutSeg.A.y, aCutSeg.B.y ) );
+    cutBBox.SetEnd( std::max( aCutSeg.A.x, aCutSeg.B.x ),
+                    std::max( aCutSeg.A.y, aCutSeg.B.y ) );
+    cutBBox.Inflate( 1000 ); // 1µm margin for numerical safety
+
+    auto processZoneFills = [&]( ZONE* aZone )
+    {
+        const std::shared_ptr<SHAPE_POLY_SET>& fill = aZone->GetFilledPolysList( aLayer );
+
+        if( !fill || fill->IsEmpty() )
+            return;
+
+        for( int oi = 0; oi < fill->OutlineCount(); oi++ )
+        {
+            if( !fill->Outline( oi ).BBox().Intersects( cutBBox ) )
+                continue;
+
+            intersectChain( fill->Outline( oi ) );
+
+            for( int hi = 0; hi < fill->HoleCount( oi ); hi++ )
+            {
+                if( fill->Hole( oi, hi ).BBox().Intersects( cutBBox ) )
+                    intersectChain( fill->Hole( oi, hi ) );
+            }
+        }
+    };
+
+    // Use R-tree for spatial filtering when available
+    bool foundViaRtree = false;
+
+    if( m_rtree )
+    {
+        auto nearbyItems = m_rtree->GetObjectsAt( aSamplePos, aLayer, aRadius );
+        std::set<ZONE*> processedZones;
+
+        for( BOARD_ITEM* item : nearbyItems )
+        {
+            if( item->Type() != PCB_ZONE_T )
+                continue;
+
+            ZONE* zone = static_cast<ZONE*>( item );
+
+            if( zone->GetIsRuleArea() )
+                continue;
+
+            if( !processedZones.insert( zone ).second )
+                continue;
+
+            foundViaRtree = true;
+            processZoneFills( zone );
+        }
+    }
+
+    // Fallback: iterate all board zones when R-tree doesn't have zone data
+    if( !foundViaRtree && m_board )
+    {
+        for( ZONE* zone : m_board->Zones() )
+        {
+            if( !zone->IsOnLayer( aLayer ) || zone->GetIsRuleArea() )
+                continue;
+
+            processZoneFills( zone );
+        }
+    }
+
+    std::sort( crossings.begin(), crossings.end() );
+    return crossings;
+}
+
+
 void CROSS_SECTION_BUILDER::deduplicateNeighbors( std::vector<XS_NEIGHBOR>& aNeighbors,
                                                    int aMaxNeighbors )
 {
@@ -519,51 +706,68 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
 
     double halfSignalW = aParams.signalWidth / 2.0;
 
-    // Helper: sample copper coverage along the cut line on a given layer.
+    // Helper: find copper spans along the cut line on a given layer.
     // Returns copper spans as [left, right] lateral distances (nm) from signal center.
-    // Uses HitTestFilledArea at discrete points — robust with overlapping zones
-    // and complex polygon topologies (no parity pairing issues).
+    //
+    // Uses zone fill edge crossings: intersects the cut line with fill polygon
+    // outlines/holes, then determines copper/gap regions from edge parity.
+    // A single HitTestFilledArea at the leftmost point determines the initial state.
     static constexpr int MAX_GROUNDWIRES = 4;
+
+    // Helper: test if a point on the cut line (at lateral offset) has copper
+    auto hitTestAt = [&]( PCB_LAYER_ID aLayer, double aLateral ) -> bool
+    {
+        VECTOR2I pt( aParams.samplePos.x + (int) ( normal.x * aLateral ),
+                     aParams.samplePos.y + (int) ( normal.y * aLateral ) );
+
+        for( ZONE* zone : m_board->Zones() )
+        {
+            if( !zone->IsOnLayer( aLayer ) || zone->GetIsRuleArea() )
+                continue;
+
+            if( zone->HitTestFilledArea( aLayer, pt ) )
+                return true;
+        }
+
+        return false;
+    };
 
     auto findCopperSpans = [&]( PCB_LAYER_ID aLayer ) -> std::vector<std::pair<double, double>>
     {
-        std::vector<std::pair<double, double>> spans;
+        std::vector<double> crossings =
+                findZoneFillEdgeCrossings( cutSeg, aParams.samplePos, normal, aLayer, extent );
 
-        // Sample interval: 50µm along the cut line
-        static constexpr double SAMPLE_STEP = 50000.0; // nm
-
-        bool   inCopper = false;
-        double spanStart = 0.0;
-
-        for( double lat = -extent; lat <= extent; lat += SAMPLE_STEP )
+        // Fast path: no edges cross the cut line — copper state is uniform.
+        if( crossings.empty() )
         {
-            VECTOR2I pt( aParams.samplePos.x + (int) ( normal.x * lat ),
-                         aParams.samplePos.y + (int) ( normal.y * lat ) );
+            if( hitTestAt( aLayer, 0.0 ) )
+                return { { -(double) extent, (double) extent } };
 
-            bool covered = false;
+            return {};
+        }
 
-            for( ZONE* zone : m_board->Zones() )
+        // Probe just inside each edge crossing to determine copper state.
+        // Build spans from the transitions.
+        static constexpr double NUDGE = 5000.0; // 5µm inside each boundary
+
+        std::vector<std::pair<double, double>> spans;
+        bool inCopper = hitTestAt( aLayer, -extent + NUDGE );
+        double spanStart = -extent;
+
+        for( double crossing : crossings )
+        {
+            bool afterCrossing = hitTestAt( aLayer, crossing + NUDGE );
+
+            if( inCopper && !afterCrossing )
             {
-                if( !zone->IsOnLayer( aLayer ) || zone->GetIsRuleArea() )
-                    continue;
-
-                if( zone->HitTestFilledArea( aLayer, pt ) )
-                {
-                    covered = true;
-                    break;
-                }
+                spans.push_back( { spanStart, crossing } );
+            }
+            else if( !inCopper && afterCrossing )
+            {
+                spanStart = crossing;
             }
 
-            if( covered && !inCopper )
-            {
-                spanStart = lat;
-                inCopper = true;
-            }
-            else if( !covered && inCopper )
-            {
-                spans.push_back( { spanStart, lat - SAMPLE_STEP } );
-                inCopper = false;
-            }
+            inCopper = afterCrossing;
         }
 
         if( inCopper )

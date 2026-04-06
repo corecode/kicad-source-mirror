@@ -28,6 +28,7 @@
 #include <sipi/stackup_reader.h>
 
 #include <layer_ids.h>
+#include <math/box2.h>
 #include <math/vector2d.h>
 #include <geometry/seg.h>
 
@@ -117,6 +118,21 @@ public:
     void SetSignalTrack( const PCB_TRACK* aTrack );
 
     /**
+     * Precompute zone fill edges near the trace path for fast per-sample queries.
+     *
+     * Walks all zone fill polygon edges on the given layers once, filtering by
+     * proximity to the trace bounding box.  Subsequent calls to
+     * findZoneFillEdgeCrossings on a precomputed layer use the cached edges
+     * instead of walking the full polygon.
+     *
+     * @param aLayers    Copper layers to precompute (typically the reference layers)
+     * @param aTraceBBox Bounding box of the trace path (in board coordinates, nm)
+     * @param aExtent    Maximum perpendicular search distance (nm)
+     */
+    void PrecomputeNearbyFillEdges( const std::vector<PCB_LAYER_ID>& aLayers,
+                                     const BOX2I& aTraceBBox, int aExtent );
+
+    /**
      * Find neighbor conductors crossing the cross-section cut line.
      * Returns a sorted, deduplicated vector (max 4 neighbors).
      */
@@ -179,6 +195,26 @@ private:
                             const VECTOR2D& aNormal,
                             std::vector<XS_NEIGHBOR>& aNeighbors ) const;
 
+    /**
+     * Find lateral distances where zone fill edges cross a perpendicular cut line.
+     *
+     * Intersects the cut segment with fill polygon outlines and holes on the given
+     * layer.  Uses the R-tree for spatial filtering when available; falls back to
+     * iterating all board zones otherwise.
+     *
+     * @param aCutSeg    Cut line segment (perpendicular to trace direction)
+     * @param aSamplePos Board position of the signal center (nm)
+     * @param aNormal    Unit normal (perpendicular to trace tangent, defines lateral sign)
+     * @param aLayer     Copper layer to query
+     * @param aRadius    Search radius from aSamplePos (nm)
+     * @return Sorted vector of signed lateral distances (nm) where edges cross the cut line
+     */
+    std::vector<double> findZoneFillEdgeCrossings( const SEG& aCutSeg,
+                                                    const VECTOR2I& aSamplePos,
+                                                    const VECTOR2D& aNormal,
+                                                    PCB_LAYER_ID aLayer,
+                                                    int aRadius ) const;
+
     static void deduplicateNeighbors( std::vector<XS_NEIGHBOR>& aNeighbors,
                                       int aMaxNeighbors = 4 );
 
@@ -186,6 +222,11 @@ private:
     const BOARD*                                        m_board;
     const PCB_TRACK*                                    m_signalTrack;
     const std::map<BOARD_CONNECTED_ITEM*, double>*      m_pathItemDist;
+
+    /// Precomputed zone fill edge segments near the trace, keyed by layer.
+    /// When populated, findZoneFillEdgeCrossings uses these instead of
+    /// walking full zone fill polygons.
+    std::map<PCB_LAYER_ID, std::vector<SEG>>            m_nearbyFillEdges;
 };
 
 #endif // CROSS_SECTION_BUILDER_H

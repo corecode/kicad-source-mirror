@@ -125,6 +125,15 @@ static void buildRtree( const BOARD* aBoard, DRC_RTREE& aRtree )
                 aRtree.Insert( pad, layer );
         }
     }
+
+    for( ZONE* zone : aBoard->Zones() )
+    {
+        if( zone->GetIsRuleArea() )
+            continue;
+
+        for( PCB_LAYER_ID layer : zone->GetLayerSet().CuStack() )
+            aRtree.Insert( zone, layer );
+    }
 }
 
 
@@ -599,6 +608,7 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
 
         for( double d : refObstacleDistances )
             fprintf( stderr, "  obstacle at trace dist=%.3fmm\n", d / 1e6 );
+
     }
 
     // Build sample distances: uniform grid + gap boundaries (with margin).
@@ -797,6 +807,41 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
         return nullptr;
     };
 
+    // Create a shared cross-section builder with precomputed nearby fill edges.
+    CROSS_SECTION_BUILDER xsBuilder;
+    xsBuilder.SetSpatialIndex( rtree );
+    xsBuilder.SetBoard( aBoard );
+    xsBuilder.SetPathItemDistances( &pathItemDist );
+
+    {
+        // Compute trace path bounding box for edge precomputation
+        BOX2I traceBBox( segs.front().pos, VECTOR2I( 0, 0 ) );
+
+        for( const auto& s : segs )
+            traceBBox.Merge( s.pos );
+
+        // Determine reference layers and extent
+        int midIdx = (int) segs.size() / 2;
+        LAYER_GEOMETRY geom0 = stackup.GetLayerGeometry( segs[midIdx].track->GetLayer(),
+                                                          segs[midIdx].pos,
+                                                          segs[midIdx].track->GetWidth() );
+
+        double hRef = std::max( geom0.hAbove, geom0.hBelow );
+        int    extent = std::clamp( std::max( 500000, (int) ( hRef * 5.0 * 1e9 ) ),
+                                    500000, 5000000 );
+
+        std::vector<PCB_LAYER_ID> precompLayers;
+
+        if( geom0.refLayerBelow != UNDEFINED_LAYER )
+            precompLayers.push_back( geom0.refLayerBelow );
+
+        if( geom0.refLayerAbove != UNDEFINED_LAYER )
+            precompLayers.push_back( geom0.refLayerAbove );
+
+        if( !precompLayers.empty() )
+            xsBuilder.PrecomputeNearbyFillEdges( precompLayers, traceBBox, extent );
+    }
+
     int    segIdx = 0;
     double cumulativeDelayPs = 0.0;
     double prevSampleDist = 0.0;
@@ -949,10 +994,6 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
         double hRef = std::max( geom.hAbove, geom.hBelow );
         int    couplingHorizon = std::clamp( (int) ( hRef * 3.0 * 1e9 ), 500000, 3000000 );
 
-        CROSS_SECTION_BUILDER xsBuilder;
-        xsBuilder.SetSpatialIndex( rtree );
-        xsBuilder.SetBoard( aBoard );
-        xsBuilder.SetPathItemDistances( &pathItemDist );
         xsBuilder.SetSignalTrack( track );
 
         XS_BUILD_PARAMS xsParams;

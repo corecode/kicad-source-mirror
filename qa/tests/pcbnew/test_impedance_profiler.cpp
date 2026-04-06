@@ -1438,8 +1438,80 @@ BOOST_AUTO_TEST_CASE( ProfilePerformance )
     BOOST_TEST_MESSAGE( "Zone fill + connectivity: " << fillMs << "ms" );
     BOOST_TEST_MESSAGE( "Profile best of " << RUNS << ": " << bestMs << "ms" );
 
-    // Profile must complete in under 5 seconds
-    BOOST_CHECK_LT( bestMs, 5000 );
+    // Profile must complete in under 3 seconds (typical ~1.5s)
+    BOOST_CHECK_LT( bestMs, 3000 );
+}
+
+
+/**
+ * USB_D_P runs over a solid ground plane with stitching vias (same-net).
+ * Most samples should NOT have groundwires — the reference plane is intact.
+ * Groundwires should only appear near actual antipads (different-net vias/pads).
+ */
+BOOST_AUTO_TEST_CASE( USBDPGroundwireCount )
+{
+    try
+    {
+        KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+    }
+    catch( ... )
+    {
+        BOOST_TEST_MESSAGE( "Board cparti_fpga not found — skipping" );
+        return;
+    }
+
+    if( !m_board || m_board->Tracks().empty() )
+    {
+        BOOST_TEST_MESSAGE( "No tracks — skipping" );
+        return;
+    }
+
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
+
+    int netP = -1;
+
+    for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+    {
+        if( info->GetNetname().Contains( wxS( "USB_D_P" ) ) )
+        {
+            netP = code;
+            break;
+        }
+    }
+
+    if( netP < 0 )
+    {
+        BOOST_TEST_MESSAGE( "USB_D_P not found — skipping" );
+        return;
+    }
+
+    SE_PROFILE profile;
+    BEM_CACHE  cache;
+    BOOST_REQUIRE( profile.Compute( m_board.get(), netP, cache ) );
+
+    int totalSamples = (int) profile.GetSamples().size();
+    int gwSamples = 0;
+
+    for( const IMPEDANCE_SAMPLE& s : profile.GetSamples() )
+    {
+        if( s.groundwireCount > 0 )
+        {
+            gwSamples++;
+            BOOST_TEST_MESSAGE( "gw=" << s.groundwireCount
+                                << " at d=" << s.distNm / 1e6 << "mm"
+                                << " Z0=" << s.z0 );
+        }
+    }
+
+    BOOST_TEST_MESSAGE( "Total samples: " << totalSamples
+                        << "  with groundwires: " << gwSamples
+                        << " (" << 100.0 * gwSamples / totalSamples << "%)" );
+
+    // Most samples should have no groundwires (solid reference plane).
+    // Stitching vias are same-net and don't create antipads.
+    // Allow up to 20% for samples near actual via transitions / pads.
+    BOOST_CHECK_LT( gwSamples, totalSamples / 5 );
 }
 
 
