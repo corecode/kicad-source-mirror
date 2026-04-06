@@ -298,45 +298,28 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
         return std::abs( zB - zA ) - tA / 2.0 - tB / 2.0;
     };
 
-    // Search for nearest reference plane with actual zone coverage.
-    // A copper layer is only a reference plane at a given position if a filled zone
-    // covers that point.  This detects antipads, ground slots, and partial pours.
-    // Layers that are skipped (partial coverage) become groundwire candidates.
-    for( int i = signalIdx - 1; i >= 0; i-- )
+    // Use the nearest copper layer as the reference plane.  Actual copper
+    // coverage (antipads, voids) is handled later by FindGroundWires which
+    // scans zone fills via R-tree + edge crossings.  Skipping the per-sample
+    // HitTestFilledArea here avoids an O(n_edges) polygon walk on every sample.
+    if( signalIdx > 0 )
     {
-        if( isReferencePlane( m_copperLayers[i].layerId, aPosition ) )
-        {
-            geom.hAbove = copperSpacing( i, signalIdx );
-            geom.hasRefAbove = true;
-            geom.refLayerAbove = m_copperLayers[i].layerId;
-            findDielectric( m_copperLayers[i].zPosition, signalZ,
-                            geom.erAbove, geom.tanDAbove );
-            break;
-        }
-
-        // Skipped layer — groundwire candidate (has copper but not at this point)
-        geom.intermediateLayers.push_back(
-                { m_copperLayers[i].layerId,
-                  m_copperLayers[i].zPosition,
-                  m_copperLayers[i].thickness } );
+        int i = signalIdx - 1;
+        geom.hAbove = copperSpacing( i, signalIdx );
+        geom.hasRefAbove = true;
+        geom.refLayerAbove = m_copperLayers[i].layerId;
+        findDielectric( m_copperLayers[i].zPosition, signalZ,
+                        geom.erAbove, geom.tanDAbove );
     }
 
-    for( int i = signalIdx + 1; i < (int) m_copperLayers.size(); i++ )
+    if( signalIdx + 1 < (int) m_copperLayers.size() )
     {
-        if( isReferencePlane( m_copperLayers[i].layerId, aPosition ) )
-        {
-            geom.hBelow = copperSpacing( signalIdx, i );
-            geom.hasRefBelow = true;
-            geom.refLayerBelow = m_copperLayers[i].layerId;
-            findDielectric( signalZ, m_copperLayers[i].zPosition,
-                            geom.erBelow, geom.tanDBelow );
-            break;
-        }
-
-        geom.intermediateLayers.push_back(
-                { m_copperLayers[i].layerId,
-                  m_copperLayers[i].zPosition,
-                  m_copperLayers[i].thickness } );
+        int i = signalIdx + 1;
+        geom.hBelow = copperSpacing( signalIdx, i );
+        geom.hasRefBelow = true;
+        geom.refLayerBelow = m_copperLayers[i].layerId;
+        findDielectric( signalZ, m_copperLayers[i].zPosition,
+                        geom.erBelow, geom.tanDBelow );
     }
 
     // Compute fallback image ground for demotion: the outermost copper layer
