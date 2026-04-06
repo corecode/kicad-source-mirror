@@ -25,6 +25,7 @@
 
 #include <sipi/bem_2d_solver.h>
 
+#include <chrono>
 #include <cmath>
 
 
@@ -1261,6 +1262,53 @@ BOOST_AUTO_TEST_CASE( EdgeSingularitySensitivity )
             BOOST_TEST_MESSAGE( line );
         }
     }
+}
+
+
+/**
+ * Runtime performance: a single microstrip solve at the default panel count
+ * must complete well under 50ms.  This catches accidental O(n²) regressions
+ * in the assembly or solve path.
+ */
+BOOST_AUTO_TEST_CASE( SolvePerformance )
+{
+    XS_GEOMETRY geom = makeMicrostripGeom( 0.15e-3, 0.1e-3, 4.4 );
+
+    // Warm up (first solve may trigger lazy initialization)
+    {
+        BEM_2D_SOLVER warmup;
+        warmup.SetGeometry( geom );
+        warmup.Solve();
+    }
+
+    static constexpr int RUNS = 20;
+    double totalUs = 0.0;
+    double minUs = 1e9;
+    double maxUs = 0.0;
+
+    for( int r = 0; r < RUNS; r++ )
+    {
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+
+        auto t0 = std::chrono::steady_clock::now();
+        BOOST_REQUIRE( solver.Solve() );
+        auto t1 = std::chrono::steady_clock::now();
+
+        double us = std::chrono::duration<double, std::micro>( t1 - t0 ).count();
+        totalUs += us;
+        minUs = std::min( minUs, us );
+        maxUs = std::max( maxUs, us );
+    }
+
+    double avgUs = totalUs / RUNS;
+
+    BOOST_TEST_MESSAGE( "BEM solve (5 panels/edge, single microstrip):" );
+    BOOST_TEST_MESSAGE( "  avg=" << (int) avgUs << "us  min=" << (int) minUs
+                        << "us  max=" << (int) maxUs << "us  (" << RUNS << " runs)" );
+
+    // Must complete in under 10ms (typical is ~2ms at 5 panels/edge)
+    BOOST_CHECK_LT( avgUs, 10000.0 );
 }
 
 
