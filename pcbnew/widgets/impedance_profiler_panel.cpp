@@ -220,21 +220,24 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
     yMin -= yPad;
     yMax += yPad;
 
-    // --- X extent ---
+    // --- X extent: 3× substrate height from outermost conductor edge ---
     double xHalf = m_xExtent;
 
     if( xHalf < 1e-9 )
     {
-        for( const XS_CONDUCTOR& c : geom.conductors )
-            xHalf = std::max( xHalf, std::abs( c.centerX ) + c.width );
+        double h = std::abs( yMax - yMin );
+        double xEdge = 0.0;
 
-        xHalf *= 1.5;
+        for( const XS_CONDUCTOR& c : geom.conductors )
+            xEdge = std::max( xEdge, std::abs( c.centerX ) + c.width / 2.0 );
+
+        xHalf = xEdge + 3.0 * h;
     }
 
     double xMin = -xHalf;
     double xMax = xHalf;
 
-    // --- Mapping ---
+    // --- Mapping (uniform scale for 1:1 aspect ratio) ---
     int margin = 8;
     int topMargin = 20;
     int drawW = aRect.width - 2 * margin;
@@ -245,16 +248,21 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
 
     double sX = drawW / ( xMax - xMin );
     double sY = drawH / ( yMax - yMin );
+    double s = std::min( sX, sY );
 
-    int offX = margin;
-    int offY = topMargin;
+    // Center the content in the available space
+    int offX = margin + (int) ( ( drawW - ( xMax - xMin ) * s ) / 2.0 );
+    int offY = topMargin + (int) ( ( drawH - ( yMax - yMin ) * s ) / 2.0 );
 
-    auto toPixX = [&]( double x ) -> int { return offX + (int) ( ( x - xMin ) * sX ); };
-    auto toPixY = [&]( double y ) -> int { return offY + (int) ( ( y - yMin ) * sY ); };
+    auto toPixX = [&]( double x ) -> int { return offX + (int) ( ( x - xMin ) * s ); };
+    auto toPixY = [&]( double y ) -> int { return offY + (int) ( ( y - yMin ) * s ); };
 
-    // --- Dielectric regions ---
+    // --- Dielectric regions (substrate/air backgrounds, then SM overlay) ---
     for( const XS_DIELECTRIC_REGION& dr : geom.dielectrics )
     {
+        if( dr.isSolderMask )
+            continue;
+
         double drLo = std::min( dr.yTop, dr.yBottom );
         double drHi = std::max( dr.yTop, dr.yBottom );
 
@@ -275,6 +283,30 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
         aDC.SetTextForeground( wxColour( 160, 160, 140 ) );
         wxSize ts = aDC.GetTextExtent( erLabel );
         aDC.DrawText( erLabel, toPixX( xMin ) + 4, ( py1 + py2 - ts.GetHeight() ) / 2 );
+    }
+
+    // --- Solder mask (green, drawn before conductors so copper paints over it) ---
+    for( const XS_DIELECTRIC_REGION& dr : geom.dielectrics )
+    {
+        if( !dr.isSolderMask )
+            continue;
+
+        double drLo = std::min( dr.yTop, dr.yBottom );
+        double drHi = std::max( dr.yTop, dr.yBottom );
+
+        if( drLo < yMin || drHi > yMax )
+            continue;
+
+        aDC.SetBrush( wxBrush( wxColour( 30, 80, 40 ) ) );
+        aDC.SetPen( wxPen( wxColour( 50, 120, 60 ), 1 ) );
+
+        int py1 = toPixY( drHi );
+        int py2 = toPixY( drLo );
+        aDC.DrawRectangle( toPixX( xMin ), py1, drawW, py2 - py1 );
+
+        wxString smLabel = wxString::Format( wxS( "SM \u03B5r=%.1f" ), dr.epsilonR );
+        aDC.SetTextForeground( wxColour( 100, 180, 110 ) );
+        aDC.DrawText( smLabel, toPixX( xMin ) + 4, std::min( py1, py2 ) + 1 );
     }
 
     // --- Ground plane(s) ---
@@ -298,9 +330,9 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
         const XS_CONDUCTOR& c = geom.conductors[ci];
 
         int px = toPixX( c.centerX - c.width / 2.0 );
-        int py = toPixY( c.centerY + c.thickness / 2.0 );
+        int py = toPixY( c.centerY - c.thickness / 2.0 );
         int pw = std::max( toPixX( c.centerX + c.width / 2.0 ) - px, 3 );
-        int ph = std::max( toPixY( c.centerY - c.thickness / 2.0 ) - py, 2 );
+        int ph = std::max( toPixY( c.centerY + c.thickness / 2.0 ) - py, 2 );
 
         if( c.isGround )
         {

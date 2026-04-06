@@ -31,6 +31,7 @@
 #include <vector>
 
 class BOARD;
+class BOARD_ITEM;
 
 
 /**
@@ -87,6 +88,13 @@ struct LAYER_GEOMETRY
     };
 
     std::vector<INTERMEDIATE_LAYER> intermediateLayers;
+
+    /// Solder mask on the air-facing side (outer layers only).
+    /// Nonzero thickness means the signal layer has solder mask coating.
+    double solderMaskThickness = 0.0;  ///< meters (0 = no solder mask)
+    double solderMaskEr = 3.3;         ///< solder mask relative permittivity
+    bool   solderMaskAbove = true;     ///< true = mask above signal, false = below
+    bool   solderMaskIsDefault = true; ///< true if thickness is the KiCad default
 
     bool usingDefaults = false;     ///< true if stackup data was default/unconfigured
 };
@@ -148,16 +156,30 @@ private:
     };
 
     void buildLayerModel();
+    void buildMaskItemCache();
     bool isReferencePlane( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition ) const;
     bool isReferencePlaneNearby( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition,
                                  int aSearchRadius ) const;
     double findAntipadRadius( PCB_LAYER_ID aLayer, const VECTOR2I& aPosition,
                               double aFallback ) const;
+    bool hasSolderMaskOpening( PCB_LAYER_ID aMaskLayer, const VECTOR2I& aPosition ) const;
+
+    struct SOLDER_MASK_INFO
+    {
+        double thickness = 0.0;   ///< meters
+        double epsilonR = 3.3;    ///< relative permittivity
+        bool   present = false;
+        bool   isDefault = true;  ///< true if thickness matches KiCad default
+    };
 
     const BOARD* m_board;
 
     std::vector<COPPER_LAYER_INFO> m_copperLayers;  ///< ordered top to bottom
     std::vector<DIELECTRIC_INFO>   m_dielectrics;   ///< between copper layers
+    SOLDER_MASK_INFO               m_solderMaskTop;     ///< above F.Cu
+    SOLDER_MASK_INFO               m_solderMaskBottom;  ///< below B.Cu
+    std::vector<BOARD_ITEM*>       m_maskItemsTop;      ///< items on F.Mask
+    std::vector<BOARD_ITEM*>       m_maskItemsBottom;   ///< items on B.Mask
     bool                           m_usingDefaults;
     bool                           m_built;
 };

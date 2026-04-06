@@ -93,6 +93,10 @@ static const double GAUSS_WTS_6[6] = {
 
 BEM_2D_SOLVER::BEM_2D_SOLVER() :
         m_panelsPerEdge( 10 ),
+        m_fineInterfaceGrid( false ),
+        m_intfGridOverride( false ),
+        m_intfExtentMult( 5.0 ),
+        m_intfSpacingDiv( 5.0 ),
         m_lengthScale( 0.0 ),
         m_numCondNodes( 0 ),
         m_numIntfNodes( 0 ),
@@ -499,13 +503,41 @@ void BEM_2D_SOLVER::buildElements()
         xMaxAll = std::max( xMaxAll, cx + hw );
     }
 
-    double extent = 5.0 * h;
-    double xStart = xMinAll - extent;
-    double xEnd   = xMaxAll + extent;
-    double spacingI = h / 5.0;
+    // Interface element grid defaults.  Sensitivity analysis across 6 geometries
+    // (narrow/thin to 50mil FR4) shows these stay within 0.42% of the finest
+    // reference (8h, h/8).  See BEM2DSolver/InterfaceGridSensitivity test.
+    //
+    //   Grid          Max error vs 8h/h÷8 reference
+    //   5h, h/5       0.15%   (previous default)
+    //   3h, h/3       0.42%   (current default — ~3× fewer elements)
+    //   2h, h/2       0.77%
+    //   1h, h/1       1.83%
+    double extent = 3.0 * h;
+    double spacingI = h / 3.0;
 
     for( const DIELECTRIC_BOUNDARY& db : dielectricBoundaries )
     {
+        double dbExtent;
+        double dbSpacing;
+
+        if( m_intfGridOverride )
+        {
+            dbExtent  = m_intfExtentMult * h;
+            dbSpacing = h / m_intfSpacingDiv;
+        }
+        else
+        {
+            // Low-contrast boundaries (both εr < 4, e.g. air/solder-mask):
+            // the SM boundary at 0.06% error vs fine reference can be very coarse.
+            bool lowContrast = !m_fineInterfaceGrid
+                               && ( db.epsAbove < 4.0 && db.epsBelow < 4.0 );
+            dbExtent  = lowContrast ? 2.0 * h : extent;
+            dbSpacing = lowContrast ? h        : spacingI;
+        }
+
+        double xStart = xMinAll - dbExtent;
+        double xEnd   = xMaxAll + dbExtent;
+
         // Collect the x-ranges that are NOT under a conductor at this y-level
         // Build a list of free intervals by subtracting conductor footprints
         struct INTERVAL { double a, b; };
@@ -542,10 +574,10 @@ void BEM_2D_SOLVER::buildElements()
         {
             double len = iv.b - iv.a;
 
-            if( len < spacingI * 0.5 )
+            if( len < dbSpacing * 0.5 )
                 continue;
 
-            int nElem = std::max( 1, (int) round( len / spacingI ) );
+            int nElem = std::max( 1, (int) round( len / dbSpacing ) );
 
             for( int e = 0; e < nElem; e++ )
             {

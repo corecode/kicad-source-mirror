@@ -1027,4 +1027,164 @@ BOOST_AUTO_TEST_CASE( AsymmetricDiffPair )
 }
 
 
+/**
+ * Solder mask effect: compare microstrip Z₀ with and without a solder mask
+ * dielectric region (εr=3.3, 10µm over copper).
+ *
+ * SM should lower Z₀ by a few percent (increased capacitance from SM partial fill).
+ */
+BOOST_AUTO_TEST_CASE( SolderMaskEffect )
+{
+    double w = 0.15e-3;
+    double t = 35e-6;
+    double h = 0.1e-3;
+    double er = 4.4;
+    double smThick = 10e-6;
+    double smEr = 3.3;
+
+    // Without solder mask
+    XS_GEOMETRY geomBare = makeMicrostripGeom( w, h, er, t );
+
+    BEM_2D_SOLVER solverBare;
+    solverBare.SetGeometry( geomBare );
+    solverBare.SetPanelsPerEdge( 20 );
+    BOOST_REQUIRE( solverBare.Solve() );
+    double z0Bare = solverBare.GetResult().Z0;
+
+    // With solder mask: add SM region above conductor top
+    XS_GEOMETRY geomSM = makeMicrostripGeom( w, h, er, t );
+    double condTop = -( h + t );
+    double smBoundary = condTop - smThick;
+
+    // Split the air region at smBoundary
+    geomSM.dielectrics[0].yBottom = smBoundary;  // air: shrink to above SM
+
+    XS_DIELECTRIC_REGION mask;
+    mask.yTop = smBoundary;
+    mask.yBottom = -h;   // SM extends from above conductor to substrate surface
+    mask.epsilonR = smEr;
+    geomSM.dielectrics.push_back( mask );
+
+    BEM_2D_SOLVER solverSM;
+    solverSM.SetGeometry( geomSM );
+    solverSM.SetPanelsPerEdge( 20 );
+    BOOST_REQUIRE( solverSM.Solve() );
+    double z0SM = solverSM.GetResult().Z0;
+
+    double deltaPercent = 100.0 * ( z0SM - z0Bare ) / z0Bare;
+
+    BOOST_TEST_MESSAGE( "Bare:  Z0=" << z0Bare << " Ohm  erEff=" << solverBare.GetResult().erEff );
+    BOOST_TEST_MESSAGE( "SM:    Z0=" << z0SM << " Ohm  erEff=" << solverSM.GetResult().erEff );
+    BOOST_TEST_MESSAGE( "Delta: " << deltaPercent << "%" );
+
+    // SM should lower Z0 (more capacitance) — expect -1% to -10%
+    BOOST_CHECK_LT( z0SM, z0Bare );
+    BOOST_CHECK_GT( deltaPercent, -10.0 );
+    BOOST_CHECK_LT( deltaPercent, -0.5 );
+
+    // Compare coarse SM interface grid (default) vs fine grid (reference)
+    BEM_2D_SOLVER solverFine;
+    solverFine.SetGeometry( geomSM );
+    solverFine.SetPanelsPerEdge( 20 );
+    solverFine.SetFineInterfaceGrid( true );
+    BOOST_REQUIRE( solverFine.Solve() );
+    double z0Fine = solverFine.GetResult().Z0;
+
+    double gridError = 100.0 * ( z0SM - z0Fine ) / z0Fine;
+    BOOST_TEST_MESSAGE( "Fine grid: Z0=" << z0Fine << " Ohm  erEff="
+                        << solverFine.GetResult().erEff );
+    BOOST_TEST_MESSAGE( "Coarse vs fine grid error: " << gridError << "%" );
+
+    // Coarse grid should be within 1% of fine grid
+    BOOST_CHECK_LT( std::abs( gridError ), 1.0 );
+}
+
+
+/**
+ * Interface grid sensitivity: sweep extent and spacing for the substrate boundary
+ * across multiple geometries to find the minimum discretization that stays within
+ * 0.5% of the finest reference.
+ */
+BOOST_AUTO_TEST_CASE( InterfaceGridSensitivity )
+{
+    struct CASE
+    {
+        const char* name;
+        double w;
+        double h;
+        double er;
+    };
+
+    CASE cases[] = {
+        { "narrow/thin",  0.10e-3, 0.075e-3, 4.4 },
+        { "typical",      0.15e-3, 0.10e-3,  4.4 },
+        { "wide/thick",   0.30e-3, 0.20e-3,  4.4 },
+        { "high-er",      0.15e-3, 0.10e-3,  6.5 },
+        { "low-er",       0.15e-3, 0.10e-3,  3.0 },
+        { "50mil FR4",    0.20e-3, 1.27e-3,  4.3 },
+    };
+
+    struct GRID
+    {
+        const char* name;
+        double extentMult;
+        double spacingDiv;
+    };
+
+    GRID grids[] = {
+        { "8h/h÷8",  8.0, 8.0 },
+        { "5h/h÷5",  5.0, 5.0 },
+        { "5h/h÷3",  5.0, 3.0 },
+        { "3h/h÷3",  3.0, 3.0 },
+        { "2h/h÷2",  2.0, 2.0 },
+        { "2h/h÷1",  2.0, 1.0 },
+        { "1h/h÷1",  1.0, 1.0 },
+    };
+
+    int nGrids = sizeof( grids ) / sizeof( grids[0] );
+
+    BOOST_TEST_MESSAGE( "" );
+
+    // Header
+    std::string hdr = "geometry        ";
+
+    for( int g = 0; g < nGrids; g++ )
+        hdr += std::string( "  " ) + grids[g].name;
+
+    BOOST_TEST_MESSAGE( hdr );
+
+    for( const CASE& c : cases )
+    {
+        XS_GEOMETRY geom = makeMicrostripGeom( c.w, c.h, c.er );
+
+        // Reference: finest grid
+        BEM_2D_SOLVER refSolver;
+        refSolver.SetGeometry( geom );
+        refSolver.SetPanelsPerEdge( 20 );
+        refSolver.SetInterfaceGrid( grids[0].extentMult, grids[0].spacingDiv );
+        BOOST_REQUIRE( refSolver.Solve() );
+        double z0Ref = refSolver.GetResult().Z0;
+
+        char buf[256];
+        snprintf( buf, sizeof( buf ), "%-16s", c.name );
+        std::string line = buf;
+
+        for( int g = 0; g < nGrids; g++ )
+        {
+            BEM_2D_SOLVER solver;
+            solver.SetGeometry( geom );
+            solver.SetPanelsPerEdge( 20 );
+            solver.SetInterfaceGrid( grids[g].extentMult, grids[g].spacingDiv );
+            BOOST_REQUIRE( solver.Solve() );
+
+            double err = 100.0 * ( solver.GetResult().Z0 - z0Ref ) / z0Ref;
+            snprintf( buf, sizeof( buf ), "  %+.3f%%", err );
+            line += buf;
+        }
+
+        BOOST_TEST_MESSAGE( line );
+    }
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

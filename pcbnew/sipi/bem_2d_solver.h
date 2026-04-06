@@ -42,6 +42,11 @@
  * - Charge extraction with local εr weighting (NMMTL convention)
  * - Edge singularity handling at conductor corners (ν-exponent)
  *
+ * Interface element grid sizing (see BEM2DSolver/InterfaceGridSensitivity test):
+ *   Default:      extent = 3h, spacing = h/3  (< 0.42% vs finest reference)
+ *   Low-contrast: extent = 2h, spacing = h    (for εr < 4 on both sides,
+ *                                               e.g. air/solder-mask: < 0.1%)
+ *
  * Coordinate system:
  *   y = 0: ground plane (Φ = 0)
  *   Conductors and dielectric interfaces at y > 0
@@ -54,6 +59,16 @@ public:
 
     void SetGeometry( const XS_GEOMETRY& aGeometry );
     void SetPanelsPerEdge( int aCount );
+    void SetFineInterfaceGrid( bool aFine ) { m_fineInterfaceGrid = aFine; }
+
+    /// Override interface element grid: extent = aMult × h, spacing = h / aDiv.
+    /// When set, applies to ALL boundaries (ignoring low-contrast optimization).
+    void SetInterfaceGrid( double aExtentMult, double aSpacingDiv )
+    {
+        m_intfExtentMult = aExtentMult;
+        m_intfSpacingDiv = aSpacingDiv;
+        m_intfGridOverride = true;
+    }
 
     bool Solve();
 
@@ -145,6 +160,10 @@ private:
     XS_GEOMETRY   m_geometry;
     RLGC_RESULT   m_result;
     int           m_panelsPerEdge;
+    bool          m_fineInterfaceGrid;
+    bool          m_intfGridOverride;
+    double        m_intfExtentMult;
+    double        m_intfSpacingDiv;
 
     double        m_lengthScale;    ///< NMMTL length_scale = half_minimum_dimension
 

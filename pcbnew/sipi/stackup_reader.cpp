@@ -26,6 +26,8 @@
 #include <board.h>
 #include <board_design_settings.h>
 #include <board_stackup_manager/board_stackup.h>
+#include <footprint.h>
+#include <pcb_shape.h>
 #include <zone.h>
 
 
@@ -105,13 +107,45 @@ void STACKUP_READER::buildLayerModel()
         }
         else if( item->GetType() == BS_ITEM_TYPE_SOLDERMASK )
         {
-            // Track solder mask thickness for z accumulation but don't store
-            z += item->GetThickness() * NM_TO_M;
+            double thickness = item->GetThickness() * NM_TO_M;
+            double er = item->GetEpsilonR( 0 );
+            bool isDefault = ( item->GetThickness()
+                               == BOARD_STACKUP_ITEM::GetMaskDefaultThickness() );
+
+            // Top solder mask appears before any copper; bottom appears after
+            if( m_copperLayers.empty() )
+            {
+                m_solderMaskTop.thickness = thickness;
+                m_solderMaskTop.epsilonR = er;
+                m_solderMaskTop.present = true;
+                m_solderMaskTop.isDefault = isDefault;
+            }
+            else
+            {
+                m_solderMaskBottom.thickness = thickness;
+                m_solderMaskBottom.epsilonR = er;
+                m_solderMaskBottom.present = true;
+                m_solderMaskBottom.isDefault = isDefault;
+            }
+
+            z += thickness;
         }
     }
 
     fprintf( stderr, "SIPI stackup: %d copper layers, %d dielectrics, defaults=%d\n",
              (int) m_copperLayers.size(), (int) m_dielectrics.size(), m_usingDefaults );
+
+    if( m_solderMaskTop.present )
+    {
+        fprintf( stderr, "  SM top: %.1fum er=%.2f\n",
+                 m_solderMaskTop.thickness * 1e6, m_solderMaskTop.epsilonR );
+    }
+
+    if( m_solderMaskBottom.present )
+    {
+        fprintf( stderr, "  SM bot: %.1fum er=%.2f\n",
+                 m_solderMaskBottom.thickness * 1e6, m_solderMaskBottom.epsilonR );
+    }
 
     for( size_t i = 0; i < m_copperLayers.size(); i++ )
     {
@@ -145,6 +179,11 @@ void STACKUP_READER::buildLayerModel()
                      fill ? fill->OutlineCount() : 0 );
         }
     }
+
+    buildMaskItemCache();
+
+    fprintf( stderr, "  Mask items: top=%d bot=%d\n",
+             (int) m_maskItemsTop.size(), (int) m_maskItemsBottom.size() );
 }
 
 
@@ -337,6 +376,26 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
         geom.tanDBelow = geom.tanDFallbackBelow;
     }
 
+    // Solder mask: only on outer copper layers, on the air-facing (outward) side.
+    // F.Cu (topmost) gets top solder mask above; B.Cu (bottommost) gets bottom mask below.
+    // Suppress if there's a mask opening (cutout, pad, etc.) at this position.
+    if( signalIdx == 0 && m_solderMaskTop.present
+        && !hasSolderMaskOpening( F_Mask, aPosition ) )
+    {
+        geom.solderMaskThickness = m_solderMaskTop.thickness;
+        geom.solderMaskEr = m_solderMaskTop.epsilonR;
+        geom.solderMaskAbove = true;
+        geom.solderMaskIsDefault = m_solderMaskTop.isDefault;
+    }
+    else if( signalIdx == (int) m_copperLayers.size() - 1 && m_solderMaskBottom.present
+             && !hasSolderMaskOpening( B_Mask, aPosition ) )
+    {
+        geom.solderMaskThickness = m_solderMaskBottom.thickness;
+        geom.solderMaskEr = m_solderMaskBottom.epsilonR;
+        geom.solderMaskAbove = false;
+        geom.solderMaskIsDefault = m_solderMaskBottom.isDefault;
+    }
+
     return geom;
 }
 
@@ -409,6 +468,68 @@ double STACKUP_READER::findAntipadRadius( PCB_LAYER_ID aLayer, const VECTOR2I& a
     }
 
     return aFallback;
+}
+
+
+void STACKUP_READER::buildMaskItemCache()
+{
+    m_maskItemsTop.clear();
+    m_maskItemsBottom.clear();
+
+    if( !m_board )
+        return;
+
+    // Board-level drawings on mask layers
+    for( BOARD_ITEM* item : m_board->Drawings() )
+    {
+        if( item->IsOnLayer( F_Mask ) )
+            m_maskItemsTop.push_back( item );
+
+        if( item->IsOnLayer( B_Mask ) )
+            m_maskItemsBottom.push_back( item );
+    }
+
+    // Footprint graphics on mask layers
+    for( FOOTPRINT* fp : m_board->Footprints() )
+    {
+        for( BOARD_ITEM* item : fp->GraphicalItems() )
+        {
+            if( item->IsOnLayer( F_Mask ) )
+                m_maskItemsTop.push_back( item );
+
+            if( item->IsOnLayer( B_Mask ) )
+                m_maskItemsBottom.push_back( item );
+        }
+    }
+
+    // Zones on mask layers
+    for( ZONE* zone : m_board->Zones() )
+    {
+        if( zone->GetIsRuleArea() )
+            continue;
+
+        if( zone->IsOnLayer( F_Mask ) )
+            m_maskItemsTop.push_back( zone );
+
+        if( zone->IsOnLayer( B_Mask ) )
+            m_maskItemsBottom.push_back( zone );
+    }
+}
+
+
+bool STACKUP_READER::hasSolderMaskOpening( PCB_LAYER_ID aMaskLayer,
+                                           const VECTOR2I& aPosition ) const
+{
+    const std::vector<BOARD_ITEM*>& items =
+            ( aMaskLayer == F_Mask ) ? m_maskItemsTop : m_maskItemsBottom;
+
+    for( BOARD_ITEM* item : items )
+    {
+        if( item->HitTest( aPosition, 0 ) )
+            return true;
+    }
+
+    return false;
 }
 
 

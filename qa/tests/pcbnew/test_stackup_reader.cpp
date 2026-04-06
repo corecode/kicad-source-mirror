@@ -26,11 +26,15 @@
 #include <board.h>
 #include <board_design_settings.h>
 #include <board_stackup_manager/board_stackup.h>
+#include <footprint.h>
+#include <pcb_shape.h>
 #include <zone.h>
 #include <netinfo.h>
 #include <pcb_track.h>
 
 #include <sipi/stackup_reader.h>
+
+#include <chrono>
 
 
 /**
@@ -277,6 +281,172 @@ BOOST_AUTO_TEST_CASE( StriplineWithGapAbove )
     BOOST_CHECK( geomCovered.hasRefAbove );
     BOOST_CHECK_LT( geomCovered.hAbove, 5e-3 ); // real ref on F.Cu
     BOOST_CHECK( geomCovered.hasRefBelow );
+}
+
+
+/**
+ * 2-layer board: solder mask fields should be populated for outer layers.
+ * F.Cu gets solderMaskAbove=true, B.Cu gets solderMaskAbove=false.
+ * Inner layers (if any) get solderMaskThickness=0.
+ */
+BOOST_AUTO_TEST_CASE( SolderMaskOnOuterLayers )
+{
+    setupStackup( 2 );
+
+    // Full-board ground zone on B.Cu
+    addZoneFill( VECTOR2I( 0, 0 ), VECTOR2I( 50000000, 50000000 ), B_Cu, 1 );
+
+    STACKUP_READER reader( m_board.get() );
+
+    // F.Cu — should have solder mask above
+    LAYER_GEOMETRY geomF = reader.GetLayerGeometry( F_Cu, VECTOR2I( 25000000, 25000000 ),
+                                                     150000 );
+    BOOST_CHECK_GT( geomF.solderMaskThickness, 0.0 );
+    BOOST_CHECK( geomF.solderMaskAbove );
+    BOOST_CHECK_CLOSE( geomF.solderMaskEr, 3.3, 1.0 );
+
+    BOOST_TEST_MESSAGE( "F.Cu SM: thickness=" << geomF.solderMaskThickness * 1e6
+                        << "um  er=" << geomF.solderMaskEr );
+
+    // B.Cu — should have solder mask below
+    addZoneFill( VECTOR2I( 0, 0 ), VECTOR2I( 50000000, 50000000 ), F_Cu, 1 );
+
+    STACKUP_READER reader2( m_board.get() );
+    LAYER_GEOMETRY geomB = reader2.GetLayerGeometry( B_Cu, VECTOR2I( 25000000, 25000000 ),
+                                                      150000 );
+    BOOST_CHECK_GT( geomB.solderMaskThickness, 0.0 );
+    BOOST_CHECK( !geomB.solderMaskAbove );
+    BOOST_CHECK_CLOSE( geomB.solderMaskEr, 3.3, 1.0 );
+
+    BOOST_TEST_MESSAGE( "B.Cu SM: thickness=" << geomB.solderMaskThickness * 1e6
+                        << "um  er=" << geomB.solderMaskEr );
+}
+
+
+/**
+ * 2-layer board with a filled rectangle on F.Mask creating a solder mask opening.
+ * Inside the opening → solderMaskThickness=0.  Outside → normal SM.
+ */
+BOOST_AUTO_TEST_CASE( SolderMaskOpening )
+{
+    setupStackup( 2 );
+
+    // Ground zone on B.Cu
+    addZoneFill( VECTOR2I( 0, 0 ), VECTOR2I( 50000000, 50000000 ), B_Cu, 1 );
+
+    // Mask opening: filled rectangle on F.Mask from (10mm,10mm) to (20mm,20mm)
+    PCB_SHAPE* maskCutout = new PCB_SHAPE( m_board.get() );
+    maskCutout->SetShape( SHAPE_T::RECTANGLE );
+    maskCutout->SetStart( VECTOR2I( 10000000, 10000000 ) );
+    maskCutout->SetEnd( VECTOR2I( 20000000, 20000000 ) );
+    maskCutout->SetFilled( true );
+    maskCutout->SetLayer( F_Mask );
+    m_board->Add( maskCutout );
+
+    STACKUP_READER reader( m_board.get() );
+
+    // Inside the mask opening → no solder mask
+    LAYER_GEOMETRY geomOpen = reader.GetLayerGeometry( F_Cu, VECTOR2I( 15000000, 15000000 ),
+                                                        150000 );
+    BOOST_CHECK_EQUAL( geomOpen.solderMaskThickness, 0.0 );
+
+    // Outside the mask opening → normal solder mask
+    STACKUP_READER reader2( m_board.get() );
+    LAYER_GEOMETRY geomCovered = reader2.GetLayerGeometry( F_Cu, VECTOR2I( 30000000, 30000000 ),
+                                                            150000 );
+    BOOST_CHECK_GT( geomCovered.solderMaskThickness, 0.0 );
+    BOOST_CHECK( geomCovered.solderMaskAbove );
+
+    BOOST_TEST_MESSAGE( "Inside opening: SM=" << geomOpen.solderMaskThickness * 1e6 << "um"
+                        << "  Outside: SM=" << geomCovered.solderMaskThickness * 1e6 << "um" );
+}
+
+
+/**
+ * 4-layer board: inner layers should NOT have solder mask.
+ */
+BOOST_AUTO_TEST_CASE( NoSolderMaskOnInnerLayers )
+{
+    setupStackup( 4 );
+
+    addZoneFill( VECTOR2I( 0, 0 ), VECTOR2I( 50000000, 50000000 ), F_Cu, 1 );
+    addZoneFill( VECTOR2I( 0, 0 ), VECTOR2I( 50000000, 50000000 ), B_Cu, 1 );
+
+    STACKUP_READER reader( m_board.get() );
+    LAYER_GEOMETRY geom = reader.GetLayerGeometry( In1_Cu, VECTOR2I( 25000000, 25000000 ),
+                                                    150000 );
+
+    BOOST_CHECK_EQUAL( geom.solderMaskThickness, 0.0 );
+}
+
+
+/**
+ * Performance test: GetLayerGeometry with many footprints and mask layer items.
+ * Simulates a realistic board with 200 footprints (each with graphics on F.Mask)
+ * and measures the time for 500 GetLayerGeometry calls.
+ */
+BOOST_AUTO_TEST_CASE( SolderMaskPerformance )
+{
+    setupStackup( 2 );
+
+    // Ground zone on B.Cu
+    addZoneFill( VECTOR2I( 0, 0 ), VECTOR2I( 100000000, 100000000 ), B_Cu, 1 );
+
+    // Add 200 footprints with graphics on F.Mask (courtyard-like items)
+    for( int i = 0; i < 200; i++ )
+    {
+        FOOTPRINT* fp = new FOOTPRINT( m_board.get() );
+        int x = ( i % 20 ) * 5000000;
+        int y = ( i / 20 ) * 5000000;
+        fp->SetPosition( VECTOR2I( x, y ) );
+
+        // Add a graphic on F.Mask (simulates mask opening in footprint)
+        PCB_SHAPE* shape = new PCB_SHAPE( fp );
+        shape->SetShape( SHAPE_T::RECTANGLE );
+        shape->SetStart( VECTOR2I( x - 500000, y - 500000 ) );
+        shape->SetEnd( VECTOR2I( x + 500000, y + 500000 ) );
+        shape->SetFilled( true );
+        shape->SetLayer( F_Mask );
+        fp->Add( shape );
+
+        m_board->Add( fp );
+    }
+
+    // Also add 50 board-level drawings on F.Mask
+    for( int i = 0; i < 50; i++ )
+    {
+        PCB_SHAPE* shape = new PCB_SHAPE( m_board.get() );
+        shape->SetShape( SHAPE_T::RECTANGLE );
+        int x = ( i % 10 ) * 10000000;
+        int y = ( i / 10 ) * 10000000 + 60000000;
+        shape->SetStart( VECTOR2I( x, y ) );
+        shape->SetEnd( VECTOR2I( x + 1000000, y + 1000000 ) );
+        shape->SetFilled( true );
+        shape->SetLayer( F_Mask );
+        m_board->Add( shape );
+    }
+
+    STACKUP_READER reader( m_board.get() );
+
+    // Time 500 GetLayerGeometry calls at various positions
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for( int i = 0; i < 500; i++ )
+    {
+        int x = ( i * 200000 ) % 100000000;
+        int y = 25000000 + ( i * 100000 ) % 50000000;
+        reader.GetLayerGeometry( F_Cu, VECTOR2I( x, y ), 150000 );
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    double elapsedMs = std::chrono::duration<double, std::milli>( end - start ).count();
+
+    BOOST_TEST_MESSAGE( "500 GetLayerGeometry calls with 200 FPs + 50 drawings: "
+                        << elapsedMs << "ms ("
+                        << ( elapsedMs / 500.0 ) << " ms/call)" );
+
+    // Should complete in well under 1 second (target: < 0.1ms per call)
+    BOOST_CHECK_LT( elapsedMs, 500.0 );
 }
 
 

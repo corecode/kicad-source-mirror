@@ -861,6 +861,72 @@ XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
         }
     }
 
+    // Insert solder mask dielectric region on the air-facing side of the conductor.
+    // Solder mask conformally coats the trace and fills the space around it on the
+    // open side.  Modeled as a horizontal slab splitting the air region at the SM
+    // boundary (smOverCopper above the conductor top, or below the conductor bottom).
+    //
+    // The stackup thickness is on bare substrate; over copper it's roughly half.
+    if( geom.solderMaskThickness > 0.0 )
+    {
+        double condTop = condY - geom.traceThickness / 2.0;
+        double condBot = condY + geom.traceThickness / 2.0;
+
+        double smOverCopper;
+
+        if( !geom.solderMaskIsDefault )
+            smOverCopper = std::max( geom.solderMaskThickness * 0.5, 10e-6 );
+        else
+            smOverCopper = 10e-6;
+
+        // SM boundary: smOverCopper beyond the conductor on the air side
+        double smBoundary = geom.solderMaskAbove
+                                    ? ( condTop - smOverCopper )
+                                    : ( condBot + smOverCopper );
+
+        for( size_t i = 0; i < xs.dielectrics.size(); i++ )
+        {
+            XS_DIELECTRIC_REGION& reg = xs.dielectrics[i];
+
+            // Find the air region (εr ≈ 1) containing the SM boundary
+            if( reg.epsilonR > 1.5 )
+                continue;
+
+            if( smBoundary <= reg.yTop || smBoundary >= reg.yBottom )
+                continue;
+
+            // Split the air region at smBoundary.
+            if( geom.solderMaskAbove )
+            {
+                // Air stays above SM; mask region below the split
+                double origBottom = reg.yBottom;
+                reg.yBottom = smBoundary;
+
+                XS_DIELECTRIC_REGION mask;
+                mask.yTop = smBoundary;
+                mask.yBottom = origBottom;
+                mask.epsilonR = geom.solderMaskEr;
+                mask.isSolderMask = true;
+                xs.dielectrics.push_back( mask );
+            }
+            else
+            {
+                // Mask region above the split; air stays below SM
+                double origTop = reg.yTop;
+                reg.yTop = smBoundary;
+
+                XS_DIELECTRIC_REGION mask;
+                mask.yTop = origTop;
+                mask.yBottom = smBoundary;
+                mask.epsilonR = geom.solderMaskEr;
+                mask.isSolderMask = true;
+                xs.dielectrics.push_back( mask );
+            }
+
+            break;
+        }
+    }
+
     // Signal conductor at x=0 (conductors[0])
     XS_CONDUCTOR cond;
     cond.centerX = 0.0;

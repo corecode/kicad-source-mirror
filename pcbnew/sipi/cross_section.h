@@ -56,6 +56,7 @@ struct XS_DIELECTRIC_REGION
     double yTop = 0.0;        ///< Top of this region (meters, smaller y)
     double yBottom = 0.0;     ///< Bottom of this region (meters, larger y)
     double epsilonR = 1.0;    ///< Relative permittivity
+    bool   isSolderMask = false; ///< Rendering hint: use solder mask color
 };
 
 
