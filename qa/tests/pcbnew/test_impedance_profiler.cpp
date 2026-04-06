@@ -1363,4 +1363,84 @@ BOOST_AUTO_TEST_CASE( SPIs_SCK_Profile )
 }
 
 
+/**
+ * Runtime performance: full SE_PROFILE on the USB_D_P net.
+ * Measures board load + zone fill, geometry extraction + BEM solves.
+ * Catches regressions in findCopperSpans, FindNeighbors, and BEM assembly.
+ */
+BOOST_AUTO_TEST_CASE( ProfilePerformance )
+{
+    try
+    {
+        KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+    }
+    catch( ... )
+    {
+        BOOST_TEST_MESSAGE( "Board cparti_fpga not found — skipping" );
+        return;
+    }
+
+    if( !m_board || m_board->Tracks().empty() )
+    {
+        BOOST_TEST_MESSAGE( "No tracks — skipping" );
+        return;
+    }
+
+    auto tFill0 = std::chrono::steady_clock::now();
+    KI_TEST::FillZones( m_board.get() );
+    m_board->BuildConnectivity();
+    auto tFill1 = std::chrono::steady_clock::now();
+
+    // Find USB_D_P net
+    int netP = -1;
+
+    for( const auto& [code, info] : m_board->GetNetInfo().NetsByNetcode() )
+    {
+        if( info->GetNetname().Contains( wxS( "USB_D_P" ) ) )
+        {
+            netP = code;
+            break;
+        }
+    }
+
+    if( netP < 0 )
+    {
+        BOOST_TEST_MESSAGE( "USB_D_P not found — skipping" );
+        return;
+    }
+
+    // Time the profile computation (geometry extraction + BEM solves)
+    static constexpr int RUNS = 3;
+    long bestMs = 999999;
+
+    for( int r = 0; r < RUNS; r++ )
+    {
+        SE_PROFILE profile;
+        BEM_CACHE  cache;
+
+        auto t0 = std::chrono::steady_clock::now();
+        BOOST_REQUIRE( profile.Compute( m_board.get(), netP, cache ) );
+        auto t1 = std::chrono::steady_clock::now();
+
+        long ms = std::chrono::duration_cast<std::chrono::milliseconds>( t1 - t0 ).count();
+        bestMs = std::min( bestMs, ms );
+
+        if( r == 0 )
+        {
+            BOOST_TEST_MESSAGE( "USB_D_P profile: " << profile.GetSamples().size()
+                                << " samples, " << profile.GetTotalLength() / 1e6 << "mm" );
+        }
+    }
+
+    long fillMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          tFill1 - tFill0 ).count();
+
+    BOOST_TEST_MESSAGE( "Zone fill + connectivity: " << fillMs << "ms" );
+    BOOST_TEST_MESSAGE( "Profile best of " << RUNS << ": " << bestMs << "ms" );
+
+    // Profile must complete in under 5 seconds
+    BOOST_CHECK_LT( bestMs, 5000 );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()
