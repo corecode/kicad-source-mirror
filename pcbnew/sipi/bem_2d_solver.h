@@ -60,6 +60,7 @@ public:
     void SetGeometry( const XS_GEOMETRY& aGeometry );
     void SetPanelsPerEdge( int aCount );
     void SetFineInterfaceGrid( bool aFine ) { m_fineInterfaceGrid = aFine; }
+    void SetEdgeSingularity( bool aEnable ) { m_edgeSingularity = aEnable; }
 
     /// Override interface element grid: extent = aMult × h, spacing = h / aDiv.
     /// When set, applies to ALL boundaries (ignoring low-contrast optimization).
@@ -87,6 +88,10 @@ private:
         double epsMinus;        ///< INTERFACE: εr on the -normal side
         double normalX;         ///< INTERFACE: outward normal x-component
         double normalY;         ///< INTERFACE: outward normal y-component
+
+        /// Edge singularity data (ν-exponent at conductor corners).
+        double nu[2] = { 0.0, 0.0 };       ///< Singular exponent at [0]-end and [2]-end
+        bool   isEdge[2] = { false, false }; ///< True if node is a conductor corner
     };
 
     // --- Shape functions and geometry ---
@@ -95,8 +100,17 @@ private:
     /// Returns N[0], N[1], N[2] for start, middle, end nodes.
     static void shapeFunctions( double aXi, double aN[3] );
 
+    /// Evaluate shape functions with edge singularity modification.
+    /// Falls back to standard shape functions when the element has no edge.
+    static void shapeFunctionsEdge( double aXi, const ELEMENT& aElem, double aN[3] );
+
     /// Evaluate derivatives of shape functions at local coordinate ξ.
     static void shapeDerivatives( double aXi, double aDN[3] );
+
+    /// Compute singular exponent ν for a conductor corner at the junction
+    /// of two dielectric materials.  Minimizes the NMMTL transcendental equation.
+    /// Returns π/θ₂ for uniform dielectric (ε₁ = ε₂).
+    static double findNu( double aEps1, double aEps2, double aTheta1, double aTheta2 );
 
     /// Compute the Jacobian |dl/dξ| at local coordinate ξ for an element.
     static double jacobian( double aXi, const ELEMENT& aElem );
@@ -160,6 +174,7 @@ private:
     XS_GEOMETRY   m_geometry;
     RLGC_RESULT   m_result;
     int           m_panelsPerEdge;
+    bool          m_edgeSingularity;
     bool          m_fineInterfaceGrid;
     bool          m_intfGridOverride;
     double        m_intfExtentMult;

@@ -1029,7 +1029,7 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
         {
             BEM_2D_SOLVER solver;
             solver.SetGeometry( xs );
-            solver.SetPanelsPerEdge( 12 );
+            solver.SetPanelsPerEdge( 5 );
 
             if( solver.Solve() && solver.GetResult().Z0 > 0.0 )
             {

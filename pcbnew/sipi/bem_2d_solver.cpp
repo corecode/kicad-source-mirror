@@ -92,7 +92,8 @@ static const double GAUSS_WTS_6[6] = {
 // ---------------------------------------------------------------------------
 
 BEM_2D_SOLVER::BEM_2D_SOLVER() :
-        m_panelsPerEdge( 10 ),
+        m_panelsPerEdge( 5 ),
+        m_edgeSingularity( true ),
         m_fineInterfaceGrid( false ),
         m_intfGridOverride( false ),
         m_intfExtentMult( 5.0 ),
@@ -142,6 +143,143 @@ void BEM_2D_SOLVER::shapeDerivatives( double aXi, double aDN[3] )
     aDN[2] =  4.0 * L2 - 1.0;
 }
 
+
+// ---------------------------------------------------------------------------
+// Edge singularity — ν-exponent (NMMTL find_nu port)
+// ---------------------------------------------------------------------------
+
+double BEM_2D_SOLVER::findNu( double aEps1, double aEps2,
+                               double aTheta1, double aTheta2 )
+{
+    // Uniform dielectric: analytical result
+    if( std::abs( aEps1 - aEps2 ) < 1e-12 * ( aEps1 + aEps2 ) )
+        return M_PI / aTheta2;
+
+    double epsTerm = ( aEps1 - aEps2 ) / ( aEps1 + aEps2 );
+    double thetaTerm = 2.0 * aTheta1 - aTheta2;
+
+    // Objective: f(nu) = [sin(nu*theta2) - sin(nu*thetaTerm)*epsTerm]^2
+    // Brent's method (golden-section with parabolic interpolation) on [a,b].
+    // The function is smooth and has a single minimum in [0,1].
+
+    auto objective = [&]( double nu ) -> double
+    {
+        double x = sin( nu * aTheta2 ) - sin( nu * thetaTerm ) * epsTerm;
+        return x * x;
+    };
+
+    // Golden-section search — simple and robust for this smooth 1D problem.
+    static constexpr double PHI = 0.6180339887498949;   // (sqrt(5)-1)/2
+    static constexpr double TOL = 1e-10;
+
+    double a = 1e-4;
+    double b = 1.0;
+    double c = b - PHI * ( b - a );
+    double d = a + PHI * ( b - a );
+
+    while( std::abs( b - a ) > TOL )
+    {
+        if( objective( c ) < objective( d ) )
+        {
+            b = d;
+            d = c;
+            c = b - PHI * ( b - a );
+        }
+        else
+        {
+            a = c;
+            c = d;
+            d = a + PHI * ( b - a );
+        }
+    }
+
+    return ( a + b ) / 2.0;
+}
+
+
+// ---------------------------------------------------------------------------
+// Edge-modified shape functions (NMMTL nmmtl_shape_c_edge port)
+// ---------------------------------------------------------------------------
+
+void BEM_2D_SOLVER::shapeFunctionsEdge( double aXi, const ELEMENT& aElem,
+                                         double aN[3] )
+{
+    shapeFunctions( aXi, aN );
+
+    // [0]-end edge modification
+    if( aElem.isEdge[0] && aElem.nu[0] > 0.0 )
+    {
+        double exp0 = aElem.nu[0] - 1.0;   // negative (nu < 1)
+
+        // Distance from evaluation point to corner (node 0)
+        double Ns[3];
+        shapeFunctions( aXi, Ns );
+
+        double px = 0.0, py = 0.0;
+
+        for( int i = 0; i < 3; i++ )
+        {
+            px += Ns[i] * aElem.xpts[i];
+            py += Ns[i] * aElem.ypts[i];
+        }
+
+        double dx0 = px - aElem.xpts[0];
+        double dy0 = py - aElem.ypts[0];
+        double dist = sqrt( dx0 * dx0 + dy0 * dy0 );
+
+        if( dist > 1e-30 )
+        {
+            for( int i = 0; i < 3; i++ )
+            {
+                double dxi = aElem.xpts[i] - aElem.xpts[0];
+                double dyi = aElem.ypts[i] - aElem.ypts[0];
+                double distI = sqrt( dxi * dxi + dyi * dyi );
+
+                if( distI > 1e-30 )
+                    aN[i] *= pow( dist / distI, exp0 );
+            }
+        }
+    }
+
+    // [2]-end edge modification (same logic, corner at node 2)
+    if( aElem.isEdge[1] && aElem.nu[1] > 0.0 )
+    {
+        double exp1 = aElem.nu[1] - 1.0;
+
+        double Ns[3];
+        shapeFunctions( aXi, Ns );
+
+        double px = 0.0, py = 0.0;
+
+        for( int i = 0; i < 3; i++ )
+        {
+            px += Ns[i] * aElem.xpts[i];
+            py += Ns[i] * aElem.ypts[i];
+        }
+
+        double dx2 = px - aElem.xpts[2];
+        double dy2 = py - aElem.ypts[2];
+        double dist = sqrt( dx2 * dx2 + dy2 * dy2 );
+
+        if( dist > 1e-30 )
+        {
+            for( int i = 0; i < 3; i++ )
+            {
+                double dxi = aElem.xpts[i] - aElem.xpts[2];
+                double dyi = aElem.ypts[i] - aElem.ypts[2];
+                double distI = sqrt( dxi * dxi + dyi * dyi );
+
+                if( distI > 1e-30 )
+                    aN[i] *= pow( dist / distI, exp1 );
+            }
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Jacobian
+// ---------------------------------------------------------------------------
 
 double BEM_2D_SOLVER::jacobian( double aXi, const ELEMENT& aElem )
 {
@@ -473,10 +611,62 @@ void BEM_2D_SOLVER::buildElements()
                                                / cond.width ), 2, 20 );
 
         // Four faces: bottom, right, top (reversed), left (reversed)
+        int faceStart0 = (int) m_condElements.size();
         buildFace( xLeft, yBot, xRight, yBot, nHoriz, 0.0, -1.0, condIdx );
+        int faceStart1 = (int) m_condElements.size();
         buildFace( xRight, yBot, xRight, yTop, nVert, 1.0, 0.0, condIdx );
+        int faceStart2 = (int) m_condElements.size();
         buildFace( xRight, yTop, xLeft, yTop, nHoriz, 0.0, 1.0, condIdx );
+        int faceStart3 = (int) m_condElements.size();
         buildFace( xLeft, yTop, xLeft, yBot, nVert, -1.0, 0.0, condIdx );
+        int faceEnd = (int) m_condElements.size();
+
+        // --- Edge singularity at conductor corners (ν-exponent) ---
+        if( !m_edgeSingularity )
+            continue;
+        // Each rectangular corner has exterior angle θ₂ = 3π/2.
+        // If the corner sits on a dielectric boundary, the boundary splits
+        // the exterior into π (one material) and π/2 (the other), so θ₁ = π.
+        // Otherwise both sides are the same material and ν = π/θ₂ = 2/3.
+        static constexpr double THETA2_RECT = 3.0 * M_PI / 2.0;
+
+        struct CORNER
+        {
+            int    lastElem;    // last element of preceding face ([2]-end)
+            int    firstElem;   // first element of following face ([0]-end)
+            double cornerY;     // y-coordinate of the corner
+        };
+
+        CORNER corners[4] = {
+            { faceStart1 - 1, faceStart1, yBot },  // bottom-right
+            { faceStart2 - 1, faceStart2, yTop },  // top-right
+            { faceStart3 - 1, faceStart3, yTop },  // top-left
+            { faceEnd - 1,    faceStart0, yBot },  // bottom-left
+        };
+
+        for( const CORNER& cn : corners )
+        {
+            double eps1 = 1.0, eps2 = 1.0;
+            double theta1 = THETA2_RECT / 2.0;
+
+            for( const DIELECTRIC_BOUNDARY& db : dielectricBoundaries )
+            {
+                if( std::abs( cn.cornerY - db.y ) < 1e-9 )
+                {
+                    eps1 = db.epsBelow;
+                    eps2 = db.epsAbove;
+                    theta1 = M_PI;
+                    break;
+                }
+            }
+
+            double nu = findNu( eps1, eps2, theta1, THETA2_RECT );
+
+            m_condElements[cn.lastElem].isEdge[1] = true;
+            m_condElements[cn.lastElem].nu[1] = nu;
+            m_condElements[cn.firstElem].isEdge[0] = true;
+            m_condElements[cn.firstElem].nu[0] = nu;
+        }
     }
 
     m_numConductors = signalIdx;
@@ -634,7 +824,7 @@ void BEM_2D_SOLVER::intervalConductor( double x, double y,
     {
         double xi = GAUSS_PTS_6[q];
         double N[3];
-        shapeFunctions( xi, N );
+        shapeFunctionsEdge( xi, aInner, N );
 
         double X, Y;
         interpolate( xi, aInner, X, Y );
@@ -666,7 +856,7 @@ void BEM_2D_SOLVER::intervalSelfConductor( double x, double y,
         {
             double xi = a + GAUSS_PTS_6[q] * ( b - a );
             double N[3];
-            shapeFunctions( xi, N );
+            shapeFunctionsEdge( xi, aElem, N );
 
             double X, Y;
             interpolate( xi, aElem, X, Y );
@@ -701,7 +891,7 @@ void BEM_2D_SOLVER::intervalFlux( double x, double y,
     {
         double xi = GAUSS_PTS_6[q];
         double N[3];
-        shapeFunctions( xi, N );
+        shapeFunctionsEdge( xi, aInner, N );
 
         double X, Y;
         interpolate( xi, aInner, X, Y );
@@ -731,7 +921,7 @@ void BEM_2D_SOLVER::intervalSelfFlux( double x, double y,
         {
             double xi = a + GAUSS_PTS_6[q] * ( b - a );
             double N[3];
-            shapeFunctions( xi, N );
+            shapeFunctionsEdge( xi, aElem, N );
 
             double X, Y;
             interpolate( xi, aElem, X, Y );
@@ -769,7 +959,7 @@ void BEM_2D_SOLVER::buildLoadVector( Eigen::VectorXd& aB,
         {
             double xi = GAUSS_PTS_10[q];
             double N[3];
-            shapeFunctions( xi, N );
+            shapeFunctionsEdge( xi, el, N );
 
             double J = jacobian( xi, el );
 
@@ -801,7 +991,7 @@ void BEM_2D_SOLVER::extractCharge( const Eigen::VectorXd& aSigma,
         {
             double xi = GAUSS_PTS_10[q];
             double N[3];
-            shapeFunctions( xi, N );
+            shapeFunctionsEdge( xi, el, N );
 
             double J = jacobian( xi, el );
 
@@ -831,7 +1021,7 @@ Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceFull()
         {
             double xiOuter = GAUSS_PTS_10[qo];
             double No[3];
-            shapeFunctions( xiOuter, No );
+            shapeFunctionsEdge( xiOuter, outerEl, No );
 
             double x, y;
             interpolate( xiOuter, outerEl, x, y );
@@ -973,7 +1163,7 @@ Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceAir()
         {
             double xiOuter = GAUSS_PTS_10[qo];
             double No[3];
-            shapeFunctions( xiOuter, No );
+            shapeFunctionsEdge( xiOuter, outerEl, No );
 
             double x, y;
             interpolate( xiOuter, outerEl, x, y );
@@ -1014,7 +1204,7 @@ Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceAir()
             {
                 double xi = GAUSS_PTS_10[q];
                 double N[3];
-                shapeFunctions( xi, N );
+                shapeFunctionsEdge( xi, el, N );
                 double J = jacobian( xi, el );
 
                 for( int i = 0; i < 3; i++ )
@@ -1038,7 +1228,7 @@ Eigen::MatrixXd BEM_2D_SOLVER::solveCapacitanceAir()
             {
                 double xi = GAUSS_PTS_10[q];
                 double N[3];
-                shapeFunctions( xi, N );
+                shapeFunctionsEdge( xi, el, N );
                 double J = jacobian( xi, el );
 
                 for( int i = 0; i < 3; i++ )

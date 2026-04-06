@@ -82,7 +82,7 @@ BOOST_AUTO_TEST_CASE( MicrostripVsAnalytical )
 
     BEM_2D_SOLVER solver;
     solver.SetGeometry( geom );
-    solver.SetPanelsPerEdge( 20 );
+    solver.SetPanelsPerEdge( 8 );
 
     bool ok = solver.Solve();
     BOOST_REQUIRE( ok );
@@ -1047,7 +1047,7 @@ BOOST_AUTO_TEST_CASE( SolderMaskEffect )
 
     BEM_2D_SOLVER solverBare;
     solverBare.SetGeometry( geomBare );
-    solverBare.SetPanelsPerEdge( 20 );
+    solverBare.SetPanelsPerEdge( 8 );
     BOOST_REQUIRE( solverBare.Solve() );
     double z0Bare = solverBare.GetResult().Z0;
 
@@ -1067,7 +1067,7 @@ BOOST_AUTO_TEST_CASE( SolderMaskEffect )
 
     BEM_2D_SOLVER solverSM;
     solverSM.SetGeometry( geomSM );
-    solverSM.SetPanelsPerEdge( 20 );
+    solverSM.SetPanelsPerEdge( 8 );
     BOOST_REQUIRE( solverSM.Solve() );
     double z0SM = solverSM.GetResult().Z0;
 
@@ -1085,7 +1085,7 @@ BOOST_AUTO_TEST_CASE( SolderMaskEffect )
     // Compare coarse SM interface grid (default) vs fine grid (reference)
     BEM_2D_SOLVER solverFine;
     solverFine.SetGeometry( geomSM );
-    solverFine.SetPanelsPerEdge( 20 );
+    solverFine.SetPanelsPerEdge( 8 );
     solverFine.SetFineInterfaceGrid( true );
     BOOST_REQUIRE( solverFine.Solve() );
     double z0Fine = solverFine.GetResult().Z0;
@@ -1104,6 +1104,8 @@ BOOST_AUTO_TEST_CASE( SolderMaskEffect )
  * Interface grid sensitivity: sweep extent and spacing for the substrate boundary
  * across multiple geometries to find the minimum discretization that stays within
  * 0.5% of the finest reference.
+ *
+ * Uses 10 panels/edge to isolate interface grid effects from panel convergence.
  */
 BOOST_AUTO_TEST_CASE( InterfaceGridSensitivity )
 {
@@ -1160,7 +1162,7 @@ BOOST_AUTO_TEST_CASE( InterfaceGridSensitivity )
         // Reference: finest grid
         BEM_2D_SOLVER refSolver;
         refSolver.SetGeometry( geom );
-        refSolver.SetPanelsPerEdge( 20 );
+        refSolver.SetPanelsPerEdge( 10 );
         refSolver.SetInterfaceGrid( grids[0].extentMult, grids[0].spacingDiv );
         BOOST_REQUIRE( refSolver.Solve() );
         double z0Ref = refSolver.GetResult().Z0;
@@ -1173,7 +1175,7 @@ BOOST_AUTO_TEST_CASE( InterfaceGridSensitivity )
         {
             BEM_2D_SOLVER solver;
             solver.SetGeometry( geom );
-            solver.SetPanelsPerEdge( 20 );
+            solver.SetPanelsPerEdge( 10 );
             solver.SetInterfaceGrid( grids[g].extentMult, grids[g].spacingDiv );
             BOOST_REQUIRE( solver.Solve() );
 
@@ -1183,6 +1185,81 @@ BOOST_AUTO_TEST_CASE( InterfaceGridSensitivity )
         }
 
         BOOST_TEST_MESSAGE( line );
+    }
+}
+
+
+/**
+ * Edge singularity sensitivity: compare Z0 and εr_eff with and without
+ * ν-exponent edge singularity across a range of panel counts and geometries.
+ */
+BOOST_AUTO_TEST_CASE( EdgeSingularitySensitivity )
+{
+    struct GEOM_CASE
+    {
+        const char* name;
+        double w, h, er;
+    };
+
+    GEOM_CASE cases[] = {
+        { "narrow (w/h=0.5)",  0.05e-3, 0.1e-3,  4.4 },
+        { "typical (w/h=1.5)", 0.15e-3, 0.1e-3,  4.4 },
+        { "wide (w/h=3.0)",    0.30e-3, 0.1e-3,  4.4 },
+        { "high-er (w/h=1.5)", 0.15e-3, 0.1e-3, 10.0 },
+        { "low-er (w/h=1.5)",  0.15e-3, 0.1e-3,  2.2 },
+    };
+
+    int panels[] = { 3, 4, 5, 6, 8, 10, 15, 20, 30 };
+
+    BOOST_TEST_MESSAGE( "" );
+    BOOST_TEST_MESSAGE( "Edge singularity sensitivity analysis" );
+    BOOST_TEST_MESSAGE( "====================================" );
+
+    for( const GEOM_CASE& gc : cases )
+    {
+        XS_GEOMETRY geom = makeMicrostripGeom( gc.w, gc.h, gc.er );
+
+        // Fine-mesh reference (30 panels, with edge singularity)
+        BEM_2D_SOLVER refSolver;
+        refSolver.SetGeometry( geom );
+        refSolver.SetPanelsPerEdge( 20 );
+        BOOST_REQUIRE( refSolver.Solve() );
+        double z0Ref = refSolver.GetResult().Z0;
+
+        BOOST_TEST_MESSAGE( "" );
+
+        std::string header = std::string( gc.name ) + "  (ref Z0="
+                             + std::to_string( z0Ref ).substr( 0, 6 ) + ")";
+        BOOST_TEST_MESSAGE( header );
+        BOOST_TEST_MESSAGE( "panels    Z0_on      Z0_off     err_on    err_off   delta" );
+
+        for( int n : panels )
+        {
+            BEM_2D_SOLVER solverOn, solverOff;
+
+            solverOn.SetGeometry( geom );
+            solverOn.SetPanelsPerEdge( n );
+            solverOn.SetEdgeSingularity( true );
+            BOOST_REQUIRE( solverOn.Solve() );
+
+            solverOff.SetGeometry( geom );
+            solverOff.SetPanelsPerEdge( n );
+            solverOff.SetEdgeSingularity( false );
+            BOOST_REQUIRE( solverOff.Solve() );
+
+            double z0On = solverOn.GetResult().Z0;
+            double z0Off = solverOff.GetResult().Z0;
+            double errOn = ( z0On - z0Ref ) / z0Ref * 100.0;
+            double errOff = ( z0Off - z0Ref ) / z0Ref * 100.0;
+            double delta = errOn - errOff;
+
+            char line[120];
+            snprintf( line, sizeof( line ),
+                      "%5d   %8.3f   %8.3f   %+6.3f%%   %+6.3f%%   %+6.3f%%",
+                      n, z0On, z0Off, errOn, errOff, delta );
+
+            BOOST_TEST_MESSAGE( line );
+        }
     }
 }
 
