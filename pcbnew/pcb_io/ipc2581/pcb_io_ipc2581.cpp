@@ -1363,6 +1363,9 @@ wxXmlNode* PCB_IO_IPC2581::generateBOMSection( wxXmlNode* aEcadNode )
         fp->SetPosition( {0, 0} );
         fp->SetOrientation( ANGLE_0 );
 
+        if( fp->IsFlipped() )
+            fp->Flip( fp->GetPosition(), FLIP_DIRECTION::TOP_BOTTOM );
+
         size_t hash = hash_fp_item( fp.get(), HASH_POS | REL_COORD );
         auto iter = m_footprint_dict.find( hash );
 
