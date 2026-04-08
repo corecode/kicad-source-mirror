@@ -2046,4 +2046,298 @@ BOOST_AUTO_TEST_CASE( AntipadNeverDecreasesZ0 )
 }
 
 
+/**
+ * FDFD reference comparison: SEG_A geometry from FPGA board.
+ * w=200µm trace, h=210µm FR4 (εr=4.4), t=35µm copper.
+ * GCPW adds coplanar ground strips at 128µm edge-to-edge gap.
+ * SM: 20µm on substrate, ~10µm over copper, εr=3.3.
+ *
+ * FDFD reference values:
+ *   Microstrip no SM:   69 Ω
+ *   Microstrip with SM: 66 Ω
+ *   GCPW no SM:         57 Ω
+ *   GCPW with SM:       53 Ω
+ */
+BOOST_AUTO_TEST_CASE( FDFDReference_SEG_A )
+{
+    double w  = 0.200e-3;    // trace width
+    double h  = 0.210e-3;    // substrate thickness
+    double er = 4.5;         // substrate εr
+    double t  = 0.035e-3;    // copper thickness
+
+    // GCPW coplanar ground: 128µm gap edge-to-edge, 1mm wide each side
+    double gap   = 0.128e-3;
+    double gwW   = 1.0e-3;
+    double gwCx  = w / 2.0 + gap + gwW / 2.0;  // center-to-center
+
+    // Solder mask: 20µm on substrate thinning to ~10µm over copper
+    double smThick   = 10e-6;   // over copper
+    double smEr      = 3.3;
+
+    int panels = 12;
+
+    // --- Case 1: Microstrip, no solder mask ---
+    {
+        XS_GEOMETRY geom = makeMicrostripGeom( w, h, er, t );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+        solver.SetPanelsPerEdge( panels );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+        BOOST_TEST_MESSAGE( "Microstrip no SM:   Z0=" << z0
+                            << "  erEff=" << solver.GetResult().erEff
+                            << "  (FDFD ref: 69)" );
+    }
+
+    // --- Case 2: Microstrip, with solder mask ---
+    {
+        XS_GEOMETRY geom = makeMicrostripGeom( w, h, er, t );
+
+        // SM boundary above the conductor
+        double condTop = -( h + t );
+        double smBoundary = condTop - smThick;
+
+        // Split air region at SM boundary
+        geom.dielectrics.clear();
+
+        XS_DIELECTRIC_REGION air;
+        air.yTop = -10e-3;
+        air.yBottom = smBoundary;
+        air.epsilonR = 1.0;
+
+        XS_DIELECTRIC_REGION sm;
+        sm.yTop = smBoundary;
+        sm.yBottom = -h;
+        sm.epsilonR = smEr;
+
+        XS_DIELECTRIC_REGION sub;
+        sub.yTop = -h;
+        sub.yBottom = 0.0;
+        sub.epsilonR = er;
+
+        geom.dielectrics.push_back( air );
+        geom.dielectrics.push_back( sm );
+        geom.dielectrics.push_back( sub );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+        solver.SetPanelsPerEdge( panels );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+        BOOST_TEST_MESSAGE( "Microstrip with SM: Z0=" << z0
+                            << "  erEff=" << solver.GetResult().erEff
+                            << "  (FDFD ref: 66)" );
+    }
+
+    // --- Case 3: GCPW, no solder mask ---
+    {
+        XS_GEOMETRY geom = makeMicrostripGeom( w, h, er, t );
+
+        double condY = -( h + t / 2.0 );
+
+        XS_CONDUCTOR gwLeft;
+        gwLeft.centerX = -gwCx;
+        gwLeft.centerY = condY;
+        gwLeft.width = gwW;
+        gwLeft.thickness = t;
+        gwLeft.isGround = true;
+        geom.conductors.push_back( gwLeft );
+
+        XS_CONDUCTOR gwRight;
+        gwRight.centerX = gwCx;
+        gwRight.centerY = condY;
+        gwRight.width = gwW;
+        gwRight.thickness = t;
+        gwRight.isGround = true;
+        geom.conductors.push_back( gwRight );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+        solver.SetPanelsPerEdge( panels );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+        BOOST_TEST_MESSAGE( "GCPW no SM:         Z0=" << z0
+                            << "  erEff=" << solver.GetResult().erEff
+                            << "  (FDFD ref: 57)" );
+    }
+
+    // --- Case 4: GCPW, with solder mask ---
+    {
+        XS_GEOMETRY geom = makeMicrostripGeom( w, h, er, t );
+
+        double condY = -( h + t / 2.0 );
+        double condTop = -( h + t );
+        double smBoundary = condTop - smThick;
+
+        // SM dielectric
+        geom.dielectrics.clear();
+
+        XS_DIELECTRIC_REGION air;
+        air.yTop = -10e-3;
+        air.yBottom = smBoundary;
+        air.epsilonR = 1.0;
+
+        XS_DIELECTRIC_REGION sm;
+        sm.yTop = smBoundary;
+        sm.yBottom = -h;
+        sm.epsilonR = smEr;
+
+        XS_DIELECTRIC_REGION sub;
+        sub.yTop = -h;
+        sub.yBottom = 0.0;
+        sub.epsilonR = er;
+
+        geom.dielectrics.push_back( air );
+        geom.dielectrics.push_back( sm );
+        geom.dielectrics.push_back( sub );
+
+        // Coplanar grounds
+        XS_CONDUCTOR gwLeft;
+        gwLeft.centerX = -gwCx;
+        gwLeft.centerY = condY;
+        gwLeft.width = gwW;
+        gwLeft.thickness = t;
+        gwLeft.isGround = true;
+        geom.conductors.push_back( gwLeft );
+
+        XS_CONDUCTOR gwRight;
+        gwRight.centerX = gwCx;
+        gwRight.centerY = condY;
+        gwRight.width = gwW;
+        gwRight.thickness = t;
+        gwRight.isGround = true;
+        geom.conductors.push_back( gwRight );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+        solver.SetPanelsPerEdge( panels );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+        BOOST_TEST_MESSAGE( "GCPW with SM:       Z0=" << z0
+                            << "  erEff=" << solver.GetResult().erEff
+                            << "  (FDFD ref: 53)" );
+    }
+}
+
+
+/**
+ * Groundwire thickness effect: a contiguous groundwire at the image ground
+ * level protrudes by t/2 above the image plane.  This should NOT add
+ * significant capacitance vs the bare image ground.
+ *
+ * Test: microstrip with no GW vs contiguous GW at various thicknesses.
+ */
+BOOST_AUTO_TEST_CASE( GroundwireThicknessEffect )
+{
+    double w  = 0.200e-3;
+    double h  = 0.210e-3;
+    double er = 4.5;
+    double t  = 0.035e-3;
+    int panels = 12;
+
+    // Baseline: plain microstrip (image ground only)
+    XS_GEOMETRY geomBase = makeMicrostripGeom( w, h, er, t );
+    BEM_2D_SOLVER solverBase;
+    solverBase.SetGeometry( geomBase );
+    solverBase.SetPanelsPerEdge( panels );
+    BOOST_REQUIRE( solverBase.Solve() );
+    double z0Base = solverBase.GetResult().Z0;
+
+    BOOST_TEST_MESSAGE( "Baseline (image only):  Z0=" << z0Base
+                        << "  erEff=" << solverBase.GetResult().erEff );
+
+    // Contiguous groundwire at image level, varying thickness
+    double condY = -( h + t / 2.0 );
+    double thicknesses[] = { 1e-6, 5e-6, 15e-6, 35e-6, 70e-6 };
+
+    for( double gwT : thicknesses )
+    {
+        XS_GEOMETRY geom = makeMicrostripGeom( w, h, er, t );
+
+        // Wide groundwire: top face flush at y=0 (image level), body below.
+        XS_CONDUCTOR gw;
+        gw.centerX = 0.0;
+        gw.centerY = gwT / 2.0;
+        gw.width = 2.0e-3;   // 2mm wide (>> coupling horizon)
+        gw.thickness = gwT;
+        gw.isGround = true;
+        geom.conductors.push_back( gw );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+        solver.SetPanelsPerEdge( panels );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+        double delta = z0 - z0Base;
+        double pct = delta / z0Base * 100.0;
+
+        BOOST_TEST_MESSAGE( "GW t=" << gwT * 1e6 << "um:  Z0=" << z0
+                            << "  delta=" << delta << " (" << pct << "%)"
+                            << "  erEff=" << solver.GetResult().erEff );
+    }
+
+    // Also test: demoted geometry (image at 1.5mm, GW at original h)
+    {
+        double hFallback = 1.5e-3;
+        XS_GEOMETRY geom;
+        geom.groundY = 0.0;
+        geom.epsilonR = er;
+
+        XS_CONDUCTOR sig;
+        sig.centerX = 0.0;
+        sig.centerY = -( hFallback + t / 2.0 );
+        sig.width = w;
+        sig.thickness = t;
+        geom.conductors.push_back( sig );
+
+        // Groundwire at original ref distance from signal
+        double gwY = sig.centerY + h + t / 2.0;
+        XS_CONDUCTOR gw;
+        gw.centerX = 0.0;
+        gw.centerY = gwY;
+        gw.width = 2.0e-3;
+        gw.thickness = t;
+        gw.isGround = true;
+        geom.conductors.push_back( gw );
+
+        // Dielectric: air above signal, FR4 from signal to GW, air below GW to image
+        XS_DIELECTRIC_REGION airAbove;
+        airAbove.yTop = -10e-3;
+        airAbove.yBottom = sig.centerY + t / 2.0;
+        airAbove.epsilonR = 1.0;
+
+        XS_DIELECTRIC_REGION fr4;
+        fr4.yTop = sig.centerY + t / 2.0;
+        fr4.yBottom = gwY - t / 2.0;
+        fr4.epsilonR = er;
+
+        XS_DIELECTRIC_REGION airBelow;
+        airBelow.yTop = gwY - t / 2.0;
+        airBelow.yBottom = 0.0;
+        airBelow.epsilonR = 1.0;
+
+        geom.dielectrics.push_back( airAbove );
+        geom.dielectrics.push_back( fr4 );
+        geom.dielectrics.push_back( airBelow );
+
+        BEM_2D_SOLVER solver;
+        solver.SetGeometry( geom );
+        solver.SetPanelsPerEdge( panels );
+        BOOST_REQUIRE( solver.Solve() );
+
+        double z0 = solver.GetResult().Z0;
+        BOOST_TEST_MESSAGE( "Demoted (h=1.5mm, GW at h=0.21mm, t=35um): Z0=" << z0
+                            << "  erEff=" << solver.GetResult().erEff
+                            << "  delta=" << z0 - z0Base
+                            << " (" << ( z0 - z0Base ) / z0Base * 100.0 << "%)" );
+    }
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

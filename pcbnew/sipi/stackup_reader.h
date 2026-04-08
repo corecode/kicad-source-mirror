@@ -58,6 +58,9 @@ struct LAYER_GEOMETRY
     PCB_LAYER_ID refLayerAbove = UNDEFINED_LAYER;  ///< Copper layer used as ref above
     PCB_LAYER_ID refLayerBelow = UNDEFINED_LAYER;  ///< Copper layer used as ref below
 
+    double refThicknessAbove = 0.035e-3; ///< Reference copper thickness above (meters)
+    double refThicknessBelow = 0.035e-3; ///< Reference copper thickness below (meters)
+
     double signalZPosition = 0.0;   ///< Signal layer z-position (meters, from stackup)
 
     /// Original reference distance before demotion (0 if not demoted).

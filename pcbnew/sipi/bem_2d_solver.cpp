@@ -700,7 +700,11 @@ void BEM_2D_SOLVER::buildElements()
             buildFaceBreaks( xLeft, yBot, xRight, yBot, hBreaks,
                              0.0, -1.0, condIdx );
             int faceStart1 = (int) m_condElements.size();
-            buildFace( xRight, yBot, xRight, yTop, nVert, 1.0, 0.0, condIdx );
+
+            // Skip right vertical face if copper continues beyond right edge
+            if( !cond.openRight )
+                buildFace( xRight, yBot, xRight, yTop, nVert, 1.0, 0.0, condIdx );
+
             int faceStart2 = (int) m_condElements.size();
             // Top face is reversed (right to left) — reverse the breaks
             auto hBreaksRev = hBreaks;
@@ -712,10 +716,14 @@ void BEM_2D_SOLVER::buildElements()
             buildFaceBreaks( xRight, yTop, xLeft, yTop, hBreaksRev,
                              0.0, 1.0, condIdx );
             int faceStart3 = (int) m_condElements.size();
-            buildFace( xLeft, yTop, xLeft, yBot, nVert, -1.0, 0.0, condIdx );
+
+            // Skip left vertical face if copper continues beyond left edge
+            if( !cond.openLeft )
+                buildFace( xLeft, yTop, xLeft, yBot, nVert, -1.0, 0.0, condIdx );
+
             int faceEnd = (int) m_condElements.size();
 
-            // Edge singularity setup (same as below but with local scope)
+            // Edge singularity setup — skip corners at open edges
             static constexpr double THETA2_RECT = 3.0 * M_PI / 2.0;
 
             struct CORNER
@@ -723,17 +731,21 @@ void BEM_2D_SOLVER::buildElements()
                 int    lastElem;
                 int    firstElem;
                 double cornerY;
+                bool   skip;
             };
 
             CORNER corners[4] = {
-                { faceStart1 - 1, faceStart1, yBot },
-                { faceStart2 - 1, faceStart2, yTop },
-                { faceStart3 - 1, faceStart3, yTop },
-                { faceEnd - 1,    faceStart0, yBot },
+                { faceStart1 - 1, faceStart1, yBot, cond.openRight },
+                { faceStart2 - 1, faceStart2, yTop, cond.openRight },
+                { faceStart3 - 1, faceStart3, yTop, cond.openLeft },
+                { faceEnd - 1,    faceStart0, yBot, cond.openLeft },
             };
 
             for( const CORNER& cn : corners )
             {
+                if( cn.skip )
+                    continue;
+
                 double eps1 = 1.0, eps2 = 1.0;
                 double theta1 = THETA2_RECT / 2.0;
 

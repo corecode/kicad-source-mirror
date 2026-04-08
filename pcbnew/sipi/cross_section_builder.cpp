@@ -700,7 +700,7 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
                                 double aZPosition, double aThickness,
                                 bool aSkipSignalCenter )
     {
-        double maxDist = aParams.couplingHorizon * 2.0;
+        double maxDist = aParams.couplingHorizon * 5.0;
 
         for( const auto& [left, right] : aSpans )
         {
@@ -724,6 +724,8 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
             gw.widthNm = (int) spanWidth;
             gw.yPositionM = aZPosition;
             gw.thicknessM = aThickness;
+            gw.openLeft = ( left <= -(double) extent + 1e3 );
+            gw.openRight = ( right >= (double) extent - 1e3 );
             groundWires.push_back( gw );
         }
     };
@@ -737,12 +739,11 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
             makeGroundWires( spans, interLayer.zPosition, interLayer.thickness, true );
     }
 
-    // --- Always model reference layers as groundwires (NMMTL architecture) ---
-    // The reference plane copper is meshed as V=0 conductor elements, and the
-    // image ground moves to virtual earth (the next solid reference layer).
-    // This gives a consistent BEM architecture for all samples — no discontinuity
-    // when an antipad edge appears.  The copper spans naturally capture the
-    // reference plane shape (solid, or with voids from antipads).
+    // --- Model reference layers ---
+    // When the reference copper is contiguous (no antipads), the image ground
+    // plane is the correct model — no groundwire needed, no demotion.
+    // When antipads are present, the reference is modeled as groundwires and
+    // the image ground demotes to the next solid reference layer.
     auto meshRefLayer = [&]( PCB_LAYER_ID aRefLayer, double aRefZ, double aRefThickness,
                              bool& aHasRef, double& aH, double& aEr, double& aTanD,
                              double& aHOrig, double& aErOrig,
@@ -752,8 +753,7 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
             return;
 
         // Fast path: if no pads or vias are nearby on the reference layer,
-        // the copper is contiguous — create a single groundwire spanning the
-        // full extent without the expensive edge-crossing scan.
+        // the copper is contiguous — the image ground plane is exact.
         static constexpr int ANTIPAD_MARGIN = 1000000; // 1mm
         bool hasNearbyObstacle = false;
 
@@ -772,28 +772,41 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
             }
         }
 
-        if( hasNearbyObstacle )
+        if( !hasNearbyObstacle )
+            return;   // contiguous copper — image ground is sufficient
+
+        // Antipad nearby: scan actual copper spans and create groundwires
+        auto spans = findCopperSpans( aRefLayer );
+
+        if( spans.empty() )
+            return;
+
+        // Check if copper is actually contiguous across the coupling horizon.
+        // The obstacle detection has a large margin, so a distant via may
+        // trigger the scan even though the copper is solid under the signal.
+        bool solidUnderSignal = false;
+
+        for( const auto& [left, right] : spans )
         {
-            // Full scan: find actual copper spans (may have antipads)
-            auto spans = findCopperSpans( aRefLayer );
-
-            if( spans.empty() )
-                return;
-
-            makeGroundWires( spans, aRefZ, aRefThickness, false );
-        }
-        else
-        {
-            // Contiguous copper: single groundwire spanning the coupling horizon
-            XS_GROUNDWIRE gw;
-            gw.lateralNm = 0;
-            gw.widthNm = aParams.couplingHorizon * 2;
-            gw.yPositionM = aRefZ;
-            gw.thicknessM = aRefThickness;
-            groundWires.push_back( gw );
+            if( left <= -halfSignalW && right >= halfSignalW )
+            {
+                // This span covers the entire signal width — no antipad here.
+                // Check if it also covers the coupling horizon.
+                if( left <= -(double) aParams.couplingHorizon
+                    && right >= (double) aParams.couplingHorizon )
+                {
+                    solidUnderSignal = true;
+                    break;
+                }
+            }
         }
 
-        // Save original dielectric info before shifting to fallback
+        if( solidUnderSignal )
+            return;   // copper is solid across coupling horizon — image is sufficient
+
+        makeGroundWires( spans, aRefZ, aRefThickness, false );
+
+        // Demote: shift image ground to the next solid reference layer
         aHOrig = aH;
         aErOrig = aEr;
 
@@ -805,10 +818,14 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
 
     if( aLayerGeom.hasRefBelow && aLayerGeom.refLayerBelow != UNDEFINED_LAYER )
     {
-        double refZ = aLayerGeom.signalZPosition
-                      + aLayerGeom.hBelow + aLayerGeom.traceThickness / 2.0;
+        double refT = aLayerGeom.refThicknessBelow;
 
-        meshRefLayer( aLayerGeom.refLayerBelow, refZ, aLayerGeom.traceThickness,
+        // Reference copper center: signal bottom edge + dielectric gap + half ref thickness
+        double refZ = aLayerGeom.signalZPosition
+                      + aLayerGeom.hBelow + aLayerGeom.traceThickness / 2.0
+                      + refT / 2.0;
+
+        meshRefLayer( aLayerGeom.refLayerBelow, refZ, refT,
                       aLayerGeom.hasRefBelow, aLayerGeom.hBelow,
                       aLayerGeom.erBelow, aLayerGeom.tanDBelow,
                       aLayerGeom.hOrigBelow, aLayerGeom.erOrigBelow,
@@ -818,10 +835,14 @@ std::vector<XS_GROUNDWIRE> CROSS_SECTION_BUILDER::FindGroundWires(
 
     if( aLayerGeom.hasRefAbove && aLayerGeom.refLayerAbove != UNDEFINED_LAYER )
     {
-        double refZ = aLayerGeom.signalZPosition
-                      - aLayerGeom.hAbove - aLayerGeom.traceThickness / 2.0;
+        double refT = aLayerGeom.refThicknessAbove;
 
-        meshRefLayer( aLayerGeom.refLayerAbove, refZ, aLayerGeom.traceThickness,
+        // Reference copper center: signal top edge - dielectric gap - half ref thickness
+        double refZ = aLayerGeom.signalZPosition
+                      - aLayerGeom.hAbove - aLayerGeom.traceThickness / 2.0
+                      - refT / 2.0;
+
+        meshRefLayer( aLayerGeom.refLayerAbove, refZ, refT,
                       aLayerGeom.hasRefAbove, aLayerGeom.hAbove,
                       aLayerGeom.erAbove, aLayerGeom.tanDAbove,
                       aLayerGeom.hOrigAbove, aLayerGeom.erOrigAbove,
@@ -1091,6 +1112,8 @@ XS_GEOMETRY CROSS_SECTION_BUILDER::BuildGeometry(
         gwCond.width = gw.widthNm * 1e-9;
         gwCond.thickness = gw.thicknessM;
         gwCond.isGround = true;
+        gwCond.openLeft = gw.openLeft;
+        gwCond.openRight = gw.openRight;
         xs.conductors.push_back( gwCond );
     }
 

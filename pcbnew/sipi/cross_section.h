@@ -40,6 +40,8 @@ struct XS_CONDUCTOR
     double width = 0.0;
     double thickness = 0.0;
     bool   isGround = false;    ///< True for groundwire elements (V=0 in BEM)
+    bool   openLeft = false;    ///< Left edge is truncated (copper continues)
+    bool   openRight = false;   ///< Right edge is truncated (copper continues)
 };
 
 

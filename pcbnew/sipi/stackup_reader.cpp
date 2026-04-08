@@ -308,6 +308,7 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
         geom.hAbove = copperSpacing( i, signalIdx );
         geom.hasRefAbove = true;
         geom.refLayerAbove = m_copperLayers[i].layerId;
+        geom.refThicknessAbove = m_copperLayers[i].thickness;
         findDielectric( m_copperLayers[i].zPosition, signalZ,
                         geom.erAbove, geom.tanDAbove );
     }
@@ -318,6 +319,7 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
         geom.hBelow = copperSpacing( signalIdx, i );
         geom.hasRefBelow = true;
         geom.refLayerBelow = m_copperLayers[i].layerId;
+        geom.refThicknessBelow = m_copperLayers[i].thickness;
         findDielectric( signalZ, m_copperLayers[i].zPosition,
                         geom.erBelow, geom.tanDBelow );
     }

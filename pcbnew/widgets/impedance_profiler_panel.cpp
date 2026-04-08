@@ -200,6 +200,25 @@ void XS_VIEW_PANEL::drawCrossSection( wxDC& aDC, const wxRect& aRect )
         yMax = std::max( yMax, c.centerY + c.thickness / 2.0 );
     }
 
+    // Include image ground in Y extent when it's the actual reference plane
+    // (no groundwires).  When demoted, groundY may be at virtual earth — skip it.
+    bool hasGroundwires = false;
+
+    for( const XS_CONDUCTOR& c : geom.conductors )
+    {
+        if( c.isGround )
+        {
+            hasGroundwires = true;
+            break;
+        }
+    }
+
+    if( !hasGroundwires )
+    {
+        yMin = std::min( yMin, geom.groundY );
+        yMax = std::max( yMax, geom.groundY );
+    }
+
     if( geom.hasUpperGround )
     {
         yMin = std::min( yMin, geom.upperGroundY );

@@ -1497,11 +1497,11 @@ BOOST_AUTO_TEST_CASE( ProfilePerformance )
 
 
 /**
- * USB_D_P runs over a solid ground plane with stitching vias (same-net).
- * Most samples should NOT have groundwires — the reference plane is intact.
- * Groundwires should only appear near actual antipads (different-net vias/pads).
+ * A trace over a solid reference plane should not get spurious groundwires.
+ * USB_D_P routes over intact ground with only same-net stitching vias —
+ * no antipads within the coupling horizon.
  */
-BOOST_AUTO_TEST_CASE( USBDPGroundwireCount )
+BOOST_AUTO_TEST_CASE( SolidGroundNoSpuriousGroundwires )
 {
     try
     {
@@ -1561,9 +1561,9 @@ BOOST_AUTO_TEST_CASE( USBDPGroundwireCount )
                         << "  with groundwires: " << gwSamples
                         << " (" << 100.0 * gwSamples / totalSamples << "%)" );
 
-    // With the NMMTL-consistent architecture, every sample has a groundwire
-    // for the reference plane.  Verify we got a reasonable total.
-    BOOST_CHECK_GT( gwSamples, 0 );
+    // USB_D_P runs over solid ground — the reference plane is intact across
+    // the coupling horizon.  Most samples should NOT have groundwires.
+    BOOST_CHECK_LT( gwSamples, totalSamples / 2 );
 }
 
 

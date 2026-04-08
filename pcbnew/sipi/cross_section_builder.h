@@ -61,6 +61,8 @@ struct XS_GROUNDWIRE
     int    widthNm;      ///< Width of copper span in cross-section (nm)
     double yPositionM;   ///< Vertical position in stackup coordinates (meters)
     double thicknessM;   ///< Copper thickness (meters)
+    bool   openLeft = false;   ///< Left edge is truncated (copper continues beyond)
+    bool   openRight = false;  ///< Right edge is truncated (copper continues beyond)
 };
 
 
