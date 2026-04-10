@@ -26,12 +26,14 @@
 #include <board.h>
 #include <board_connected_item.h>
 #include <drc/drc_rtree.h>
+#include <pad.h>
 #include <pcb_track.h>
 #include <zone.h>
 
 #include <geometry/seg.h>
 #include <geometry/shape.h>
 #include <geometry/shape_arc.h>
+#include <geometry/shape_line_chain.h>
 #include <geometry/shape_poly_set.h>
 
 #include <algorithm>
@@ -346,51 +348,93 @@ void CROSS_SECTION_BUILDER::findShapeNeighbors( const XS_BUILD_PARAMS& aParams,
         if( !shape )
             continue;
 
-        VECTOR2I nearest;
-
         // Zero clearance: pad must actually intersect the cut line.
         // This prevents detecting pads that are nearby in board space
         // but offset along the trace direction (not at the cross-section).
-        if( !shape->Collide( aCutSeg, 0, nullptr, &nearest ) )
+        if( !shape->Collide( aCutSeg, 0 ) )
             continue;
 
-        // Project nearest point onto the normal for lateral distance.
-        VECTOR2D delta( nearest.x - aParams.samplePos.x,
-                        nearest.y - aParams.samplePos.y );
-        double lateralDist = delta.x * aNormal.x + delta.y * aNormal.y;
+        // Compute item width and center along the cut line.
+        // For PADs, intersect the actual polygon with the cut segment to get
+        // exact width and position.  The previous AABB corner projection
+        // overestimates width when the cut crosses the pad at an angle, and
+        // the nearest-point center estimation is unreliable because the
+        // Collide nearest point lands on an arbitrary polygon edge.
+        int    itemWidth = 0;
+        double centerDist = 0;
 
-        // Estimate pad width along the cut from the bounding box.
-        BOX2I bbox = item->GetBoundingBox();
-        double minProj = 1e18, maxProj = -1e18;
-        VECTOR2I corners[4] = {
-            bbox.GetOrigin(),
-            bbox.GetOrigin() + VECTOR2I( bbox.GetWidth(), 0 ),
-            bbox.GetOrigin() + VECTOR2I( 0, bbox.GetHeight() ),
-            bbox.GetEnd()
-        };
-
-        for( const VECTOR2I& c : corners )
+        if( item->Type() == PCB_PAD_T )
         {
-            VECTOR2D d( c.x - aParams.samplePos.x, c.y - aParams.samplePos.y );
-            double proj = d.x * aNormal.x + d.y * aNormal.y;
-            minProj = std::min( minProj, proj );
-            maxProj = std::max( maxProj, proj );
+            PAD*        pad = static_cast<PAD*>( item );
+            const auto& poly = pad->GetEffectivePolygon( aParams.signalLayer );
+
+            if( poly && poly->OutlineCount() > 0 )
+            {
+                double pMin = 1e18, pMax = -1e18;
+                bool   found = false;
+
+                for( int oi = 0; oi < poly->OutlineCount(); oi++ )
+                {
+                    SHAPE_LINE_CHAIN::INTERSECTIONS isects;
+                    poly->COutline( oi ).Intersect( aCutSeg, isects );
+
+                    for( const auto& ip : isects )
+                    {
+                        VECTOR2D d( ip.p.x - aParams.samplePos.x,
+                                    ip.p.y - aParams.samplePos.y );
+                        double proj = d.x * aNormal.x + d.y * aNormal.y;
+                        pMin = std::min( pMin, proj );
+                        pMax = std::max( pMax, proj );
+                        found = true;
+                    }
+                }
+
+                if( found && pMax > pMin )
+                {
+                    itemWidth = (int) ( pMax - pMin );
+                    centerDist = ( pMax + pMin ) / 2.0;
+                }
+            }
         }
 
-        int itemWidth = (int) ( maxProj - minProj );
+        if( itemWidth == 0 )
+        {
+            // Fallback for non-PAD items: project bounding box and estimate
+            // center from the nearest collision point.
+            VECTOR2I nearest;
+            shape->Collide( aCutSeg, 0, nullptr, &nearest );
+
+            VECTOR2D delta( nearest.x - aParams.samplePos.x,
+                            nearest.y - aParams.samplePos.y );
+            double lateralDist = delta.x * aNormal.x + delta.y * aNormal.y;
+
+            BOX2I    bbox = item->GetBoundingBox();
+            double   bMin = 1e18, bMax = -1e18;
+            VECTOR2I corners[4] = {
+                bbox.GetOrigin(),
+                bbox.GetOrigin() + VECTOR2I( bbox.GetWidth(), 0 ),
+                bbox.GetOrigin() + VECTOR2I( 0, bbox.GetHeight() ),
+                bbox.GetEnd()
+            };
+
+            for( const VECTOR2I& c : corners )
+            {
+                VECTOR2D d( c.x - aParams.samplePos.x, c.y - aParams.samplePos.y );
+                double proj = d.x * aNormal.x + d.y * aNormal.y;
+                bMin = std::min( bMin, proj );
+                bMax = std::max( bMax, proj );
+            }
+
+            itemWidth = (int) ( bMax - bMin );
+
+            if( lateralDist > 0 )
+                centerDist = lateralDist + itemWidth / 2.0;
+            else
+                centerDist = lateralDist - itemWidth / 2.0;
+        }
 
         if( itemWidth < 50000 )
             itemWidth = 50000;
-
-        // Use nearest-point lateral distance, adjusted to center
-        double centerDist = lateralDist;
-
-        // The nearest point is on the pad edge. Shift to approximate center
-        // by adding half the item width in the sign direction.
-        if( lateralDist > 0 )
-            centerDist = lateralDist + itemWidth / 2.0;
-        else
-            centerDist = lateralDist - itemWidth / 2.0;
 
         double edgeToEdge = std::abs( centerDist )
                             - aParams.signalWidth / 2.0

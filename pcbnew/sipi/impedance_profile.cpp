@@ -593,12 +593,19 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
             }
         }
 
-        // Phase 2: Collect all pads/vias on the reference layers
+        // Phase 2: Collect all pads/vias on the reference layers.
+        // Skip items on the signal net — those antipads are already
+        // handled by the cross-section builder at each sample point,
+        // and forcing extra samples there would double-count them.
         std::set<BOARD_ITEM*> refObstacles;
 
         for( PCB_TRACK* t : aBoard->Tracks() )
         {
             if( t->Type() != PCB_VIA_T )
+                continue;
+
+            if( t->GetNetCode() == aNetCode
+                || ( aCoupledNetCode > 0 && t->GetNetCode() == aCoupledNetCode ) )
                 continue;
 
             for( PCB_LAYER_ID refLayer : refLayers )
@@ -612,6 +619,10 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
         {
             for( PAD* pad : fp->Pads() )
             {
+                if( pad->GetNetCode() == aNetCode
+                    || ( aCoupledNetCode > 0 && pad->GetNetCode() == aCoupledNetCode ) )
+                    continue;
+
                 for( PCB_LAYER_ID refLayer : refLayers )
                 {
                     if( refLayer != UNDEFINED_LAYER && pad->IsOnLayer( refLayer ) )
@@ -1024,26 +1035,49 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
             if( pad->HitTest( samplePos, 0 ) )
             {
                 VECTOR2D normal0( -sampleTangent.y, sampleTangent.x );
-                BOX2I    padBBox = pad->GetBoundingBox();
 
-                double minProj = 1e18, maxProj = -1e18;
+                // Intersect the pad's actual polygon with the cut line to get
+                // the true width at this cross-section.  The previous AABB
+                // corner projection overestimates width when the trace crosses
+                // the pad at an angle.
+                const auto& poly = pad->GetEffectivePolygon( track->GetLayer() );
 
-                for( const VECTOR2I& corner :
-                     { padBBox.GetOrigin(),
-                       padBBox.GetOrigin() + VECTOR2I( padBBox.GetWidth(), 0 ),
-                       padBBox.GetOrigin() + VECTOR2I( 0, padBBox.GetHeight() ),
-                       padBBox.GetEnd() } )
+                if( poly && poly->OutlineCount() > 0 )
                 {
-                    VECTOR2D d( corner.x - samplePos.x, corner.y - samplePos.y );
-                    double proj = d.x * normal0.x + d.y * normal0.y;
-                    minProj = std::min( minProj, proj );
-                    maxProj = std::max( maxProj, proj );
+                    BOX2I  padBBox = pad->GetBoundingBox( track->GetLayer() );
+                    int    extent = std::max( padBBox.GetWidth(), padBBox.GetHeight() );
+
+                    VECTOR2I cutA( samplePos.x - (int) ( normal0.x * extent ),
+                                   samplePos.y - (int) ( normal0.y * extent ) );
+                    VECTOR2I cutB( samplePos.x + (int) ( normal0.x * extent ),
+                                   samplePos.y + (int) ( normal0.y * extent ) );
+                    SEG padCut( cutA, cutB );
+
+                    double minProj = 1e18, maxProj = -1e18;
+
+                    for( int oi = 0; oi < poly->OutlineCount(); oi++ )
+                    {
+                        SHAPE_LINE_CHAIN::INTERSECTIONS isects;
+                        poly->COutline( oi ).Intersect( padCut, isects );
+
+                        for( const auto& ip : isects )
+                        {
+                            VECTOR2D d( ip.p.x - samplePos.x,
+                                        ip.p.y - samplePos.y );
+                            double proj = d.x * normal0.x + d.y * normal0.y;
+                            minProj = std::min( minProj, proj );
+                            maxProj = std::max( maxProj, proj );
+                        }
+                    }
+
+                    if( maxProj > minProj )
+                    {
+                        int padWidth = (int) ( maxProj - minProj );
+
+                        if( padWidth > signalWidth )
+                            signalWidth = padWidth;
+                    }
                 }
-
-                int padWidth = (int) ( maxProj - minProj );
-
-                if( padWidth > signalWidth )
-                    signalWidth = padWidth;
 
                 break;
             }
