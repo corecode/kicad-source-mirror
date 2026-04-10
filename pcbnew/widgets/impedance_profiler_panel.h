@@ -32,6 +32,7 @@
 
 class CROSSHAIR_LAYER;
 class PCB_EDIT_FRAME;
+class PCB_TRACK;
 class mpWindow;
 class mpFXYVector;
 class mpScaleX;
@@ -82,7 +83,9 @@ public:
     void OnShowPanel();
 
     /// Analyse a specific net (called from board context menu or selection).
-    void AnalyseNet( int aNetCode );
+    /// When @a aStartTrack is provided the walker starts from that segment;
+    /// otherwise it picks the track closest to the stored start position.
+    void AnalyseNet( int aNetCode, PCB_TRACK* aStartTrack = nullptr );
 
     // BOARD_LISTENER overrides
     void OnBoardItemAdded( BOARD& aBoard, BOARD_ITEM* aBoardItem ) override;
@@ -97,7 +100,7 @@ private:
     void buildUI();
     void onPlotMotion( wxMouseEvent& aEvent );
     void onContextMenuCommand( wxCommandEvent& aEvent );
-    void runAnalysis( int aNetCode );
+    void runAnalysis( int aNetCode, PCB_TRACK* aStartTrack = nullptr );
     void updatePlot();
     void updateStatus( const wxString& aText );
     void selectSample( int aIndex );
@@ -129,6 +132,7 @@ private:
 
     // State
     int             m_currentNetCode;
+    VECTOR2I        m_startPosition;      ///< Midpoint of the last-clicked start track
     wxString        m_currentNetName;
     bool            m_isDiffPairMode;     ///< true when analyzing a diff pair net
     int             m_coupledNetCode;     ///< Net code of coupled net (0 = none)

@@ -254,7 +254,7 @@ extractViaModel( const BOARD* aBoard, const PCB_VIA* aSignalVia,
 
 bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
                            const VECTOR2I& aFrom, DRC_RTREE* aRtree,
-                           int aCoupledNetCode )
+                           int aCoupledNetCode, PCB_TRACK* aStartTrack )
 {
     m_samples.clear();
     m_totalLength = 0.0;
@@ -271,7 +271,14 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
 
     TRACE_PATH_WALKER walker( aBoard );
 
-    if( !walker.WalkNet( aNetCode, aFrom ) )
+    bool walked = false;
+
+    if( aStartTrack )
+        walked = walker.Walk( aStartTrack );
+    else
+        walked = walker.WalkNet( aNetCode, aFrom );
+
+    if( !walked )
     {
         m_error = wxS( "Could not walk net — no routed tracks found." );
         return false;
@@ -344,13 +351,51 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
         return false;
     }
 
-    // Extract via models and compute barrel lengths
+    // Extract via models and compute barrel lengths.
+    // Both PCB_VIA and through-hole PAD items appear as isVia path points.
     for( const PATH_POINT& pp : path )
     {
         if( !pp.isVia )
             continue;
 
-        PCB_VIA* via = static_cast<PCB_VIA*>( pp.item );
+        // Extract common geometry: drill radius, pad radius, layer span, position.
+        double       drillR_nm, padR_nm;
+        PCB_LAYER_ID topLayer, botLayer;
+        VECTOR2I     pos = pp.position;
+        PCB_VIA*     via = nullptr;
+
+        if( pp.item->Type() == PCB_VIA_T )
+        {
+            via = static_cast<PCB_VIA*>( pp.item );
+            drillR_nm = via->GetDrillValue() / 2.0;
+            padR_nm = via->GetWidth( via->TopLayer() ) / 2.0;
+            topLayer = via->TopLayer();
+            botLayer = via->BottomLayer();
+        }
+        else if( pp.item->Type() == PCB_PAD_T )
+        {
+            PAD* pad = static_cast<PAD*>( pp.item );
+            drillR_nm = std::min( pad->GetDrillSize().x, pad->GetDrillSize().y ) / 2.0;
+            VECTOR2I sz = pad->GetSize( pad->GetLayer() );
+            padR_nm = std::min( sz.x, sz.y ) / 2.0;
+
+            // Layer span from the pad's copper layer set
+            LSEQ cuStack = pad->GetLayerSet().CuStack();
+
+            if( cuStack.size() >= 2 )
+            {
+                topLayer = cuStack.front();
+                botLayer = cuStack.back();
+            }
+            else
+            {
+                continue; // single-layer pad — shouldn't be isVia
+            }
+        }
+        else
+        {
+            continue;
+        }
 
         // Find signal layer from the nearest non-via segment
         PCB_LAYER_ID signalLayer = F_Cu;
@@ -364,39 +409,53 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
             }
         }
 
-        auto viaResult = extractViaModel( aBoard, via, signalLayer,
-                                           aNetCode, aCoupledNetCode, stackup );
+        double drillR_m = drillR_nm * NM_TO_M_VIA;
+        double padR_m = padR_nm * NM_TO_M_VIA;
+
+        // For real vias, use the full via model extraction (with coupling).
+        // For PTH pads, use the same extraction by querying stackup geometry
+        // with the pad's drill and size.
+        std::shared_ptr<VIA_CLUSTER_RESULT> viaResult;
+
+        if( via )
+        {
+            viaResult = extractViaModel( aBoard, via, signalLayer,
+                                         aNetCode, aCoupledNetCode, stackup );
+        }
+        else
+        {
+            // Build a simple single-via model for the PTH pad
+            VIA_PARAMS sigParams = stackup.GetViaGeometry( topLayer, botLayer, signalLayer,
+                                                            pos, drillR_m, padR_m );
+            sigParams.position = pos;
+            sigParams.role = VIA_ROLE::SIGNAL_P;
+
+            VIA_MODEL_BUILDER builder;
+            builder.SetCluster( { sigParams } );
+
+            if( builder.Compute() )
+                viaResult = std::make_shared<VIA_CLUSTER_RESULT>( builder.GetResult() );
+        }
 
         if( !viaResult )
             continue;
 
         VIA_ON_PATH vop;
         vop.pathDist = pp.distFromStart;
-        vop.barrelNm = viaResult->fMax > 0.0
-                         ? ( C_LIGHT_M_S / ( 10.0 * viaResult->fMax ) ) * 1e9  // h = c/(10*fmax*√εr)... but we stored fmax = c/(10h√εr)
-                         : 0.0;
 
-        // Recover barrel height from the VIA_PARAMS used to build the model.
-        // The via model stores fMax = v_p/(10*h). So h = v_p/(10*fMax).
-        // But simpler: query the stackup directly.
-        VIA_PARAMS vp = stackup.GetViaGeometry( via->TopLayer(), via->BottomLayer(),
-                                                 signalLayer, via->GetPosition(),
-                                                 via->GetDrillValue() / 2.0 * 1e-9,
-                                                 via->GetWidth( via->TopLayer() ) / 2.0 * 1e-9 );
+        VIA_PARAMS vp = stackup.GetViaGeometry( topLayer, botLayer, signalLayer,
+                                                 pos, drillR_m, padR_m );
 
         vop.barrelNm = vp.barrelHeight * 1e9; // meters → nm
-        vop.padRadiusNm = via->GetWidth( via->TopLayer() ) / 2.0;  // already in nm
-        vop.drillRadiusNm = via->GetDrillValue() / 2.0;            // already in nm
+        vop.padRadiusNm = padR_nm;
+        vop.drillRadiusNm = drillR_nm;
         vop.erEff = vp.epsilonReff;
 
         // Horizontal pad εr: query stackup at the signal layer.
-        // The pad is wide, so εr_eff ≈ εr of the dielectric at that layer.
         {
-            LAYER_GEOMETRY padGeom = stackup.GetLayerGeometry( signalLayer,
-                                                               via->GetPosition(),
-                                                               via->GetWidth( via->TopLayer() ) );
-            // Use the reference plane dielectric εr (stripline → εr, microstrip → close to εr
-            // for a wide pad).  Pick the side that has a reference plane.
+            LAYER_GEOMETRY padGeom = stackup.GetLayerGeometry( signalLayer, pos,
+                                                               static_cast<int>( padR_nm * 2 ) );
+
             if( padGeom.hasRefAbove && padGeom.hasRefBelow )
                 vop.erEffHoriz = ( padGeom.erAbove + padGeom.erBelow ) / 2.0;
             else if( padGeom.hasRefBelow )
@@ -404,17 +463,16 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
             else if( padGeom.hasRefAbove )
                 vop.erEffHoriz = padGeom.erAbove;
             else
-                vop.erEffHoriz = vp.epsilonReff; // fallback to barrel εr
+                vop.erEffHoriz = vp.epsilonReff;
         }
 
-        // Coaxial Z₀ = √(L/C). If C=0, estimate from geometry.
         if( viaResult->Ctotal.size() > 0 && viaResult->Ctotal[0] > 0.0 )
             vop.z0Coax = std::sqrt( viaResult->Ldiff / viaResult->Ctotal[0] );
         else
-            vop.z0Coax = 40.0; // Typical via impedance when C unknown
+            vop.z0Coax = 40.0;
 
         vop.model = viaResult;
-        vop.position = pp.position;
+        vop.position = pos;
         vop.layer = signalLayer;
 
         viasOnPath.push_back( vop );
@@ -1194,7 +1252,8 @@ DIFF_PROFILE::DIFF_PROFILE() = default;
 
 
 bool DIFF_PROFILE::Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN,
-                             BEM_CACHE& aCache )
+                             BEM_CACHE& aCache, PCB_TRACK* aStartTrack,
+                             const VECTOR2I& aFrom )
 {
     m_diffSamples.clear();
     m_skewPs = 0.0;
@@ -1210,9 +1269,15 @@ bool DIFF_PROFILE::Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN,
     DRC_RTREE rtree;
     buildRtree( aBoard, rtree );
 
-    // Walk P with diff-pair detection (finds N geometrically on the cut line)
-    if( !m_profileP.Compute( aBoard, aNetCodeP, aCache, VECTOR2I( 0, 0 ), &rtree,
-                             aNetCodeN ) )
+    // Walk P with diff-pair detection (finds N geometrically on the cut line).
+    // When aStartTrack is on the P net, walk from it directly.
+    PCB_TRACK* pStart = nullptr;
+
+    if( aStartTrack && aStartTrack->GetNetCode() == aNetCodeP )
+        pStart = aStartTrack;
+
+    if( !m_profileP.Compute( aBoard, aNetCodeP, aCache, aFrom, &rtree,
+                             aNetCodeN, pStart ) )
     {
         m_error = wxS( "P: " ) + m_profileP.GetError();
         return false;
@@ -1220,12 +1285,17 @@ bool DIFF_PROFILE::Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN,
 
     // Walk N from the same physical end as P so distance axes align.
     // Also pass P as coupled net so N sees the same neighbor environment.
+    // When the start track is on the N net, walk from it directly.
     VECTOR2I nFrom( 0, 0 );
+    PCB_TRACK* nStart = nullptr;
+
+    if( aStartTrack && aStartTrack->GetNetCode() == aNetCodeN )
+        nStart = aStartTrack;
 
     if( m_profileP.GetStartPad() )
         nFrom = m_profileP.GetStartPad()->GetPosition();
 
-    if( !m_profileN.Compute( aBoard, aNetCodeN, aCache, nFrom, &rtree, aNetCodeP ) )
+    if( !m_profileN.Compute( aBoard, aNetCodeN, aCache, nFrom, &rtree, aNetCodeP, nStart ) )
     {
         m_error = wxS( "N: " ) + m_profileN.GetError();
         return false;

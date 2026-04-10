@@ -726,29 +726,30 @@ int BOARD_EDITOR_CONTROL::AnalyzeImpedance( const TOOL_EVENT& aEvent )
     PCB_EDIT_FRAME*  frame = getEditFrame<PCB_EDIT_FRAME>();
     PCB_SELECTION&   selection = m_toolMgr->GetTool<PCB_SELECTION_TOOL>()->GetSelection();
 
-    // Find the first track/arc in the selection to get the net
-    int netCode = -1;
+    // Find the first track/arc in the selection — used both for net code
+    // and as the starting segment for the trace walker.
+    PCB_TRACK* startTrack = nullptr;
 
     for( EDA_ITEM* item : selection )
     {
         if( item->Type() == PCB_TRACE_T || item->Type() == PCB_ARC_T )
         {
-            netCode = static_cast<PCB_TRACK*>( item )->GetNetCode();
+            startTrack = static_cast<PCB_TRACK*>( item );
             break;
         }
     }
 
-    if( netCode <= 0 )
+    if( !startTrack || startTrack->GetNetCode() <= 0 )
         return 0;
 
     // Ensure the profiler panel is visible
     frame->ShowImpedanceProfiler();
 
-    // Run analysis
+    // Run analysis starting from the clicked track
     IMPEDANCE_PROFILER_PANEL* profiler = frame->GetImpedanceProfilerPanel();
 
     if( profiler )
-        profiler->AnalyseNet( netCode );
+        profiler->AnalyseNet( startTrack->GetNetCode(), startTrack );
 
     return 0;
 }

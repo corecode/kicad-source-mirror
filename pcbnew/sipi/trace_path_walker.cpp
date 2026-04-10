@@ -27,6 +27,7 @@
 #include <pcb_track.h>
 #include <pad.h>
 #include <core/typeinfo.h>
+#include <connectivity/connectivity_data.h>
 
 #include <algorithm>
 #include <cmath>
@@ -55,7 +56,7 @@ bool TRACE_PATH_WALKER::Walk( PCB_TRACK* aStartTrack )
     if( netCode <= 0 )
         return false;
 
-    buildAdjacency( netCode );
+    buildPadMap( netCode );
 
     // Count total non-via segments on this net
     for( PCB_TRACK* track : m_board->Tracks() )
@@ -81,24 +82,23 @@ bool TRACE_PATH_WALKER::Walk( PCB_TRACK* aStartTrack )
     }
 
     // Walk backward from start endpoint
-    std::vector<PATH_POINT>    backwardPoints;
-    double                     backDist = 0.0;
-    PATH_TERMINUS              backTerminus = PATH_TERMINUS::NONE;
+    std::vector<PATH_POINT>      backwardPoints;
+    double                       backDist = 0.0;
+    PATH_TERMINUS                backTerminus = PATH_TERMINUS::NONE;
     std::optional<PATH_JUNCTION> backJunction;
 
-    auto itStart = m_adjacency.find( startPos );
+    BOARD_CONNECTED_ITEM* backVia = nullptr;
+    BOARD_CONNECTED_ITEM* backNext = nullptr;
+    int                   backDegree = 0;
 
-    if( itStart != m_adjacency.end() )
+    findNeighborsAt( aStartTrack, startPos, visited, backVia, backNext, backDegree );
+
+    BOARD_CONNECTED_ITEM* backFirst = backVia ? backVia : backNext;
+
+    if( backFirst )
     {
-        for( BOARD_CONNECTED_ITEM* neighbor : itStart->second )
-        {
-            if( visited.count( neighbor ) == 0 )
-            {
-                backTerminus = walkDirection( startPos, neighbor, visited,
-                                             backwardPoints, backDist, backJunction );
-                break;
-            }
-        }
+        backTerminus = walkDirection( startPos, backFirst, visited,
+                                     backwardPoints, backDist, backJunction );
     }
 
     // Check if start endpoint itself is a pad (backward walk didn't happen)
@@ -125,19 +125,18 @@ bool TRACE_PATH_WALKER::Walk( PCB_TRACK* aStartTrack )
     PATH_TERMINUS                fwdTerminus = PATH_TERMINUS::NONE;
     std::optional<PATH_JUNCTION> fwdJunction;
 
-    auto itEnd = m_adjacency.find( endPos );
+    BOARD_CONNECTED_ITEM* fwdVia = nullptr;
+    BOARD_CONNECTED_ITEM* fwdNext = nullptr;
+    int                   fwdDegree = 0;
 
-    if( itEnd != m_adjacency.end() )
+    findNeighborsAt( aStartTrack, endPos, visited, fwdVia, fwdNext, fwdDegree );
+
+    BOARD_CONNECTED_ITEM* fwdFirst = fwdVia ? fwdVia : fwdNext;
+
+    if( fwdFirst )
     {
-        for( BOARD_CONNECTED_ITEM* neighbor : itEnd->second )
-        {
-            if( visited.count( neighbor ) == 0 )
-            {
-                fwdTerminus = walkDirection( endPos, neighbor, visited,
-                                            forwardPoints, fwdDist, fwdJunction );
-                break;
-            }
-        }
+        fwdTerminus = walkDirection( endPos, fwdFirst, visited,
+                                    forwardPoints, fwdDist, fwdJunction );
     }
 
     // Check if end endpoint itself is a pad (forward walk didn't happen)
@@ -330,35 +329,70 @@ double TRACE_PATH_WALKER::GetTotalLength() const
 }
 
 
-void TRACE_PATH_WALKER::buildAdjacency( int aNetCode )
+void TRACE_PATH_WALKER::buildPadMap( int aNetCode )
 {
-    m_adjacency.clear();
     m_padMap.clear();
 
-    for( PCB_TRACK* track : m_board->Tracks() )
-    {
-        if( track->GetNetCode() != aNetCode )
-            continue;
-
-        if( track->Type() == PCB_VIA_T )
-        {
-            // Vias have a single position; they connect to tracks at that position
-            VECTOR2I pos = track->GetStart(); // Via position stored in m_Start
-            m_adjacency[pos].push_back( track );
-        }
-        else
-        {
-            // Track segments (PCB_TRACK and PCB_ARC) have start and end points
-            m_adjacency[track->GetStart()].push_back( track );
-            m_adjacency[track->GetEnd()].push_back( track );
-        }
-    }
-
-    // Build pad map
     for( PAD* pad : m_board->GetPads() )
     {
         if( pad->GetNetCode() == aNetCode )
             m_padMap[pad->GetPosition()] = pad;
+    }
+}
+
+
+void TRACE_PATH_WALKER::findNeighborsAt( BOARD_CONNECTED_ITEM* aItem, const VECTOR2I& aPos,
+                                          const std::set<BOARD_CONNECTED_ITEM*>& aVisited,
+                                          BOARD_CONNECTED_ITEM*& aNextVia,
+                                          BOARD_CONNECTED_ITEM*& aNext, int& aUnvisitedDegree,
+                                          std::vector<BOARD_CONNECTED_ITEM*>* aBranches ) const
+{
+    aNextVia = nullptr;
+    aNext = nullptr;
+    aUnvisitedDegree = 0;
+
+    auto connectivity = m_board->GetConnectivity();
+
+    if( !connectivity )
+        return;
+
+    int netCode = aItem->GetNetCode();
+
+    for( PCB_TRACK* other : connectivity->GetConnectedTracks(
+                 static_cast<PCB_TRACK*>( aItem ) ) )
+    {
+        if( other->GetNetCode() != netCode )
+            continue;
+
+        if( aVisited.count( other ) )
+            continue;
+
+        // Check whether 'other' has an endpoint at aPos (exact match).
+        // GetConnectedTracks already told us it's physically connected
+        // to aItem; we just need to know which endpoint is at aPos
+        // so we can determine direction.
+        bool atPos = false;
+
+        if( other->Type() == PCB_VIA_T )
+            atPos = ( other->GetStart() == aPos );
+        else
+            atPos = ( other->GetStart() == aPos || other->GetEnd() == aPos );
+
+        if( !atPos )
+            continue;
+
+        if( other->Type() == PCB_VIA_T )
+        {
+            aNextVia = other;
+        }
+        else
+        {
+            aUnvisitedDegree++;
+            aNext = other;
+
+            if( aBranches )
+                aBranches->push_back( other );
+        }
     }
 }
 
@@ -372,6 +406,7 @@ PATH_TERMINUS TRACE_PATH_WALKER::walkDirection( const VECTOR2I& aStartPos,
 {
     BOARD_CONNECTED_ITEM* current = aFirstItem;
     VECTOR2I              currentPos = aStartPos;
+    PCB_LAYER_ID          entryLayer = UNDEFINED_LAYER; // layer before a via
 
     while( current )
     {
@@ -394,12 +429,14 @@ PATH_TERMINUS TRACE_PATH_WALKER::walkDirection( const VECTOR2I& aStartPos,
             aPoints.push_back( pt );
 
             currentPos = via->GetPosition();
+            // entryLayer was set by the previous track; kept for post-via filtering
         }
         else if( current->Type() == PCB_ARC_T )
         {
             // Arc segment: interpolate along actual arc geometry
             emitArcPoints( static_cast<PCB_ARC*>( current ), currentPos, aPoints, aCumulDist );
             currentPos = otherEnd( current, currentPos );
+            entryLayer = static_cast<PCB_ARC*>( current )->GetLayer();
         }
         else
         {
@@ -444,65 +481,198 @@ PATH_TERMINUS TRACE_PATH_WALKER::walkDirection( const VECTOR2I& aStartPos,
             aPoints.push_back( pt2 );
 
             currentPos = otherPos;
+            entryLayer = track->GetLayer();
         }
 
-        // Stop if we hit a pad
-        if( m_padMap.count( currentPos ) )
-            return PATH_TERMINUS::PAD;
-
-        // Find the next unvisited neighbor at currentPos.
-        // Prefer vias first — a via is a layer transition, not a branch.
+        // Find the next unvisited neighbor at currentPos using connectivity.
+        // (Pad check moved below — only stop if it's a dead end.)
         BOARD_CONNECTED_ITEM* next = nullptr;
         BOARD_CONNECTED_ITEM* nextVia = nullptr;
         int                   unvisitedDegree = 0;
 
-        auto it = m_adjacency.find( currentPos );
-
-        if( it != m_adjacency.end() )
-        {
-            for( BOARD_CONNECTED_ITEM* neighbor : it->second )
-            {
-                if( aVisited.count( neighbor ) == 0 )
-                {
-                    if( neighbor->Type() == PCB_VIA_T )
-                    {
-                        nextVia = neighbor;
-                    }
-                    else
-                    {
-                        unvisitedDegree++;
-                        next = neighbor;
-                    }
-                }
-            }
-        }
+        std::vector<BOARD_CONNECTED_ITEM*> branches;
+        findNeighborsAt( current, currentPos, aVisited, nextVia, next, unvisitedDegree,
+                         &branches );
 
         // If there's an unvisited via at this position, always take it next.
-        // The via is a layer transition — it doesn't count as a branch.
         if( nextVia )
         {
             current = nextVia;
             continue;
         }
 
-        // Stop at junctions (more than 1 unvisited non-via neighbor = T-junction)
+        // Filter out track fragments that are entirely inside the copper
+        // of a via or pad at currentPos.  These are routing artifacts
+        // (e.g. short segments inside a via annular ring or BGA pad)
+        // that don't represent real path continuations.
+        if( unvisitedDegree > 1 )
+        {
+            std::shared_ptr<SHAPE> parentShape;
+
+            if( isVia )
+            {
+                PCB_VIA* via = static_cast<PCB_VIA*>( current );
+                parentShape = via->GetEffectiveShape( via->TopLayer() );
+            }
+            else
+            {
+                auto itPad = m_padMap.find( currentPos );
+
+                if( itPad != m_padMap.end() )
+                    parentShape = itPad->second->GetEffectiveShape( itPad->second->GetLayer() );
+            }
+
+            if( parentShape )
+            {
+                std::vector<BOARD_CONNECTED_ITEM*> filtered;
+                next = nullptr;
+                unvisitedDegree = 0;
+
+                for( BOARD_CONNECTED_ITEM* b : branches )
+                {
+                    // Convert the branch track to a polygon and check whether
+                    // every vertex lies inside the parent via/pad shape.
+                    PCB_LAYER_ID bLayer = b->Type() != PCB_VIA_T
+                                             ? static_cast<PCB_TRACK*>( b )->GetLayer()
+                                             : UNDEFINED_LAYER;
+                    SHAPE_POLY_SET poly;
+                    static_cast<PCB_TRACK*>( b )
+                            ->GetEffectiveShape( bLayer )
+                            ->TransformToPolygon( poly, ARC_LOW_DEF, ERROR_INSIDE );
+
+                    bool inside = poly.OutlineCount() > 0;
+
+                    for( int oi = 0; inside && oi < poly.OutlineCount(); oi++ )
+                    {
+                        for( int vi = 0; vi < poly.Outline( oi ).PointCount(); vi++ )
+                        {
+                            if( !parentShape->PointInside( poly.Outline( oi ).CPoint( vi ) ) )
+                            {
+                                inside = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if( inside )
+                        continue;   // entire track shape inside via/pad copper
+
+                    // After a via, also skip tracks on the entry layer
+                    if( isVia && entryLayer != UNDEFINED_LAYER
+                        && b->Type() != PCB_VIA_T
+                        && static_cast<PCB_TRACK*>( b )->GetLayer() == entryLayer )
+                        continue;
+
+                    unvisitedDegree++;
+                    next = b;
+                    filtered.push_back( b );
+                }
+
+                branches = std::move( filtered );
+            }
+
+            if( isVia )
+                entryLayer = UNDEFINED_LAYER;
+        }
+
+        // Stop at junctions (more than 1 real branch after filtering)
         if( unvisitedDegree > 1 )
         {
             PATH_JUNCTION jct;
             jct.position = currentPos;
-
-            for( BOARD_CONNECTED_ITEM* neighbor : it->second )
-            {
-                if( aVisited.count( neighbor ) == 0 )
-                    jct.branches.push_back( neighbor );
-            }
+            jct.branches = std::move( branches );
 
             aJunction = std::move( jct );
             return PATH_TERMINUS::JUNCTION;
         }
 
         if( !next )
+        {
+            // If we're at a multi-layer pad (through-hole), it bridges layers
+            // like a via.  Look for tracks connected to the pad on other layers.
+            auto itPad = m_padMap.find( currentPos );
+
+            if( itPad != m_padMap.end() )
+            {
+                PAD* pad = itPad->second;
+
+                auto connectivity = m_board->GetConnectivity();
+
+                if( pad->GetLayerSet().CuStack().size() > 1 && connectivity )
+                {
+                    const std::vector<KICAD_T> trackTypes = {
+                        PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T
+                    };
+
+                    for( BOARD_CONNECTED_ITEM* item :
+                         connectivity->GetConnectedItemsAtAnchor( pad, currentPos,
+                                                                  trackTypes ) )
+                    {
+                        if( aVisited.count( item ) )
+                            continue;
+
+                        if( item->Type() == PCB_VIA_T )
+                        {
+                            nextVia = item;
+                        }
+                        else
+                        {
+                            PCB_TRACK* t = static_cast<PCB_TRACK*>( item );
+
+                            if( t->GetStart() != currentPos && t->GetEnd() != currentPos )
+                                continue;
+
+                            // Skip tracks on the entry layer — they're behind us
+                            if( entryLayer != UNDEFINED_LAYER
+                                && t->GetLayer() == entryLayer )
+                                continue;
+
+                            unvisitedDegree++;
+                            next = item;
+                        }
+                    }
+
+                    if( nextVia )
+                    {
+                        // Emit the PTH pad as a via-like path point before
+                        // continuing through the actual via.
+                        PATH_POINT pt;
+                        pt.position = currentPos;
+                        pt.tangent = VECTOR2D( 0, 0 );
+                        pt.layer = entryLayer != UNDEFINED_LAYER ? entryLayer
+                                                                 : pad->GetLayer();
+                        pt.distFromStart = aCumulDist;
+                        pt.item = pad;
+                        pt.isVia = true;
+                        aPoints.push_back( pt );
+
+                        current = nextVia;
+                        continue;
+                    }
+
+                    if( unvisitedDegree == 1 )
+                    {
+                        // Emit the PTH pad as a via-like layer transition
+                        PATH_POINT pt;
+                        pt.position = currentPos;
+                        pt.tangent = VECTOR2D( 0, 0 );
+                        pt.layer = entryLayer != UNDEFINED_LAYER ? entryLayer
+                                                                 : pad->GetLayer();
+                        pt.distFromStart = aCumulDist;
+                        pt.item = pad;
+                        pt.isVia = true;
+                        aPoints.push_back( pt );
+
+                        current = next;
+                        continue;
+                    }
+                }
+
+                return PATH_TERMINUS::PAD;
+            }
+
             return PATH_TERMINUS::DEAD_END;
+        }
 
         current = next;
     }

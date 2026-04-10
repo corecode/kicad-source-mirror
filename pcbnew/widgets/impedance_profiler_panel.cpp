@@ -26,6 +26,7 @@
 #include <board.h>
 #include <netinfo.h>
 #include <pcb_edit_frame.h>
+#include <pcb_track.h>
 #include <pcbnew_settings.h>
 #include <widgets/mathplot.h>
 
@@ -584,7 +585,7 @@ void IMPEDANCE_PROFILER_PANEL::OnShowPanel()
 }
 
 
-void IMPEDANCE_PROFILER_PANEL::AnalyseNet( int aNetCode )
+void IMPEDANCE_PROFILER_PANEL::AnalyseNet( int aNetCode, PCB_TRACK* aStartTrack )
 {
     if( !m_initialized )
     {
@@ -594,6 +595,14 @@ void IMPEDANCE_PROFILER_PANEL::AnalyseNet( int aNetCode )
             board->AddListener( this );
 
         m_initialized = true;
+    }
+
+    // Remember the start position so re-analysis after board edits stays
+    // on the same section of the net.
+    if( aStartTrack )
+    {
+        m_startPosition = VECTOR2I( ( aStartTrack->GetStart().x + aStartTrack->GetEnd().x ) / 2,
+                                    ( aStartTrack->GetStart().y + aStartTrack->GetEnd().y ) / 2 );
     }
 
     // Look up net name and detect diff pair
@@ -612,7 +621,7 @@ void IMPEDANCE_PROFILER_PANEL::AnalyseNet( int aNetCode )
         }
     }
 
-    runAnalysis( aNetCode );
+    runAnalysis( aNetCode, aStartTrack );
 }
 
 
@@ -833,7 +842,7 @@ void IMPEDANCE_PROFILER_PANEL::selectSample( int aIndex )
 }
 
 
-void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
+void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode, PCB_TRACK* aStartTrack )
 {
     m_currentNetCode = aNetCode;
     m_selectedSample = -1;
@@ -853,7 +862,8 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     {
         m_diffProfile = std::make_unique<DIFF_PROFILE>();
 
-        if( !m_diffProfile->Compute( board, aNetCode, m_coupledNetCode, m_bemCache ) )
+        if( !m_diffProfile->Compute( board, aNetCode, m_coupledNetCode, m_bemCache,
+                                     aStartTrack, m_startPosition ) )
         {
             updateStatus( m_diffProfile->GetError() );
             return;
@@ -863,7 +873,8 @@ void IMPEDANCE_PROFILER_PANEL::runAnalysis( int aNetCode )
     {
         m_seProfile = std::make_unique<SE_PROFILE>();
 
-        if( !m_seProfile->Compute( board, aNetCode, m_bemCache ) )
+        if( !m_seProfile->Compute( board, aNetCode, m_bemCache, m_startPosition,
+                                   nullptr, 0, aStartTrack ) )
         {
             updateStatus( m_seProfile->GetError() );
             return;

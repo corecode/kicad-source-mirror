@@ -25,6 +25,7 @@
 
 #include <pcbnew_utils/board_test_utils.h>
 #include <board.h>
+#include <footprint.h>
 #include <pcb_track.h>
 #include <pad.h>
 #include <netinfo.h>
@@ -467,6 +468,440 @@ BOOST_AUTO_TEST_CASE( ArcInterpolationPointCount )
 
     BOOST_TEST_MESSAGE( "Checked " << arcsChecked << " walked arcs" );
     BOOST_CHECK_GT( arcsChecked, 0 );
+}
+
+
+/**
+ * Build a synthetic board with a meander pattern and verify the walker traces
+ * through every segment.  The meander is a classic serpentine:
+ *
+ *          ┌──────────┐  ┌──────────┐
+ *  PAD1 ───┘          └──┘          └─── PAD2
+ *
+ * All segments share exact endpoints on a single layer / single net.
+ */
+BOOST_AUTO_TEST_CASE( MeanderWalk )
+{
+    auto board = std::make_unique<BOARD>();
+
+    // Register a net
+    board->Add( new NETINFO_ITEM( board.get(), wxS( "SRAM_A9" ), 1 ) );
+    NETINFO_ITEM* net = board->GetNetInfo().GetNetItem( 1 );
+
+    const int W = 100000;           // 0.1 mm trace width
+    const int PITCH = 500000;       // 0.5 mm meander pitch (vertical spacing)
+    const int SPAN = 2000000;       // 2 mm horizontal span of each meander leg
+    const int LEGS = 6;             // number of horizontal legs
+
+    auto addSeg = [&]( const VECTOR2I& aStart, const VECTOR2I& aEnd ) -> PCB_TRACK*
+    {
+        PCB_TRACK* t = new PCB_TRACK( board.get() );
+        t->SetStart( aStart );
+        t->SetEnd( aEnd );
+        t->SetWidth( W );
+        t->SetLayer( F_Cu );
+        t->SetNet( net );
+        board->Add( t );
+        return t;
+    };
+
+    // Build the meander: alternating horizontal legs connected by vertical stubs.
+    //
+    //  lead-in ─── leg0 ──┐
+    //                     │ stub0
+    //            ┌─ leg1 ─┘
+    //    stub1   │
+    //            └─ leg2 ──┐
+    //                      ...
+    //            ┌─ legN-1 ─┘
+    //            └─── lead-out ── PAD2
+
+    const int LEAD = 1000000;       // 1 mm lead-in / lead-out
+
+    VECTOR2I cursor( 0, 0 );
+
+    // Lead-in
+    VECTOR2I leadInEnd( LEAD, 0 );
+    addSeg( cursor, leadInEnd );
+    cursor = leadInEnd;
+
+    double expectedLen = LEAD;  // lead-in
+
+    for( int i = 0; i < LEGS; i++ )
+    {
+        bool goRight = ( i % 2 == 0 );
+        VECTOR2I legEnd = cursor + VECTOR2I( goRight ? SPAN : -SPAN, 0 );
+        addSeg( cursor, legEnd );
+        expectedLen += SPAN;
+        cursor = legEnd;
+
+        if( i < LEGS - 1 )
+        {
+            // Vertical stub connecting to next leg
+            VECTOR2I stubEnd = cursor + VECTOR2I( 0, PITCH );
+            addSeg( cursor, stubEnd );
+            expectedLen += PITCH;
+            cursor = stubEnd;
+        }
+    }
+
+    // Lead-out
+    VECTOR2I leadOutEnd = cursor + VECTOR2I( LEAD, 0 );
+    addSeg( cursor, leadOutEnd );
+    expectedLen += LEAD;
+
+    int totalSegs = LEGS            // horizontal legs
+                  + ( LEGS - 1 )    // vertical stubs
+                  + 2;              // lead-in + lead-out
+
+    BOOST_TEST_MESSAGE( "Meander: " << totalSegs << " segments, expected length "
+                        << ( expectedLen / 1e6 ) << " mm" );
+
+    // Add pads at the two ends
+    FOOTPRINT* fp = new FOOTPRINT( board.get() );
+    board->Add( fp );
+
+    auto addPad = [&]( const VECTOR2I& aPos, const wxString& aName )
+    {
+        PAD* p = new PAD( fp );
+        p->SetPosition( aPos );
+        p->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( 500000, 500000 ) );
+        p->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        p->SetAttribute( PAD_ATTRIB::SMD );
+        p->SetLayerSet( { F_Cu } );
+        p->SetNet( net );
+        p->SetNumber( aName );
+        fp->Add( p );
+    };
+
+    addPad( VECTOR2I( 0, 0 ), wxS( "1" ) );
+    addPad( leadOutEnd, wxS( "2" ) );
+
+    board->BuildConnectivity();
+
+    // Walk from a track in the middle of the meander
+    PCB_TRACK* midTrack = nullptr;
+    int idx = 0;
+
+    for( PCB_TRACK* track : board->Tracks() )
+    {
+        if( track->Type() == PCB_TRACE_T )
+        {
+            if( idx == totalSegs / 2 )
+            {
+                midTrack = track;
+                break;
+            }
+
+            idx++;
+        }
+    }
+
+    BOOST_REQUIRE( midTrack );
+
+    TRACE_PATH_WALKER walker( board.get() );
+    bool ok = walker.Walk( midTrack );
+    BOOST_CHECK( ok );
+
+    const WALK_RESULT& result = walker.GetResult();
+
+    BOOST_TEST_MESSAGE( "Walked " << result.segmentsVisited << " / "
+                        << result.totalSegmentsOnNet << " segments" );
+
+    // The walker must visit every segment (no junctions in a pure meander)
+    BOOST_CHECK_EQUAL( result.segmentsVisited, totalSegs );
+    BOOST_CHECK( result.isComplete() );
+
+    // Length must match
+    BOOST_CHECK_CLOSE( walker.GetTotalLength(), expectedLen, 0.01 );
+
+    // Should terminate at pads on both ends
+    BOOST_CHECK( result.startTerminus == PATH_TERMINUS::PAD );
+    BOOST_CHECK( result.endTerminus == PATH_TERMINUS::PAD );
+    BOOST_CHECK( walker.GetStartPad() != nullptr );
+    BOOST_CHECK( walker.GetEndPad() != nullptr );
+}
+
+
+/**
+ * Tight meander where the vertical stubs are shorter than the track width.
+ * With tolerance-based endpoint matching this would create false junctions;
+ * exact endpoint matching handles it correctly.
+ */
+BOOST_AUTO_TEST_CASE( MeanderWalk_TightSpacing )
+{
+    auto board = std::make_unique<BOARD>();
+
+    board->Add( new NETINFO_ITEM( board.get(), wxS( "SRAM_A9" ), 1 ) );
+    NETINFO_ITEM* net = board->GetNetInfo().GetNetItem( 1 );
+
+    const int W = 150000;           // 0.15 mm trace width
+    const int PITCH = 50000;        // 0.05 mm pitch -- shorter than width/2 tolerance!
+    const int SPAN = 2000000;       // 2 mm horizontal span
+    const int LEGS = 6;
+    const int LEAD = 1000000;
+
+    auto addSeg = [&]( const VECTOR2I& aStart, const VECTOR2I& aEnd ) -> PCB_TRACK*
+    {
+        PCB_TRACK* t = new PCB_TRACK( board.get() );
+        t->SetStart( aStart );
+        t->SetEnd( aEnd );
+        t->SetWidth( W );
+        t->SetLayer( F_Cu );
+        t->SetNet( net );
+        board->Add( t );
+        return t;
+    };
+
+    VECTOR2I cursor( 0, 0 );
+    VECTOR2I leadInEnd( LEAD, 0 );
+    addSeg( cursor, leadInEnd );
+    cursor = leadInEnd;
+
+    double expectedLen = LEAD;
+
+    for( int i = 0; i < LEGS; i++ )
+    {
+        bool goRight = ( i % 2 == 0 );
+        VECTOR2I legEnd = cursor + VECTOR2I( goRight ? SPAN : -SPAN, 0 );
+        addSeg( cursor, legEnd );
+        expectedLen += SPAN;
+        cursor = legEnd;
+
+        if( i < LEGS - 1 )
+        {
+            VECTOR2I stubEnd = cursor + VECTOR2I( 0, PITCH );
+            addSeg( cursor, stubEnd );
+            expectedLen += PITCH;
+            cursor = stubEnd;
+        }
+    }
+
+    VECTOR2I leadOutEnd = cursor + VECTOR2I( LEAD, 0 );
+    addSeg( cursor, leadOutEnd );
+    expectedLen += LEAD;
+
+    int totalSegs = LEGS + ( LEGS - 1 ) + 2;
+
+    FOOTPRINT* fp = new FOOTPRINT( board.get() );
+    board->Add( fp );
+
+    auto addPad = [&]( const VECTOR2I& aPos, const wxString& aName )
+    {
+        PAD* p = new PAD( fp );
+        p->SetPosition( aPos );
+        p->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( 500000, 500000 ) );
+        p->SetShape( PADSTACK::ALL_LAYERS, PAD_SHAPE::CIRCLE );
+        p->SetAttribute( PAD_ATTRIB::SMD );
+        p->SetLayerSet( { F_Cu } );
+        p->SetNet( net );
+        p->SetNumber( aName );
+        fp->Add( p );
+    };
+
+    addPad( VECTOR2I( 0, 0 ), wxS( "1" ) );
+    addPad( leadOutEnd, wxS( "2" ) );
+
+    board->BuildConnectivity();
+
+    // Walk from a middle track
+    PCB_TRACK* midTrack = nullptr;
+    int idx = 0;
+
+    for( PCB_TRACK* track : board->Tracks() )
+    {
+        if( track->Type() == PCB_TRACE_T )
+        {
+            if( idx == totalSegs / 2 )
+            {
+                midTrack = track;
+                break;
+            }
+
+            idx++;
+        }
+    }
+
+    BOOST_REQUIRE( midTrack );
+
+    TRACE_PATH_WALKER walker( board.get() );
+    bool ok = walker.Walk( midTrack );
+    BOOST_CHECK( ok );
+
+    const WALK_RESULT& result = walker.GetResult();
+
+    BOOST_TEST_MESSAGE( "TightSpacing: walked " << result.segmentsVisited << " / "
+                        << result.totalSegmentsOnNet << " segments"
+                        << " (stub=" << ( PITCH / 1e6 ) << "mm, width="
+                        << ( W / 1e6 ) << "mm)" );
+
+    BOOST_CHECK_EQUAL( result.segmentsVisited, totalSegs );
+    BOOST_CHECK( result.isComplete() );
+    BOOST_CHECK_CLOSE( walker.GetTotalLength(), expectedLen, 0.01 );
+}
+
+
+/**
+ * Walk SRAM_A9 on the cparti_fpga board — a real length-tuned net.
+ * Diagnoses whether the connectivity-based walker can trace through
+ * the meander segments.
+ */
+BOOST_AUTO_TEST_CASE( SRAM_A9_MeanderWalk )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+    m_board->BuildConnectivity();
+
+    const int SRAM_A9_NET = 147;
+
+    // Collect track info for this net
+    int    segCount = 0;
+    double trackSum = 0.0;
+    int    minWidth = INT_MAX;
+    int    minSegLen = INT_MAX;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() == SRAM_A9_NET && track->Type() != PCB_VIA_T )
+        {
+            segCount++;
+            trackSum += track->GetLength();
+
+            int len = static_cast<int>( track->GetLength() );
+
+            if( len < minSegLen )
+                minSegLen = len;
+
+            if( track->GetWidth() < minWidth )
+                minWidth = track->GetWidth();
+        }
+    }
+
+    BOOST_TEST_MESSAGE( "SRAM_A9: " << segCount << " segments, total length "
+                        << ( trackSum / 1e6 ) << " mm, min seg "
+                        << ( minSegLen / 1e3 ) << " um, min width "
+                        << ( minWidth / 1e3 ) << " um" );
+
+    // Walk from the first track on the net
+    PCB_TRACK* startTrack = nullptr;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() == SRAM_A9_NET && track->Type() == PCB_TRACE_T )
+        {
+            startTrack = track;
+            break;
+        }
+    }
+
+    BOOST_REQUIRE( startTrack );
+
+    TRACE_PATH_WALKER walker( m_board.get() );
+    bool ok = walker.Walk( startTrack );
+    BOOST_CHECK( ok );
+
+    const WALK_RESULT& result = walker.GetResult();
+
+    BOOST_TEST_MESSAGE( "Walked " << result.segmentsVisited << " / "
+                        << result.totalSegmentsOnNet << " segments, length "
+                        << ( walker.GetTotalLength() / 1e6 ) << " mm"
+                        << " | start=" << static_cast<int>( result.startTerminus )
+                        << " end=" << static_cast<int>( result.endTerminus ) );
+
+    // Must walk all segments (SRAM_A9 is a point-to-point net with meanders)
+    BOOST_CHECK_EQUAL( result.segmentsVisited, result.totalSegmentsOnNet );
+    BOOST_CHECK( result.isComplete() );
+}
+
+
+/**
+ * Walk JTAG_TCK — diagnose via junction behavior.
+ */
+BOOST_AUTO_TEST_CASE( JTAG_TCK_ViaWalk )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+    m_board->BuildConnectivity();
+
+    const int JTAG_TCK_NET = 51;
+
+    int segCount = 0;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() == JTAG_TCK_NET && track->Type() != PCB_VIA_T )
+            segCount++;
+    }
+
+    // Walk from each pad end to see what happens
+    PCB_TRACK* startTrack = nullptr;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() == JTAG_TCK_NET && track->Type() == PCB_TRACE_T )
+        {
+            startTrack = track;
+            break;
+        }
+    }
+
+    BOOST_REQUIRE( startTrack );
+
+    TRACE_PATH_WALKER walker( m_board.get() );
+    bool ok = walker.Walk( startTrack );
+    BOOST_CHECK( ok );
+
+    const WALK_RESULT& result = walker.GetResult();
+    const auto& path = walker.GetPath();
+
+    BOOST_TEST_MESSAGE( "JTAG_TCK: " << result.segmentsVisited << " / "
+                        << segCount << " segments, length "
+                        << ( walker.GetTotalLength() / 1e6 ) << " mm"
+                        << " | start=" << static_cast<int>( result.startTerminus )
+                        << " end=" << static_cast<int>( result.endTerminus ) );
+
+    if( !path.empty() )
+    {
+        BOOST_TEST_MESSAGE( "  path start: (" << ( path.front().position.x / 1e6 )
+                            << ", " << ( path.front().position.y / 1e6 )
+                            << ") layer=" << path.front().layer );
+        BOOST_TEST_MESSAGE( "  path end:   (" << ( path.back().position.x / 1e6 )
+                            << ", " << ( path.back().position.y / 1e6 )
+                            << ") layer=" << path.back().layer );
+    }
+
+    if( result.startJunction )
+    {
+        BOOST_TEST_MESSAGE( "  start junction at: ("
+                            << ( result.startJunction->position.x / 1e6 ) << ", "
+                            << ( result.startJunction->position.y / 1e6 )
+                            << ") branches=" << result.startJunction->branches.size() );
+    }
+
+    if( result.endJunction )
+    {
+        BOOST_TEST_MESSAGE( "  end junction at: ("
+                            << ( result.endJunction->position.x / 1e6 ) << ", "
+                            << ( result.endJunction->position.y / 1e6 )
+                            << ") branches=" << result.endJunction->branches.size() );
+    }
+
+    // Print actual pads on this net
+    for( PAD* pad : m_board->GetPads() )
+    {
+        if( pad->GetNetCode() == JTAG_TCK_NET )
+        {
+            FOOTPRINT* fp = pad->GetParentFootprint();
+            BOOST_TEST_MESSAGE( "  pad: " << fp->GetReference() << " pad \"" << pad->GetNumber()
+                                << "\" at (" << ( pad->GetPosition().x / 1e6 ) << ", "
+                                << ( pad->GetPosition().y / 1e6 ) << ") layer="
+                                << pad->GetLayer() );
+        }
+    }
+
+    // 65/70: the walker can't yet resolve the teardrop loop at the via
+    // near U1.  Three short tracks form a triangle back to the via; the
+    // fourth branch is the real continuation to the BGA pad.
+    // TODO: cycle-aware look-ahead at junctions to skip teardrop loops.
+    BOOST_CHECK_GE( result.segmentsVisited, 65 );
 }
 
 

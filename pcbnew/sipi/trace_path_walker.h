@@ -143,64 +143,43 @@ public:
 
 private:
     /**
-     * Build the adjacency graph for all tracks/vias on the given net.
-     * Nodes are VECTOR2I endpoints; edges are track segments and vias.
+     * Build the pad map for the given net.
      */
-    void buildAdjacency( int aNetCode );
+    void buildPadMap( int aNetCode );
+
+    /**
+     * Find unvisited tracks/vias connected to @a aItem near @a aPos.
+     *
+     * Uses KiCad's collision-based connectivity, then filters to items
+     * that have an endpoint near @a aPos so the walker knows direction.
+     */
+    void findNeighborsAt( BOARD_CONNECTED_ITEM* aItem, const VECTOR2I& aPos,
+                          const std::set<BOARD_CONNECTED_ITEM*>& aVisited,
+                          BOARD_CONNECTED_ITEM*& aNextVia,
+                          BOARD_CONNECTED_ITEM*& aNext, int& aUnvisitedDegree,
+                          std::vector<BOARD_CONNECTED_ITEM*>* aBranches = nullptr ) const;
 
     /**
      * Walk from a starting endpoint in one direction until a terminal
      * (pad, dead end, or junction with degree > 2) is reached.
-     *
-     * @param aStartPos     Starting endpoint position.
-     * @param aFirstItem    The first item to traverse (determines direction).
-     * @param aVisited      Set of already-visited items (updated in place).
-     * @param aPoints       Output points appended here.
-     * @param aCumulDist    Running cumulative distance (updated in place).
      */
     PATH_TERMINUS walkDirection( const VECTOR2I& aStartPos, BOARD_CONNECTED_ITEM* aFirstItem,
                                 std::set<BOARD_CONNECTED_ITEM*>& aVisited,
                                 std::vector<PATH_POINT>& aPoints, double& aCumulDist,
                                 std::optional<PATH_JUNCTION>& aJunction );
 
-    /**
-     * Reverse the walked path so that the start and end terminals swap.
-     * Flips tangent vectors and re-numbers cumulative distances.
-     */
     void reversePath();
 
-    /**
-     * Get the "other" endpoint of a track segment given one endpoint.
-     * For vias, both endpoints are the same (the via position).
-     */
     VECTOR2I otherEnd( BOARD_CONNECTED_ITEM* aItem, const VECTOR2I& aFrom ) const;
 
-    /**
-     * Get the length of a track item (segment or arc).
-     */
     double itemLength( BOARD_CONNECTED_ITEM* aItem ) const;
 
-    /**
-     * Emit interpolated PATH_POINTs along a PCB_ARC, with correct tangent
-     * directions perpendicular to the arc radius at each sample point.
-     *
-     * @param aArc       The arc to interpolate along.
-     * @param aEntryPos  The endpoint where we enter the arc.
-     * @param aPoints    Output points appended here.
-     * @param aCumulDist Running cumulative distance (updated in place).
-     */
     void emitArcPoints( PCB_ARC* aArc, const VECTOR2I& aEntryPos,
                         std::vector<PATH_POINT>& aPoints, double& aCumulDist );
 
-    /**
-     * Find the pad at the given position on the given net, if any.
-     */
     PAD* findPadAt( const VECTOR2I& aPos, int aNetCode ) const;
 
     const BOARD* m_board;
-
-    // Adjacency: endpoint position → list of connected items at that endpoint
-    std::map<VECTOR2I, std::vector<BOARD_CONNECTED_ITEM*>> m_adjacency;
 
     // Pads on the current net, indexed by position
     std::map<VECTOR2I, PAD*> m_padMap;

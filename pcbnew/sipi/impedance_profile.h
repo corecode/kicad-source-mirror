@@ -39,6 +39,7 @@
 class BOARD;
 class DRC_RTREE;
 class PAD;
+class PCB_TRACK;
 
 
 /**
@@ -209,7 +210,8 @@ public:
     bool Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
                   const VECTOR2I& aFrom = VECTOR2I( 0, 0 ),
                   DRC_RTREE* aRtree = nullptr,
-                  int aCoupledNetCode = 0 );
+                  int aCoupledNetCode = 0,
+                  PCB_TRACK* aStartTrack = nullptr );
 
     const std::vector<IMPEDANCE_SAMPLE>& GetSamples() const { return m_samples; }
     double GetTotalLength() const { return m_totalLength; }
@@ -242,7 +244,9 @@ class DIFF_PROFILE
 public:
     DIFF_PROFILE();
 
-    bool Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN, BEM_CACHE& aCache );
+    bool Compute( const BOARD* aBoard, int aNetCodeP, int aNetCodeN, BEM_CACHE& aCache,
+                  PCB_TRACK* aStartTrack = nullptr,
+                  const VECTOR2I& aFrom = VECTOR2I( 0, 0 ) );
 
     const SE_PROFILE& GetProfileP() const { return m_profileP; }
     const SE_PROFILE& GetProfileN() const { return m_profileN; }
