@@ -31,6 +31,7 @@
 #include <netinfo.h>
 #include <settings/settings_manager.h>
 
+#include <sipi/impedance_profile.h>
 #include <sipi/trace_path_walker.h>
 
 
@@ -902,6 +903,80 @@ BOOST_AUTO_TEST_CASE( JTAG_TCK_ViaWalk )
     // fourth branch is the real continuation to the BGA pad.
     // TODO: cycle-aware look-ahead at junctions to skip teardrop loops.
     BOOST_CHECK_GE( result.segmentsVisited, 65 );
+}
+
+
+/**
+ * Dump cross-section details around the D26 ESD diode pad on JTAG_TCK
+ * to diagnose the Z₀ dip at ~39.2mm.
+ */
+BOOST_AUTO_TEST_CASE( JTAG_TCK_D26_Diagnostic )
+{
+    KI_TEST::LoadBoard( m_settingsManager, "cparti_fpga", m_board );
+    m_board->BuildConnectivity();
+
+    const int JTAG_TCK_NET = 51;
+
+    PCB_TRACK* startTrack = nullptr;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( track->GetNetCode() == JTAG_TCK_NET && track->Type() == PCB_TRACE_T )
+        {
+            startTrack = track;
+            break;
+        }
+    }
+
+    BOOST_REQUIRE( startTrack );
+
+    SE_PROFILE profile;
+    BEM_CACHE cache;
+    bool ok = profile.Compute( m_board.get(), JTAG_TCK_NET, cache,
+                               VECTOR2I( 0, 0 ), nullptr, 0, startTrack );
+
+    BOOST_CHECK_MESSAGE( ok, profile.GetError() );
+
+    if( !ok )
+        return;
+
+    const auto& samples = profile.GetSamples();
+
+    for( const auto& s : samples )
+    {
+        double mm = s.distNm / 1e6;
+
+        if( mm > 38.5 && mm < 40.0 )
+        {
+            BOOST_TEST_MESSAGE(
+                    "d=" << mm
+                    << " Z0=" << s.z0
+                    << " w=" << ( s.signalWidth / 1e3 ) << "um"
+                    << " n=" << s.neighborCount
+                    << " gw=" << s.groundwireCount
+                    << " ref=" << ( s.hasRefAbove ? "A" : "-" )
+                              << ( s.hasRefBelow ? "B" : "-" )
+                    << " hA=" << ( s.hAbove * 1e6 ) << "um"
+                    << " hB=" << ( s.hBelow * 1e6 ) << "um"
+                    << " er=" << s.erEff
+                    << " pos=(" << ( s.boardPos.x / 1e6 ) << ","
+                                << ( s.boardPos.y / 1e6 ) << ")"
+                    << " layer=" << s.layer );
+
+            // Dump conductors from XS_GEOMETRY
+            const auto& g = s.geometry;
+
+            for( size_t i = 0; i < g.conductors.size(); i++ )
+            {
+                const auto& c = g.conductors[i];
+                BOOST_TEST_MESSAGE(
+                        "  cond[" << i << "]: cx=" << ( c.centerX * 1e6 ) << "um"
+                        << " w=" << ( c.width * 1e6 ) << "um"
+                        << " t=" << ( c.thickness * 1e6 ) << "um"
+                        << ( c.isGround ? " GND" : " SIG" ) );
+            }
+        }
+    }
 }
 
 
