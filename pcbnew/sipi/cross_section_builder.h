@@ -135,6 +135,20 @@ public:
                                      const BOX2I& aTraceBBox, int aExtent );
 
     /**
+     * Return the signal conductor width at the cross-section, accounting for
+     * signal-net zone fills (teardrops, copper pours) that widen the conductor
+     * beyond the trace width.
+     *
+     * Checks whether the sample position falls inside a zone fill on the signal
+     * net and layer, and if so, intersects the fill polygon with the
+     * perpendicular cut line to measure the actual copper extent.
+     *
+     * @param aParams  Sample parameters (position, tangent, signal layer/net, width)
+     * @return The effective signal width (nm), >= aParams.signalWidth.
+     */
+    int FindSignalZoneWidth( const XS_BUILD_PARAMS& aParams ) const;
+
+    /**
      * Find neighbor conductors crossing the cross-section cut line.
      * Returns a sorted, deduplicated vector (max 4 neighbors).
      */

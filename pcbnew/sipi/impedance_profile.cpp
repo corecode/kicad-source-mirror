@@ -1084,58 +1084,14 @@ bool SE_PROFILE::Compute( const BOARD* aBoard, int aNetCode, BEM_CACHE& aCache,
         }
 
         // Check if inside a signal-net zone fill (teardrop, copper pour).
-        // If the zone is wider than the current signal width at this cross-
-        // section, expand it.
-        for( ZONE* zone : aBoard->Zones() )
         {
-            if( zone->GetNetCode() != track->GetNetCode() )
-                continue;
-
-            if( !zone->IsOnLayer( track->GetLayer() ) || zone->GetIsRuleArea() )
-                continue;
-
-            if( !zone->HitTestFilledArea( track->GetLayer(), samplePos ) )
-                continue;
-
-            VECTOR2D normal0( -sampleTangent.y, sampleTangent.x );
-            const auto& fill = zone->GetFilledPolysList( track->GetLayer() );
-
-            if( !fill || fill->IsEmpty() )
-                continue;
-
-            // Intersect zone fill polygon with a cut line through samplePos.
-            int extent = signalWidth * 3;
-            VECTOR2I cutA( samplePos.x - (int) ( normal0.x * extent ),
-                           samplePos.y - (int) ( normal0.y * extent ) );
-            VECTOR2I cutB( samplePos.x + (int) ( normal0.x * extent ),
-                           samplePos.y + (int) ( normal0.y * extent ) );
-            SEG zoneCut( cutA, cutB );
-
-            double minProj = 1e18, maxProj = -1e18;
-
-            for( int oi = 0; oi < fill->OutlineCount(); oi++ )
-            {
-                SHAPE_LINE_CHAIN::INTERSECTIONS isects;
-                fill->COutline( oi ).Intersect( zoneCut, isects );
-
-                for( const auto& ip : isects )
-                {
-                    VECTOR2D d( ip.p.x - samplePos.x, ip.p.y - samplePos.y );
-                    double proj = d.x * normal0.x + d.y * normal0.y;
-                    minProj = std::min( minProj, proj );
-                    maxProj = std::max( maxProj, proj );
-                }
-            }
-
-            if( maxProj > minProj )
-            {
-                int zoneWidth = (int) ( maxProj - minProj );
-
-                if( zoneWidth > signalWidth )
-                    signalWidth = zoneWidth;
-            }
-
-            break;
+            XS_BUILD_PARAMS zoneQuery;
+            zoneQuery.samplePos = samplePos;
+            zoneQuery.sampleTangent = sampleTangent;
+            zoneQuery.signalLayer = track->GetLayer();
+            zoneQuery.signalNetCode = track->GetNetCode();
+            zoneQuery.signalWidth = signalWidth;
+            signalWidth = xsBuilder.FindSignalZoneWidth( zoneQuery );
         }
 
         LAYER_GEOMETRY geom = stackup.GetLayerGeometry( track->GetLayer(),

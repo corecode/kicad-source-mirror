@@ -160,6 +160,71 @@ void CROSS_SECTION_BUILDER::PrecomputeNearbyFillEdges(
 }
 
 
+int CROSS_SECTION_BUILDER::FindSignalZoneWidth( const XS_BUILD_PARAMS& aParams ) const
+{
+    int signalWidth = aParams.signalWidth;
+
+    if( !m_board )
+        return signalWidth;
+
+    VECTOR2D normal( -aParams.sampleTangent.y, aParams.sampleTangent.x );
+
+    for( ZONE* zone : m_board->Zones() )
+    {
+        if( zone->GetNetCode() != aParams.signalNetCode )
+            continue;
+
+        if( !zone->IsOnLayer( aParams.signalLayer ) || zone->GetIsRuleArea() )
+            continue;
+
+        if( !zone->HitTestFilledArea( aParams.signalLayer, aParams.samplePos ) )
+            continue;
+
+        const auto& fill = zone->GetFilledPolysList( aParams.signalLayer );
+
+        if( !fill || fill->IsEmpty() )
+            continue;
+
+        // Intersect zone fill polygon with a cut line through samplePos.
+        int extent = signalWidth * 3;
+        VECTOR2I cutA( aParams.samplePos.x - (int) ( normal.x * extent ),
+                       aParams.samplePos.y - (int) ( normal.y * extent ) );
+        VECTOR2I cutB( aParams.samplePos.x + (int) ( normal.x * extent ),
+                       aParams.samplePos.y + (int) ( normal.y * extent ) );
+        SEG zoneCut( cutA, cutB );
+
+        double minProj = 1e18, maxProj = -1e18;
+
+        for( int oi = 0; oi < fill->OutlineCount(); oi++ )
+        {
+            SHAPE_LINE_CHAIN::INTERSECTIONS isects;
+            fill->COutline( oi ).Intersect( zoneCut, isects );
+
+            for( const auto& ip : isects )
+            {
+                VECTOR2D d( ip.p.x - aParams.samplePos.x,
+                            ip.p.y - aParams.samplePos.y );
+                double proj = d.x * normal.x + d.y * normal.y;
+                minProj = std::min( minProj, proj );
+                maxProj = std::max( maxProj, proj );
+            }
+        }
+
+        if( maxProj > minProj )
+        {
+            int zoneWidth = (int) ( maxProj - minProj );
+
+            if( zoneWidth > signalWidth )
+                signalWidth = zoneWidth;
+        }
+
+        break;
+    }
+
+    return signalWidth;
+}
+
+
 std::vector<XS_NEIGHBOR> CROSS_SECTION_BUILDER::FindNeighbors(
         const XS_BUILD_PARAMS& aParams ) const
 {

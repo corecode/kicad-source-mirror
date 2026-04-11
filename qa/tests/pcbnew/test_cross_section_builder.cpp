@@ -1848,4 +1848,150 @@ BOOST_AUTO_TEST_CASE( DiffPairGapSweep )
 }
 
 
+/**
+ * Signal-net zone (teardrop) must NOT appear as a neighbor.
+ * It should be invisible to findZoneNeighbors because it carries
+ * the same net as the signal trace.
+ */
+BOOST_AUTO_TEST_CASE( SignalNetZoneNotNeighbor )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Teardrop-like zone on the SIGNAL net (net 1), widening to one side.
+    addZoneFill( VECTOR2I( 3000000, -200000 ),
+                 VECTOR2I( 7000000, 200000 ),
+                 F_Cu, 1 );
+
+    // Ground zone on net 3 further out (this one SHOULD be found).
+    addZoneFill( VECTOR2I( -1000000, 500000 ),
+                 VECTOR2I( 11000000, 3000000 ),
+                 F_Cu, 3 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+
+    auto neighbors = builder.FindNeighbors( params );
+
+    BOOST_TEST_MESSAGE( "SignalNetZoneNotNeighbor: " << neighbors.size() << " neighbors" );
+
+    for( const auto& nb : neighbors )
+        BOOST_TEST_MESSAGE( "  dist=" << nb.distNm << " width=" << nb.widthNm );
+
+    // The signal-net zone must not produce a neighbor.
+    // Only the ground zone at ~500000nm should appear.
+    for( const auto& nb : neighbors )
+    {
+        // No neighbor should be at ~200000nm (the teardrop edge).
+        BOOST_CHECK_GT( std::abs( nb.distNm ), 300000 );
+    }
+
+    // The ground zone edge should still be detected.
+    bool foundGround = false;
+
+    for( const auto& nb : neighbors )
+    {
+        if( std::abs( nb.distNm ) > 400000 )
+            foundGround = true;
+    }
+
+    BOOST_CHECK( foundGround );
+}
+
+
+/**
+ * A neighbor trace's teardrop (zone on a different net) should be
+ * detected as a neighbor with its actual copper-span width, not an
+ * estimated width.
+ */
+BOOST_AUTO_TEST_CASE( NeighborTeardropZoneWidth )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Neighbor zone (net 2) at 400µm lateral offset, 600µm wide.
+    // Simulates a teardrop or copper island on a different net.
+    addZoneFill( VECTOR2I( 2000000, 400000 ),
+                 VECTOR2I( 8000000, 1000000 ),
+                 F_Cu, 2 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+
+    auto neighbors = builder.FindNeighbors( params );
+
+    BOOST_TEST_MESSAGE( "NeighborTeardropZoneWidth: " << neighbors.size() << " neighbors" );
+
+    for( const auto& nb : neighbors )
+        BOOST_TEST_MESSAGE( "  dist=" << nb.distNm << " width=" << nb.widthNm );
+
+    BOOST_REQUIRE_GE( neighbors.size(), 1 );
+
+    // Should find the zone with its actual width (~600000nm),
+    // not an estimated width from dielectric height.
+    bool foundCorrectWidth = false;
+
+    for( const auto& nb : neighbors )
+    {
+        if( nb.widthNm > 400000 && nb.widthNm < 800000 )
+            foundCorrectWidth = true;
+    }
+
+    BOOST_CHECK_MESSAGE( foundCorrectWidth,
+                         "Neighbor zone should have measured width ~600000nm" );
+}
+
+
+/**
+ * Signal-net zone fill (teardrop) should expand the effective signal
+ * width returned by FindSignalZoneWidth.
+ */
+BOOST_AUTO_TEST_CASE( SignalZoneExpandsWidth )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Teardrop zone on the signal net (net 1), wider than the trace.
+    // Zone is 800µm wide (±400µm around y=0) at the sample point.
+    addZoneFill( VECTOR2I( 3000000, -400000 ),
+                 VECTOR2I( 7000000, 400000 ),
+                 F_Cu, 1 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+
+    int zoneWidth = builder.FindSignalZoneWidth( params );
+
+    BOOST_TEST_MESSAGE( "Signal zone width: " << zoneWidth
+                        << " (trace width: " << sig->GetWidth() << ")" );
+
+    // Zone is 800µm wide, trace is 150µm — zone should dominate.
+    BOOST_CHECK_GT( zoneWidth, sig->GetWidth() );
+    BOOST_CHECK_CLOSE( zoneWidth / 1e6, 0.8, 5.0 ); // ~800µm ±5%
+}
+
+
+/**
+ * When the sample is outside any signal-net zone, FindSignalZoneWidth
+ * should return the original signal width unchanged.
+ */
+BOOST_AUTO_TEST_CASE( NoSignalZoneKeepsWidth )
+{
+    PCB_TRACK* sig = addTrack( VECTOR2I( 0, 0 ), VECTOR2I( 10000000, 0 ),
+                               150000, F_Cu, 1 );
+
+    // Zone on a DIFFERENT net — should not affect signal width.
+    addZoneFill( VECTOR2I( 3000000, -400000 ),
+                 VECTOR2I( 7000000, 400000 ),
+                 F_Cu, 3 );
+
+    auto builder = makeBuilder( sig );
+    auto params = makeParams( sig, VECTOR2I( 5000000, 0 ), VECTOR2D( 1.0, 0.0 ) );
+
+    int zoneWidth = builder.FindSignalZoneWidth( params );
+
+    BOOST_CHECK_EQUAL( zoneWidth, sig->GetWidth() );
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()
