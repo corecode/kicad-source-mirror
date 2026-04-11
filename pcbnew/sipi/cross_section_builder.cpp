@@ -117,7 +117,7 @@ void CROSS_SECTION_BUILDER::PrecomputeNearbyFillEdges(
 
     for( PCB_LAYER_ID layer : aLayers )
     {
-        std::vector<SEG>& edges = m_nearbyFillEdges[layer];
+        std::vector<FILL_EDGE>& edges = m_nearbyFillEdges[layer];
 
         for( ZONE* zone : m_board->Zones() )
         {
@@ -128,6 +128,8 @@ void CROSS_SECTION_BUILDER::PrecomputeNearbyFillEdges(
 
             if( !fill || fill->IsEmpty() )
                 continue;
+
+            int zoneNet = zone->GetNetCode();
 
             for( int oi = 0; oi < fill->OutlineCount(); oi++ )
             {
@@ -143,7 +145,7 @@ void CROSS_SECTION_BUILDER::PrecomputeNearbyFillEdges(
                                         std::max( seg.A.y, seg.B.y ) );
 
                         if( segBBox.Intersects( searchBox ) )
-                            edges.push_back( seg );
+                            edges.push_back( { seg, zoneNet } );
                     }
                 };
 
@@ -454,31 +456,90 @@ void CROSS_SECTION_BUILDER::findZoneNeighbors( const XS_BUILD_PARAMS& aParams,
                                                 std::vector<XS_NEIGHBOR>& aNeighbors ) const
 {
     double halfTraceW = aParams.signalWidth / 2.0;
-    int    zoneWidth = (int) ( std::max( aParams.layerGeom.hAbove,
-                                          aParams.layerGeom.hBelow ) * 3.0 / 1e-9 );
 
-    if( zoneWidth < 100000 )
-        zoneWidth = 100000; // min 100µm
-
+    // Get zone fill edge crossings on the signal layer, skipping edges that
+    // belong to the signal net (teardrops, copper pours on the same net).
+    // Those are part of the signal conductor, not coupling neighbors.
     std::vector<double> crossings = findZoneFillEdgeCrossings(
             aCutSeg, aParams.samplePos, aNormal, aParams.signalLayer,
-            aParams.couplingHorizon );
+            aParams.couplingHorizon, aParams.signalNetCode );
 
-    for( double lateralDist : crossings )
+    if( crossings.empty() )
+        return;
+
+    // Determine initial copper state just outside the leftmost crossing.
+    // This lets us pair crossings into copper spans instead of treating
+    // each crossing as an independent conductor edge.
+    static constexpr double NUDGE = 5000.0; // 5µm
+
+    auto hitTestOtherNet = [&]( double aLateral ) -> bool
     {
-        double edgeToEdge = std::abs( lateralDist ) - halfTraceW;
+        VECTOR2I pt( aParams.samplePos.x + (int) ( aNormal.x * aLateral ),
+                     aParams.samplePos.y + (int) ( aNormal.y * aLateral ) );
+
+        for( ZONE* zone : m_board->Zones() )
+        {
+            if( !zone->IsOnLayer( aParams.signalLayer ) || zone->GetIsRuleArea() )
+                continue;
+
+            if( zone->GetNetCode() == aParams.signalNetCode )
+                continue;
+
+            if( zone->HitTestFilledArea( aParams.signalLayer, pt ) )
+                return true;
+        }
+
+        return false;
+    };
+
+    // Build copper spans from edge crossings.
+    double searchExtent = (double) aParams.couplingHorizon;
+
+    bool inCopper = hitTestOtherNet( crossings.front() - NUDGE );
+    double spanStart = -searchExtent;
+
+    std::vector<std::pair<double, double>> spans;
+
+    for( double crossing : crossings )
+    {
+        bool afterCrossing = hitTestOtherNet( crossing + NUDGE );
+
+        if( inCopper && !afterCrossing )
+        {
+            spans.push_back( { spanStart, crossing } );
+        }
+        else if( !inCopper && afterCrossing )
+        {
+            spanStart = crossing;
+        }
+
+        inCopper = afterCrossing;
+    }
+
+    if( inCopper )
+        spans.push_back( { spanStart, searchExtent } );
+
+    // Convert copper spans to neighbors.
+    for( const auto& [left, right] : spans )
+    {
+        double spanWidth = right - left;
+
+        if( spanWidth < MIN_EDGE_TO_EDGE )
+            continue;
+
+        double spanCenter = ( left + right ) / 2.0;
+
+        // Skip spans that overlap the signal conductor.
+        if( left < halfTraceW && right > -halfTraceW )
+            continue;
+
+        double edgeToEdge = std::min( std::abs( left ), std::abs( right ) ) - halfTraceW;
 
         if( edgeToEdge > aParams.couplingHorizon || edgeToEdge < MIN_EDGE_TO_EDGE )
             continue;
 
-        int zoneCenterDist;
-
-        if( lateralDist > 0 )
-            zoneCenterDist = (int) lateralDist + zoneWidth / 2;
-        else
-            zoneCenterDist = (int) lateralDist - zoneWidth / 2;
-
-        aNeighbors.push_back( { zoneCenterDist, zoneWidth } );
+        aNeighbors.push_back( { static_cast<int>( spanCenter ),
+                                static_cast<int>( spanWidth ) } );
     }
 }
 
@@ -488,7 +549,8 @@ std::vector<double> CROSS_SECTION_BUILDER::findZoneFillEdgeCrossings(
         const VECTOR2I& aSamplePos,
         const VECTOR2D& aNormal,
         PCB_LAYER_ID aLayer,
-        int aRadius ) const
+        int aRadius,
+        int aSkipNetCode ) const
 {
     std::vector<double> crossings;
 
@@ -497,14 +559,17 @@ std::vector<double> CROSS_SECTION_BUILDER::findZoneFillEdgeCrossings(
 
     if( it != m_nearbyFillEdges.end() )
     {
-        for( const SEG& edge : it->second )
+        for( const FILL_EDGE& fe : it->second )
         {
-            OPT_VECTOR2I intersection = aCutSeg.IntersectLines( edge );
+            if( aSkipNetCode > 0 && fe.netCode == aSkipNetCode )
+                continue;
+
+            OPT_VECTOR2I intersection = aCutSeg.IntersectLines( fe.seg );
 
             if( !intersection )
                 continue;
 
-            if( !edge.Contains( *intersection ) )
+            if( !fe.seg.Contains( *intersection ) )
                 continue;
 
             VECTOR2D delta( intersection->x - aSamplePos.x,
@@ -552,6 +617,9 @@ std::vector<double> CROSS_SECTION_BUILDER::findZoneFillEdgeCrossings(
 
     auto processZoneFills = [&]( ZONE* aZone )
     {
+        if( aSkipNetCode > 0 && aZone->GetNetCode() == aSkipNetCode )
+            return;
+
         const std::shared_ptr<SHAPE_POLY_SET>& fill = aZone->GetFilledPolysList( aLayer );
 
         if( !fill || fill->IsEmpty() )

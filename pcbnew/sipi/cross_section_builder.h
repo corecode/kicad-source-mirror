@@ -215,7 +215,8 @@ private:
                                                     const VECTOR2I& aSamplePos,
                                                     const VECTOR2D& aNormal,
                                                     PCB_LAYER_ID aLayer,
-                                                    int aRadius ) const;
+                                                    int aRadius,
+                                                    int aSkipNetCode = 0 ) const;
 
     static void deduplicateNeighbors( std::vector<XS_NEIGHBOR>& aNeighbors,
                                       int aMaxNeighbors = 4 );
@@ -225,10 +226,17 @@ private:
     const PCB_TRACK*                                    m_signalTrack;
     const std::map<BOARD_CONNECTED_ITEM*, double>*      m_pathItemDist;
 
+    /// Zone fill edge segment with its net code for net-aware filtering.
+    struct FILL_EDGE
+    {
+        SEG seg;
+        int netCode;
+    };
+
     /// Precomputed zone fill edge segments near the trace, keyed by layer.
     /// When populated, findZoneFillEdgeCrossings uses these instead of
     /// walking full zone fill polygons.
-    std::map<PCB_LAYER_ID, std::vector<SEG>>            m_nearbyFillEdges;
+    std::map<PCB_LAYER_ID, std::vector<FILL_EDGE>>      m_nearbyFillEdges;
 };
 
 #endif // CROSS_SECTION_BUILDER_H
