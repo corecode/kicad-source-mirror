@@ -56,7 +56,9 @@ enum MAIL_T
     MAIL_FP_EDIT,
     MAIL_RELOAD_LIB,               // Reload Library List if one was added
     MAIL_RELOAD_PLUGINS,           // Reload python plugins
-    MAIL_REFRESH_SYMBOL            // Refresh symbol in symbol viewer
+    MAIL_REFRESH_SYMBOL,           // Refresh symbol in symbol viewer
+    MAIL_PDN_EXTRACT_REQUEST,      // SCH->PCB: request layout parasitic extraction
+    MAIL_PDN_EXTRACT_RESULT        // PCB->SCH: layout parasitic extraction result
 };
 
 #endif  // MAIL_TYPE_H_

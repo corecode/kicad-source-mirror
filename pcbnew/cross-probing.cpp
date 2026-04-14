@@ -33,6 +33,7 @@
 
 #include <board.h>
 #include <board_design_settings.h>
+#include <sipi/pdn_layout_extractor.h>
 #include <footprint.h>
 #include <pad.h>
 #include <pcb_track.h>
@@ -706,6 +707,42 @@ void PCB_EDIT_FRAME::KiwayMailIn( KIWAY_EXPRESS& mail )
     case MAIL_RELOAD_PLUGINS:
         GetToolManager()->RunAction( ACTIONS::pluginsReload );
         break;
+
+    case MAIL_PDN_EXTRACT_REQUEST:
+    {
+        // Payload: "power_net_name\nground_net_name\nrefdes1,refdes2,..."
+        wxString payloadStr = wxString::FromUTF8( payload );
+        wxString powerNet = payloadStr.BeforeFirst( '\n' );
+        wxString rest = payloadStr.AfterFirst( '\n' );
+        wxString groundNet = rest.BeforeFirst( '\n' ).Trim();
+        wxString refdesList = rest.AfterFirst( '\n' ).Trim();
+
+        // Parse comma-separated refdes list for PDN-relevant components
+        std::set<wxString> pdnRefdes;
+
+        if( !refdesList.IsEmpty() )
+        {
+            wxArrayString tokens = wxStringTokenize( refdesList, wxS( "," ) );
+
+            for( const wxString& tok : tokens )
+            {
+                wxString trimmed = tok;
+                trimmed.Trim();
+                pdnRefdes.insert( trimmed );
+            }
+        }
+
+        PDN_LAYOUT_EXTRACTOR extractor( GetBoard() );
+        extractor.Extract( powerNet, groundNet, pdnRefdes );
+
+        // Always reply — even if extraction produced no elements,
+        // eeschema needs the response to clear its pending state.
+        wxString resultPayload = extractor.SerializeResult();
+        std::string resultStr = resultPayload.ToStdString();
+        Kiway().ExpressMail( FRAME_SCH, MAIL_PDN_EXTRACT_RESULT, resultStr, this );
+
+        break;
+    }
 
     // many many others.
     default:

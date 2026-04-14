@@ -34,6 +34,30 @@ class SCHEMATIC;
 class SPICE_MODEL_DOWNLOADER;
 
 
+/**
+ * Layout-extracted parasitic data received from pcbnew via KIWAY.
+ *
+ * When valid, the PDN analyzer uses these parasitics instead of the
+ * fixed per-hop trace impedance model.  Pad ports map schematic component
+ * pins to SPICE nodes in the parasitic network.
+ */
+struct PDN_LAYOUT_DATA
+{
+    bool     valid = false;
+    wxString powerNetElements;   ///< SPICE lines for power net parasitics
+    wxString groundNetElements;  ///< SPICE lines for ground net parasitics
+    wxString planeCapElements;   ///< SPICE lines for plane capacitance
+
+    /// Pad ports on the power net: "refdes:pad" → SPICE node name.  Kept
+    /// separate from the ground-net map so callers can find a component's
+    /// power-side node without guessing pin numbers (cap footprints vary).
+    std::map<wxString, wxString> powerPadPortMap;
+
+    /// Pad ports on the ground / reference net: "refdes:pad" → node name.
+    std::map<wxString, wxString> groundPadPortMap;
+};
+
+
 struct PARASITIC_ENTRY
 {
     double esr; // Ohms
@@ -241,6 +265,22 @@ public:
                                 int aPointsPerDecade = 100 );
 
     /**
+     * Build an ngspice netlist using layout-extracted parasitics.
+     *
+     * When layout data is valid, caps connect to their pad port nodes in the
+     * parasitic network instead of to local/gnd with per-hop trace impedance.
+     *
+     * @param aObservationRefdes  Refdes of the component to use as the observation
+     *                            point (AC source + voltage probe).  If empty, the
+     *                            first capacitor in the network is used.
+     */
+    wxString BuildSpiceNetlist( const wxString&        aNetworkKey,
+                                const PDN_LAYOUT_DATA& aLayoutData,
+                                const wxString&        aObservationRefdes = wxEmptyString,
+                                double aStartFreq = 1e3, double aEndFreq = 1e9,
+                                int aPointsPerDecade = 100 );
+
+    /**
      * Run the AC impedance analysis for the given PDN network.
      *
      * @param aNetwork the PDN network to analyze
@@ -259,6 +299,15 @@ public:
      */
     bool RunAnalysis( const wxString& aNetworkKey, const SCH_SHEET_PATH& aObservationSheet,
                       double aTraceInductance = 10e-9, double aTraceResistance = 5e-3 );
+
+    /**
+     * Run the AC impedance analysis using layout-extracted parasitics.
+     *
+     * @param aObservationRefdes  Refdes for the observation point.  If empty,
+     *                            uses the first capacitor.
+     */
+    bool RunAnalysis( const wxString& aNetworkKey, const PDN_LAYOUT_DATA& aLayoutData,
+                      const wxString& aObservationRefdes = wxEmptyString );
 
     const std::vector<double>& GetFrequencies() const { return m_frequencies; }
     const std::vector<double>& GetImpedance() const { return m_impedance; }

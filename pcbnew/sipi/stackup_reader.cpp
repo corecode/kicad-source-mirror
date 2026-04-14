@@ -132,58 +132,7 @@ void STACKUP_READER::buildLayerModel()
         }
     }
 
-    fprintf( stderr, "SIPI stackup: %d copper layers, %d dielectrics, defaults=%d\n",
-             (int) m_copperLayers.size(), (int) m_dielectrics.size(), m_usingDefaults );
-
-    if( m_solderMaskTop.present )
-    {
-        fprintf( stderr, "  SM top: %.1fum er=%.2f\n",
-                 m_solderMaskTop.thickness * 1e6, m_solderMaskTop.epsilonR );
-    }
-
-    if( m_solderMaskBottom.present )
-    {
-        fprintf( stderr, "  SM bot: %.1fum er=%.2f\n",
-                 m_solderMaskBottom.thickness * 1e6, m_solderMaskBottom.epsilonR );
-    }
-
-    for( size_t i = 0; i < m_copperLayers.size(); i++ )
-    {
-        fprintf( stderr, "  Cu[%d]: layer=%d z=%.4fmm t=%.1fum\n",
-                 (int) i, (int) m_copperLayers[i].layerId,
-                 m_copperLayers[i].zPosition * 1e3,
-                 m_copperLayers[i].thickness * 1e6 );
-    }
-
-    for( size_t i = 0; i < m_dielectrics.size(); i++ )
-    {
-        fprintf( stderr, "  Diel[%d]: z=%.4f-%.4fmm er=%.2f tanD=%.4f\n",
-                 (int) i,
-                 m_dielectrics[i].zTop * 1e3, m_dielectrics[i].zBottom * 1e3,
-                 m_dielectrics[i].epsilonR, m_dielectrics[i].lossTangent );
-    }
-
-    fprintf( stderr, "  Zones on board: %d\n", (int) m_board->Zones().size() );
-
-    for( ZONE* zone : m_board->Zones() )
-    {
-        fprintf( stderr, "    Zone '%s' ruleArea=%d\n",
-                 (const char*) zone->GetZoneName().utf8_str(),
-                 zone->GetIsRuleArea() );
-
-        for( PCB_LAYER_ID layer : zone->GetLayerSet().Seq() )
-        {
-            const auto& fill = zone->GetFilledPolysList( layer );
-            fprintf( stderr, "      layer %d: fill %s (%d polys)\n",
-                     (int) layer, ( fill && !fill->IsEmpty() ) ? "YES" : "NO",
-                     fill ? fill->OutlineCount() : 0 );
-        }
-    }
-
     buildMaskItemCache();
-
-    fprintf( stderr, "  Mask items: top=%d bot=%d\n",
-             (int) m_maskItemsTop.size(), (int) m_maskItemsBottom.size() );
 }
 
 
@@ -202,17 +151,6 @@ bool STACKUP_READER::isReferencePlane( PCB_LAYER_ID aLayer, const VECTOR2I& aPos
 
         if( zone->HitTestFilledArea( aLayer, aPosition ) )
             return true;
-
-        // Log zones that are on the right layer but don't have fill data
-        const std::shared_ptr<SHAPE_POLY_SET>& fill = zone->GetFilledPolysList( aLayer );
-
-        if( !fill || fill->IsEmpty() )
-        {
-            fprintf( stderr, "SIPI: zone '%s' on layer %d has no fill at (%d,%d) — "
-                             "run Edit > Fill All Zones\n",
-                     (const char*) zone->GetZoneName().utf8_str(),
-                     (int) aLayer, aPosition.x, aPosition.y );
-        }
     }
 
     return false;
@@ -244,30 +182,10 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
     }
 
     if( signalIdx < 0 )
-    {
-        static bool logged = false;
-
-        if( !logged )
-        {
-            fprintf( stderr, "SIPI: signal layer %d not found in stackup!\n", (int) aLayer );
-            logged = true;
-        }
-
         return geom; // Layer not found in stackup
-    }
 
     double signalZ = m_copperLayers[signalIdx].zPosition;
     geom.signalZPosition = signalZ;
-
-    // Log first query for diagnostics
-    static bool firstQuery = true;
-
-    if( firstQuery )
-    {
-        firstQuery = false;
-        fprintf( stderr, "SIPI: first query: signal layer=%d (idx=%d) pos=(%d,%d) width=%dnm\n",
-                 (int) aLayer, signalIdx, aPosition.x, aPosition.y, aTraceWidth );
-    }
 
     // Helper: find the dielectric layer whose z-range overlaps the interval
     // between two copper layer centers. Use midpoint containment — the
@@ -298,30 +216,57 @@ LAYER_GEOMETRY STACKUP_READER::GetLayerGeometry( PCB_LAYER_ID aLayer,
         return std::abs( zB - zA ) - tA / 2.0 - tB / 2.0;
     };
 
-    // Use the nearest copper layer as the reference plane.  Actual copper
-    // coverage (antipads, voids) is handled later by FindGroundWires which
-    // scans zone fills via R-tree + edge crossings.  Skipping the per-sample
-    // HitTestFilledArea here avoids an O(n_edges) polygon walk on every sample.
-    if( signalIdx > 0 )
+    // Zone-aware reference plane detection: scan copper layers above/below the
+    // signal, checking isReferencePlane() for zone coverage at the query point.
+    // Layers without zone coverage are skipped (recorded as intermediate layers
+    // for groundwire detection).  If no zone-covered layer is found, hasRefAbove/
+    // hasRefBelow remains false and the virtual earth fallback below handles it.
+    for( int i = signalIdx - 1; i >= 0; i-- )
     {
-        int i = signalIdx - 1;
-        geom.hAbove = copperSpacing( i, signalIdx );
-        geom.hasRefAbove = true;
-        geom.refLayerAbove = m_copperLayers[i].layerId;
-        geom.refThicknessAbove = m_copperLayers[i].thickness;
-        findDielectric( m_copperLayers[i].zPosition, signalZ,
-                        geom.erAbove, geom.tanDAbove );
+        if( isReferencePlane( m_copperLayers[i].layerId, aPosition ) )
+        {
+            geom.hAbove = copperSpacing( i, signalIdx );
+            geom.hasRefAbove = true;
+            geom.refLayerAbove = m_copperLayers[i].layerId;
+            geom.refThicknessAbove = m_copperLayers[i].thickness;
+            findDielectric( m_copperLayers[i].zPosition, signalZ,
+                            geom.erAbove, geom.tanDAbove );
+
+            geom.hOrigAbove = geom.hAbove;
+            geom.erOrigAbove = geom.erAbove;
+            break;
+        }
+
+        // Not a reference plane here — record as intermediate layer
+        LAYER_GEOMETRY::INTERMEDIATE_LAYER il;
+        il.layerId = m_copperLayers[i].layerId;
+        il.zPosition = m_copperLayers[i].zPosition;
+        il.thickness = m_copperLayers[i].thickness;
+        geom.intermediateLayers.push_back( il );
     }
 
-    if( signalIdx + 1 < (int) m_copperLayers.size() )
+    for( int i = signalIdx + 1; i < (int) m_copperLayers.size(); i++ )
     {
-        int i = signalIdx + 1;
-        geom.hBelow = copperSpacing( signalIdx, i );
-        geom.hasRefBelow = true;
-        geom.refLayerBelow = m_copperLayers[i].layerId;
-        geom.refThicknessBelow = m_copperLayers[i].thickness;
-        findDielectric( signalZ, m_copperLayers[i].zPosition,
-                        geom.erBelow, geom.tanDBelow );
+        if( isReferencePlane( m_copperLayers[i].layerId, aPosition ) )
+        {
+            geom.hBelow = copperSpacing( signalIdx, i );
+            geom.hasRefBelow = true;
+            geom.refLayerBelow = m_copperLayers[i].layerId;
+            geom.refThicknessBelow = m_copperLayers[i].thickness;
+            findDielectric( signalZ, m_copperLayers[i].zPosition,
+                            geom.erBelow, geom.tanDBelow );
+
+            geom.hOrigBelow = geom.hBelow;
+            geom.erOrigBelow = geom.erBelow;
+            break;
+        }
+
+        // Not a reference plane here — record as intermediate layer
+        LAYER_GEOMETRY::INTERMEDIATE_LAYER il;
+        il.layerId = m_copperLayers[i].layerId;
+        il.zPosition = m_copperLayers[i].zPosition;
+        il.thickness = m_copperLayers[i].thickness;
+        geom.intermediateLayers.push_back( il );
     }
 
     // Compute fallback image ground for demotion: the outermost copper layer

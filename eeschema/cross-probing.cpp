@@ -42,6 +42,7 @@
 #include <tools/sch_editor_control.h>
 #include <advanced_config.h>
 #include <widgets/design_block_pane.h>
+#include <widgets/pdn_panel.h>
 #include <wx/log.h>
 
 SCH_ITEM* SCH_EDITOR_CONTROL::FindSymbolAndItem( const wxString* aPath, const wxString* aReference,
@@ -1057,6 +1058,16 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_EXPRESS& mail )
         m_designBlocksPane->RefreshLibs();
         SyncView();
         break;
+
+    case MAIL_PDN_EXTRACT_RESULT:
+    {
+        wxString resultPayload = wxString::FromUTF8( payload );
+
+        if( m_pdnPanel )
+            m_pdnPanel->OnLayoutDataReceived( resultPayload );
+
+        break;
+    }
 
     default:;
 

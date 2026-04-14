@@ -434,7 +434,9 @@ set( PCBNEW_CLASS_SRCS
     sipi/impedance_profile.cpp
     sipi/stackup_reader.cpp
     sipi/trace_path_walker.cpp
+    sipi/pdn_layout_extractor.cpp
     sipi/via_model.cpp
+    sipi/zone_impedance.cpp
 
     )
 

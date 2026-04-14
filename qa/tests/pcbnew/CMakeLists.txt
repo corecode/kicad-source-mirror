@@ -60,7 +60,9 @@ set( QA_PCBNEW_SRCS
     test_impedance_profiler.cpp
     test_stackup_reader.cpp
     test_trace_path_walker.cpp
+    test_pdn_layout_extractor.cpp
     test_via_model.cpp
+    test_zone_impedance.cpp
 
     drc/test_custom_rule_severities.cpp
     drc/test_drc_courtyard_invalid.cpp

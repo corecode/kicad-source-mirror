@@ -1099,4 +1099,288 @@ BOOST_AUTO_TEST_CASE( CachePathAndReadMissing )
 }
 
 
+/**
+ * Test the layout-aware BuildSpiceNetlist overload.
+ *
+ * Verifies that when layout data is provided, caps connect to their pad port
+ * nodes instead of the generic local/gnd nodes, and that the parasitic
+ * elements appear in the netlist.
+ */
+BOOST_AUTO_TEST_CASE( BuildNetlistWithLayoutData )
+{
+    LOCALE_IO    dummy;
+    PDN_ANALYZER analyzer;
+
+    // Manually create a network (normally done by FindPDNNetworks)
+    PDN_NETWORK network;
+    network.supplyRail = wxS( "+3V3" );
+    network.refRail = wxS( "GND" );
+
+    SCH_SHEET      rootSheet;
+    SCH_SHEET_PATH obsSheet;
+    obsSheet.push_back( &rootSheet );
+
+    PDN_CAPACITOR cap;
+    cap.refdes = wxS( "C1" );
+    cap.capacitance = 100e-9;
+    cap.caseSize = wxS( "1608" );
+    cap.esr = 0.020;
+    cap.esl = 400e-12;
+    cap.netSupply = wxS( "+3V3" );
+    cap.netRef = wxS( "GND" );
+    cap.sheetPath = obsSheet;
+    network.components.push_back( cap );
+
+    // Register network so BuildSpiceNetlist can find it by key
+    // Access private m_networks via the public GetNetworks() + const_cast
+    auto& networks = const_cast<std::map<wxString, PDN_NETWORK>&>( analyzer.GetNetworks() );
+    wxString key = wxS( "+3V3 / GND" );
+    networks[key] = network;
+
+    // Build layout data
+    PDN_LAYOUT_DATA layoutData;
+    layoutData.valid = true;
+    layoutData.powerPadPortMap[wxS( "C1:1" )] = wxS( "C1_1" );
+    layoutData.groundPadPortMap[wxS( "C1:2" )] = wxS( "C1_2" );
+
+    // Parasitic elements: trace from C1_1 to internal node n1
+    layoutData.powerNetElements = wxS( "R_Rtr1 C1_1 n1 0.00012\nL_Ltr1 C1_1 n1 2.8e-11\n" );
+    layoutData.groundNetElements = wxS( "R_Rgnd1 C1_2 n2 0.00015\nL_Lgnd1 C1_2 n2 3.2e-11\n" );
+    layoutData.planeCapElements = wxS( "C_Cp1 n1 n2 7.8e-12\n" );
+
+    wxString netlist = analyzer.BuildSpiceNetlist( key, layoutData );
+
+    // Should contain the CAP subcircuit
+    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP " ) ) );
+
+    // Should contain the AC source
+    BOOST_CHECK( netlist.Contains( wxS( "AC 1" ) ) );
+
+    // Should contain the parasitic elements
+    BOOST_CHECK( netlist.Contains( wxS( "R_Rtr1" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "L_Ltr1" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "R_Rgnd1" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "C_Cp1" ) ) );
+
+    // Cap should connect to pad port nodes, not generic local/gnd
+    BOOST_CHECK( netlist.Contains( wxS( "C1_1" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "C1_2" ) ) );
+
+    // Should have simulation commands
+    BOOST_CHECK( netlist.Contains( wxS( ".ac dec" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( ".end" ) ) );
+}
+
+
+/**
+ * Test that layout netlist falls back gracefully when no pad port mapping exists.
+ */
+BOOST_AUTO_TEST_CASE( BuildNetlistWithLayoutDataMissingPorts )
+{
+    LOCALE_IO    dummy;
+    PDN_ANALYZER analyzer;
+
+    PDN_NETWORK network;
+    network.supplyRail = wxS( "+5V" );
+    network.refRail = wxS( "GND" );
+
+    SCH_SHEET      rootSheet;
+    SCH_SHEET_PATH obsSheet;
+    obsSheet.push_back( &rootSheet );
+
+    PDN_CAPACITOR cap;
+    cap.refdes = wxS( "C2" );
+    cap.capacitance = 10e-6;
+    cap.caseSize = wxS( "3216" );
+    cap.esr = 0.003;
+    cap.esl = 500e-12;
+    cap.netSupply = wxS( "+5V" );
+    cap.netRef = wxS( "GND" );
+    cap.sheetPath = obsSheet;
+    network.components.push_back( cap );
+
+    auto& networks = const_cast<std::map<wxString, PDN_NETWORK>&>( analyzer.GetNetworks() );
+    wxString key = wxS( "+5V / GND" );
+    networks[key] = network;
+
+    // Layout data with no pad port mappings for C2
+    PDN_LAYOUT_DATA layoutData;
+    layoutData.valid = true;
+    layoutData.powerNetElements = wxS( "R_Rtr1 n1 n2 0.001\n" );
+    layoutData.groundNetElements = wxS( "R_Rgnd1 n3 n4 0.001\n" );
+
+    wxString netlist = analyzer.BuildSpiceNetlist( key, layoutData );
+
+    // Should still generate a valid netlist (caps fall back to observation node)
+    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP " ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( ".end" ) ) );
+    BOOST_CHECK( !netlist.IsEmpty() );
+}
+
+
+/**
+ * Full pipeline test: layout-extracted parasitics → SPICE netlist → ngspice → impedance.
+ *
+ * Simulates what happens when "Use PCB Layout" is enabled: two caps connected
+ * through trace parasitics on both power and ground nets, with plane capacitance.
+ * Verifies that ngspice accepts the netlist and produces plausible impedance data.
+ */
+BOOST_AUTO_TEST_CASE( LayoutExtractedFullPipeline )
+{
+    LOCALE_IO dummy;
+
+    std::shared_ptr<SPICE_SIMULATOR> sim = SIMULATOR::CreateInstance( "ngspice" );
+
+    BOOST_REQUIRE_MESSAGE( sim != nullptr, "ngspice not available" );
+
+    if( !sim->Settings() )
+        sim->Settings() = std::make_shared<NGSPICE_SETTINGS>( nullptr, "" );
+
+    // Build a PDN network with two caps
+    PDN_ANALYZER analyzer;
+    PDN_NETWORK  network;
+    network.supplyRail = wxS( "+1V0" );
+    network.refRail = wxS( "GND" );
+
+    SCH_SHEET      rootSheet;
+    SCH_SHEET_PATH obsSheet;
+    obsSheet.push_back( &rootSheet );
+
+    PDN_CAPACITOR cap1;
+    cap1.refdes = wxS( "C1" );
+    cap1.capacitance = 10e-6;   // 10µF bulk
+    cap1.caseSize = wxS( "3216" );
+    cap1.esr = 0.005;
+    cap1.esl = 500e-12;
+    cap1.sheetPath = obsSheet;
+    network.components.push_back( cap1 );
+
+    PDN_CAPACITOR cap2;
+    cap2.refdes = wxS( "C2" );
+    cap2.capacitance = 100e-9;  // 100nF MLCC
+    cap2.caseSize = wxS( "1005" );
+    cap2.esr = 0.030;
+    cap2.esl = 270e-12;
+    cap2.sheetPath = obsSheet;
+    network.components.push_back( cap2 );
+
+    auto& networks = const_cast<std::map<wxString, PDN_NETWORK>&>( analyzer.GetNetworks() );
+    wxString key = wxS( "+1V0 / GND" );
+    networks[key] = network;
+
+    // Build layout data mimicking extractor output for a simple board:
+    // C1 and C2 each have power pad (pin 1) and ground pad (pin 2).
+    // Traces connect them with R+L parasitics.  Plane cap between layers.
+    PDN_LAYOUT_DATA layoutData;
+    layoutData.valid = true;
+
+    // Pad port maps, split by net side (no pin-number assumption).
+    layoutData.powerPadPortMap[wxS( "C1:1" )] = wxS( "C1_1" );
+    layoutData.groundPadPortMap[wxS( "C1:2" )] = wxS( "C1_2" );
+    layoutData.powerPadPortMap[wxS( "C2:1" )] = wxS( "C2_1" );
+    layoutData.groundPadPortMap[wxS( "C2:2" )] = wxS( "C2_2" );
+
+    // Power net parasitics: trace from C1 pad 1 to C2 pad 1 (10mm, 200µm, 1oz)
+    // R ≈ 24 mΩ, L ≈ 12.6 nH
+    layoutData.powerNetElements =
+            wxS( "R_p1v0_Rtr1 C1_1 C2_1 0.024\n"
+                 "L_p1v0_Ltr1 C1_1 C2_1 12.6e-9\n" );
+
+    // Ground net parasitics: trace from C1 pad 2 to C2 pad 2
+    layoutData.groundNetElements =
+            wxS( "R_gnd_Rtr1 C1_2 C2_2 0.024\n"
+                 "L_gnd_Ltr1 C1_2 C2_2 12.6e-9\n" );
+
+    // Plane capacitance between power and ground zones
+    layoutData.planeCapElements =
+            wxS( "C_Cplane1 C1_1 C1_2 50e-12\n" );
+
+    // Build netlist with C1 as observation point
+    wxString netlist = analyzer.BuildSpiceNetlist( key, layoutData, wxS( "C1" ) );
+
+    BOOST_TEST_MESSAGE( "Layout netlist:\n" << netlist.ToStdString() );
+
+    // Verify netlist structure
+    BOOST_CHECK( netlist.Contains( wxS( ".subckt CAP" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "AC 1" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "R_p1v0_Rtr1" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "R_gnd_Rtr1" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( "C_Cplane1" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( ".ac dec" ) ) );
+    BOOST_CHECK( netlist.Contains( wxS( ".end" ) ) );
+
+    // No colons or parens in the netlist (SPICE-unsafe)
+    // Skip the comment/title lines which may contain net names with special chars
+    wxString body = netlist.AfterFirst( '\n' );
+    bool hasColon = false;
+
+    for( const wxString& line : wxStringTokenize( body, wxS( "\n" ) ) )
+    {
+        if( line.StartsWith( wxS( "*" ) ) )
+            continue; // skip comments
+
+        if( line.Contains( wxS( ":" ) ) )
+        {
+            hasColon = true;
+            BOOST_TEST_MESSAGE( "Colon in SPICE line: " << line.ToStdString() );
+        }
+    }
+
+    BOOST_CHECK_MESSAGE( !hasColon, "Colons found in non-comment SPICE lines" );
+
+    // Run through ngspice
+    sim->SetReporter( nullptr );
+    sim->Command( "destroy all" );
+    sim->Init();
+
+    bool loaded = sim->LoadNetlist( netlist.ToStdString() );
+    BOOST_REQUIRE_MESSAGE( loaded, "ngspice rejected the layout netlist" );
+
+    bool ran = sim->Command( "run" );
+    BOOST_REQUIRE_MESSAGE( ran, "ngspice simulation failed" );
+
+    // Get results at the observation node (C1_1)
+    std::vector<double> freqs = sim->GetGainVector( "frequency" );
+    std::vector<double> impedance = sim->GetGainVector( "v(c1_1)" );
+
+    BOOST_TEST_MESSAGE( "Results: " << freqs.size() << " freq points, "
+                        << impedance.size() << " impedance points" );
+
+    BOOST_REQUIRE_MESSAGE( !freqs.empty(), "No frequency data returned" );
+    BOOST_REQUIRE_MESSAGE( !impedance.empty(), "No impedance data for v(c1_1)" );
+    BOOST_CHECK_EQUAL( freqs.size(), impedance.size() );
+
+    // Sanity check impedance values
+    // At low frequencies: dominated by bulk cap C1 (10µF) → Z ≈ 1/(2π*f*C) + ESR
+    // At 1kHz: Z ≈ 1/(2π*1000*10e-6) ≈ 15.9Ω
+    double zLow = impedance[0];
+    BOOST_CHECK_GT( zLow, 1.0 );
+    BOOST_CHECK_LT( zLow, 100.0 );
+
+    // At high frequencies: dominated by ESL → Z = 2π*f*L
+    double zHigh = impedance.back();
+    BOOST_CHECK_GT( zHigh, 0.001 );
+
+    BOOST_TEST_MESSAGE( "Z(low)=" << zLow << "Ω  Z(high)=" << zHigh << "Ω" );
+
+    // Full RunAnalysis path
+    bool success = analyzer.RunAnalysis( key, layoutData, wxS( "C1" ) );
+    BOOST_CHECK_MESSAGE( success, "RunAnalysis with layout data failed" );
+
+    if( success )
+    {
+        BOOST_CHECK( !analyzer.GetFrequencies().empty() );
+        BOOST_CHECK( !analyzer.GetImpedance().empty() );
+        BOOST_TEST_MESSAGE( "RunAnalysis: " << analyzer.GetFrequencies().size()
+                            << " points, Z range ["
+                            << *std::min_element( analyzer.GetImpedance().begin(),
+                                                  analyzer.GetImpedance().end() )
+                            << ", "
+                            << *std::max_element( analyzer.GetImpedance().begin(),
+                                                  analyzer.GetImpedance().end() )
+                            << "] Ω" );
+    }
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

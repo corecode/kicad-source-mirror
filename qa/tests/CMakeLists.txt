@@ -31,6 +31,8 @@ if( KICAD_SPICE_QA )
     add_subdirectory( spice )
 endif()
 
+add_subdirectory( pdn )
+
 if( KICAD_TEST_XML_OUTPUT )
     # To do this, you will need xmlrunner
     set( PYTEST_ARGS_QAPYTHON --junitxml=${CMAKE_CURRENT_BINARY_DIR}/qapython.junit-results.xml )

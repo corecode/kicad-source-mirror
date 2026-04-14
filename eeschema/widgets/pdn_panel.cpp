@@ -23,6 +23,8 @@
 
 #include "pdn_panel.h"
 
+#include <kiway.h>
+#include <mail_type.h>
 #include <sch_commit.h>
 #include <sch_connection.h>
 #include <sch_edit_frame.h>
@@ -414,6 +416,7 @@ private:
 
 PDN_PANEL::PDN_PANEL( SCH_EDIT_FRAME* aParent ) :
         WX_PANEL( aParent ), m_frame( aParent ), m_updatePending( false ),
+        m_useLayout( false ), m_layoutRequestPending( false ),
         m_impedanceTrace( nullptr ), m_referenceTrace( nullptr ), m_transferTrace( nullptr ),
         m_xAxis( nullptr ), m_yAxis( nullptr ), m_labelOverlay( nullptr ), m_warningIcon( nullptr )
 {
@@ -688,6 +691,7 @@ void PDN_PANEL::OnSchSelectionChanged( wxCommandEvent& aEvent )
     TOOL_MANAGER*       toolMgr = m_frame->GetToolManager();
     SCH_SELECTION_TOOL* selTool = toolMgr->GetTool<SCH_SELECTION_TOOL>();
     wxString            key;
+    wxString            selectedRefdes;
 
     for( EDA_ITEM* item : selTool->GetSelection() )
     {
@@ -701,6 +705,9 @@ void PDN_PANEL::OnSchSelectionChanged( wxCommandEvent& aEvent )
             wxString refdes = symbol->GetRef( &m_frame->GetCurrentSheet() );
             key = m_analyzer.FindNetworkForSym( refdes );
 
+            if( !key.IsEmpty() )
+                selectedRefdes = refdes;
+
             if( key.IsEmpty() )
             {
                 // Symbol isn't a cap in any network — check pin connections
@@ -712,7 +719,10 @@ void PDN_PANEL::OnSchSelectionChanged( wxCommandEvent& aEvent )
                         key = m_analyzer.FindNetworkForNetName( conn->Name() );
 
                         if( !key.IsEmpty() )
+                        {
+                            selectedRefdes = refdes;
                             break;
+                        }
                     }
                 }
             }
@@ -737,6 +747,7 @@ void PDN_PANEL::OnSchSelectionChanged( wxCommandEvent& aEvent )
         return;
 
     m_observationSheet = m_frame->GetCurrentSheet();
+    m_observationRefdes = selectedRefdes;
     m_selectedNetwork = key;
     runAnalysisAndPlot( m_selectedNetwork );
 }
@@ -864,6 +875,13 @@ void PDN_PANEL::onPlotRightClick( wxMouseEvent& aEvent )
             menu.AppendCheckItem( showTransferId, _( "Show Transfer Impedance" ) );
     transferItem->Check( m_showTransfer );
 
+    int         useLayoutId = menuId++;
+    bool        pcbOpen = ( m_frame->Kiway().Player( FRAME_PCB_EDITOR, false ) != nullptr );
+    wxMenuItem* layoutItem =
+            menu.AppendCheckItem( useLayoutId, _( "Use PCB Layout" ) );
+    layoutItem->Check( m_useLayout );
+    layoutItem->Enable( pcbOpen );
+
     bool hasImpedanceData = m_impedanceTrace->IsVisible();
     bool hasReference = !m_refFrequencies.empty();
 
@@ -877,8 +895,8 @@ void PDN_PANEL::onPlotRightClick( wxMouseEvent& aEvent )
     menu.Enable( clearRefId, hasReference );
 
     menu.Bind( wxEVT_COMMAND_MENU_SELECTED,
-               [this, &visibleKeys, &fbEntries, fbMenuBase, showTransferId, storeRefId,
-                clearRefId]( wxCommandEvent& evt )
+               [this, &visibleKeys, &fbEntries, fbMenuBase, showTransferId, useLayoutId,
+                storeRefId, clearRefId]( wxCommandEvent& evt )
                {
                    int id = evt.GetId();
                    int netIdx = id - ( wxID_HIGHEST + 1 );
@@ -918,6 +936,15 @@ void PDN_PANEL::onPlotRightClick( wxMouseEvent& aEvent )
                        {
                            runAnalysisAndPlot( m_selectedNetwork );
                        }
+                   }
+
+                   if( id == useLayoutId )
+                   {
+                       m_useLayout = !m_useLayout;
+                       m_layoutData.valid = false; // Force re-extraction
+
+                       if( !m_selectedNetwork.IsEmpty() )
+                           runAnalysisAndPlot( m_selectedNetwork );
                    }
 
                    if( id == storeRefId )
@@ -1120,7 +1147,86 @@ void PDN_PANEL::runAnalysisAndPlot( const wxString& aNetworkKey )
         m_labelOverlay->SetSheetLabel( wxEmptyString );
     }
 
-    if( m_analyzer.RunAnalysis( aNetworkKey, m_observationSheet ) )
+    bool success = false;
+
+    // Invalidate layout data if the network changed
+    if( m_useLayout && m_layoutData.valid && m_layoutNetworkKey != aNetworkKey )
+        m_layoutData.valid = false;
+
+    if( m_useLayout && m_layoutData.valid )
+    {
+        wxString obsLabel = m_observationRefdes.IsEmpty()
+                                    ? _( "PCB Layout" )
+                                    : wxString::Format( _( "PCB Layout @ %s" ),
+                                                        m_observationRefdes );
+        m_labelOverlay->SetSheetLabel( obsLabel );
+        success = m_analyzer.RunAnalysis( aNetworkKey, m_layoutData, m_observationRefdes );
+    }
+    else if( m_useLayout )
+    {
+        // Request layout data from pcbnew.
+        // ExpressMail is synchronous: pcbnew handles the request inline and
+        // replies with MAIL_PDN_EXTRACT_RESULT, which calls OnLayoutDataReceived,
+        // which sets m_layoutData.valid and calls runAnalysisAndPlot recursively.
+        // After ExpressMail returns, the analysis has already run (or failed).
+        m_layoutRequestPending = true;
+
+        // Build the list of PDN-relevant component refdes (caps, VRM, observation point)
+        wxString refdesList;
+
+        for( const PDN_CAPACITOR& cap : network.components )
+        {
+            if( !refdesList.IsEmpty() )
+                refdesList += wxS( "," );
+
+            refdesList += cap.refdes;
+        }
+
+        if( network.vrm.has_value() && !network.vrm->refdes.IsEmpty() )
+        {
+            if( !refdesList.IsEmpty() )
+                refdesList += wxS( "," );
+
+            refdesList += network.vrm->refdes;
+        }
+
+        if( !m_observationRefdes.IsEmpty() )
+        {
+            if( !refdesList.Contains( m_observationRefdes ) )
+            {
+                if( !refdesList.IsEmpty() )
+                    refdesList += wxS( "," );
+
+                refdesList += m_observationRefdes;
+            }
+        }
+
+        wxString payload = network.supplyRail + wxS( "\n" ) + network.refRail
+                           + wxS( "\n" ) + refdesList;
+        std::string payloadStr = payload.ToStdString();
+
+        m_frame->Kiway().ExpressMail( FRAME_PCB_EDITOR, MAIL_PDN_EXTRACT_REQUEST,
+                                      payloadStr, m_frame );
+
+        m_layoutRequestPending = false;
+
+        // If OnLayoutDataReceived already ran the analysis, we're done.
+        if( m_layoutData.valid )
+            return;
+
+        // Extraction failed — fall through to show error
+        m_labelOverlay->SetNetworkLabel( _( "Layout extraction failed" ) );
+        m_labelOverlay->SetSheetLabel( wxEmptyString );
+        m_plotWindow->UpdateAll();
+        updateWarningIndicator();
+        return;
+    }
+    else
+    {
+        success = m_analyzer.RunAnalysis( aNetworkKey, m_observationSheet );
+    }
+
+    if( success )
     {
         plotImpedance( m_analyzer.GetFrequencies(), m_analyzer.GetImpedance() );
     }
@@ -1218,4 +1324,103 @@ void PDN_PANEL::plotImpedance( const std::vector<double>& aFreqs,
 
     m_plotWindow->UpdateAll();
     m_plotWindow->Fit();
+}
+
+
+void PDN_PANEL::OnLayoutDataReceived( const wxString& aPayload )
+{
+    m_layoutRequestPending = false;
+
+    if( aPayload.IsEmpty() )
+    {
+        m_layoutData.valid = false;
+        return;
+    }
+
+    m_layoutData.valid = true;
+    m_layoutNetworkKey = m_selectedNetwork;
+    m_layoutData.powerPadPortMap.clear();
+    m_layoutData.groundPadPortMap.clear();
+    m_layoutData.powerNetElements.clear();
+    m_layoutData.groundNetElements.clear();
+    m_layoutData.planeCapElements.clear();
+
+    // Parse the text payload line by line.
+    // Format: NET name, PAD refdes:pad node=xxx pos=x,y, R/L/C lines, PLANE_C, WARN
+    wxString*                     currentElements = nullptr;
+    std::map<wxString, wxString>* currentPadMap = nullptr;
+    wxArrayString                 lines = wxStringTokenize( aPayload, wxS( "\n" ) );
+
+    for( const wxString& line : lines )
+    {
+        if( line.IsEmpty() )
+            continue;
+
+        if( line.StartsWith( wxS( "NET " ) ) )
+        {
+            if( !currentElements )
+            {
+                currentElements = &m_layoutData.powerNetElements;
+                currentPadMap = &m_layoutData.powerPadPortMap;
+            }
+            else
+            {
+                currentElements = &m_layoutData.groundNetElements;
+                currentPadMap = &m_layoutData.groundPadPortMap;
+            }
+
+            continue;
+        }
+
+        if( line.StartsWith( wxS( "PAD " ) ) )
+        {
+            // PAD refdes:pad node=nodeName pos=x,y — routed to the map for
+            // whichever NET section we're currently inside.
+            wxString rest = line.Mid( 4 );
+            wxString refPad = rest.BeforeFirst( ' ' );
+            wxString attrs = rest.AfterFirst( ' ' );
+            wxString nodeAttr = attrs.BeforeFirst( ' ' );
+
+            if( currentPadMap && nodeAttr.StartsWith( wxS( "node=" ) ) )
+                ( *currentPadMap )[refPad] = nodeAttr.Mid( 5 );
+
+            continue;
+        }
+
+        if( line.StartsWith( wxS( "PLANE_C " ) ) )
+        {
+            // PLANE_C name nodeA nodeB value → "C_name nodeA nodeB value\n"
+            wxArrayString tokens = wxStringTokenize( line, wxS( " " ) );
+
+            if( tokens.size() >= 5 )
+            {
+                m_layoutData.planeCapElements +=
+                        wxString::Format( wxS( "C_%s %s %s %s\n" ),
+                                          tokens[1], tokens[2], tokens[3], tokens[4] );
+            }
+
+            continue;
+        }
+
+        if( line.StartsWith( wxS( "WARN " ) ) )
+            continue;
+
+        // R/L/C element lines: pass through as SPICE elements
+        if( currentElements && ( line.StartsWith( wxS( "R " ) ) || line.StartsWith( wxS( "L " ) )
+                                 || line.StartsWith( wxS( "C " ) ) ) )
+        {
+            wxArrayString tokens = wxStringTokenize( line, wxS( " " ) );
+
+            if( tokens.size() >= 5 )
+            {
+                *currentElements +=
+                        wxString::Format( wxS( "%s_%s %s %s %s\n" ),
+                                          tokens[0], tokens[1], tokens[2], tokens[3], tokens[4] );
+            }
+        }
+    }
+
+    // Now re-run the analysis with the layout data
+    if( !m_selectedNetwork.IsEmpty() )
+        runAnalysisAndPlot( m_selectedNetwork );
 }

@@ -1821,3 +1821,242 @@ bool PDN_ANALYZER::RunAnalysis( const wxString&       aNetworkKey,
 
     return true;
 }
+
+
+wxString PDN_ANALYZER::BuildSpiceNetlist( const wxString&        aNetworkKey,
+                                          const PDN_LAYOUT_DATA& aLayoutData,
+                                          const wxString&        aObservationRefdes,
+                                          double aStartFreq, double aEndFreq,
+                                          int aPointsPerDecade )
+{
+    m_probeNodes.clear();
+
+    auto primaryIt = m_networks.find( aNetworkKey );
+
+    if( primaryIt == m_networks.end() )
+        return wxString();
+
+    const PDN_NETWORK& network = primaryIt->second;
+
+    wxString netlist;
+
+    netlist += wxString::Format( wxS( "* PDN Impedance Analysis (layout-extracted): %s / %s\n\n" ),
+                                 network.supplyRail, network.refRail );
+
+    netlist += wxS( ".options KLU\n\n" );
+
+    // CAP subcircuit
+    netlist += wxS( ".subckt CAP p n c=100n esr=0.01 esl=400p\n" );
+    netlist += wxS( "C1 p 1 {c}\n" );
+    netlist += wxS( "R1 1 2 {esr}\n" );
+    netlist += wxS( "L1 2 n {esl}\n" );
+    netlist += wxS( ".ends\n\n" );
+
+    // Include layout-extracted parasitic elements
+    netlist += wxS( "* Power net parasitics\n" );
+    netlist += aLayoutData.powerNetElements;
+
+    if( !aLayoutData.powerNetElements.EndsWith( wxS( "\n" ) ) )
+        netlist += wxS( "\n" );
+
+    netlist += wxS( "\n* Ground net parasitics\n" );
+    netlist += aLayoutData.groundNetElements;
+
+    if( !aLayoutData.groundNetElements.EndsWith( wxS( "\n" ) ) )
+        netlist += wxS( "\n" );
+
+    if( !aLayoutData.planeCapElements.IsEmpty() )
+    {
+        netlist += wxS( "\n* Plane capacitance\n" );
+        netlist += aLayoutData.planeCapElements;
+
+        if( !aLayoutData.planeCapElements.EndsWith( wxS( "\n" ) ) )
+            netlist += wxS( "\n" );
+    }
+
+    // Find the observation component.  If a refdes is specified, use that
+    // component's pad ports as the measurement point.  Otherwise fall back
+    // to the first capacitor in the network.
+    wxString obsRefdes;
+
+    if( !aObservationRefdes.IsEmpty() )
+    {
+        obsRefdes = aObservationRefdes;
+    }
+    else if( !network.components.empty() )
+    {
+        obsRefdes = network.components[0].refdes;
+    }
+
+    // Look up the observation component's power-side and ground-side nodes.
+    // The extractor split pad ports by net membership (powerPadPortMap /
+    // groundPadPortMap), so there is no need to guess which pin is which —
+    // whatever pad is on the supply rail is the observation node.
+    auto findRefdesInMap = [&]( const std::map<wxString, wxString>& aMap,
+                                const wxString&                     aRefdes ) -> wxString
+    {
+        wxString prefix = aRefdes + wxS( ":" );
+
+        for( const auto& [padKey, nodeName] : aMap )
+        {
+            if( padKey.StartsWith( prefix ) )
+                return nodeName;
+        }
+
+        return wxEmptyString;
+    };
+
+    wxString obsNode = wxS( "local" );
+    wxString refNode = wxS( "gnd" );
+
+    if( !obsRefdes.IsEmpty() )
+    {
+        wxString p = findRefdesInMap( aLayoutData.powerPadPortMap, obsRefdes );
+        wxString g = findRefdesInMap( aLayoutData.groundPadPortMap, obsRefdes );
+
+        if( !p.IsEmpty() )
+            obsNode = p;
+
+        if( !g.IsEmpty() )
+            refNode = g;
+    }
+
+    // AC current source
+    netlist += wxString::Format( wxS( "\nI1 %s %s AC 1\n" ), obsNode, refNode );
+
+    // Connect caps between their pad ports, using net-side lookup so the
+    // CAP subcircuit straddles the right rails regardless of cap pin layout.
+    int idx = 1;
+
+    for( const PDN_CAPACITOR& cap : network.components )
+    {
+        wxString capPNode = findRefdesInMap( aLayoutData.powerPadPortMap, cap.refdes );
+        wxString capGNode = findRefdesInMap( aLayoutData.groundPadPortMap, cap.refdes );
+
+        if( capPNode.IsEmpty() )
+            capPNode = obsNode;   // fallback: model cap as local to the obs point
+
+        if( capGNode.IsEmpty() )
+            capGNode = refNode;
+
+        netlist += wxString::Format( wxS( "X%d %s %s CAP c=%g esr=%g esl=%g\n" ),
+                                     idx, capPNode, capGNode,
+                                     cap.capacitance, cap.esr, cap.esl );
+        idx++;
+    }
+
+    // VRM
+    if( network.vrm.has_value() )
+    {
+        const PDN_VRM& vrm = *network.vrm;
+        double         lVrm = vrm.params.rDamp / ( 2.0 * M_PI * vrm.params.bandwidth );
+        double         lDamp = lVrm / 10.0;
+
+        netlist += wxString::Format( wxS( "\n* VRM source impedance (%s)\n" ), vrm.refdes );
+        netlist += wxString::Format( wxS( "R_vrm %s vrm1 %g\n" ), obsNode, vrm.params.rVrm );
+        netlist += wxString::Format( wxS( "L_vrm vrm1 %s %g\n" ), refNode, lVrm );
+        netlist += wxString::Format( wxS( "R_damp %s vrm2 %g\n" ), obsNode, vrm.params.rDamp );
+        netlist += wxString::Format( wxS( "L_damp vrm2 %s %g\n" ), refNode, lDamp );
+    }
+
+    netlist += wxString::Format( wxS( "\n.ac dec %d %g %g\n" ), aPointsPerDecade,
+                                 aStartFreq, aEndFreq );
+    netlist += wxS( ".end\n" );
+
+    return netlist;
+}
+
+
+bool PDN_ANALYZER::RunAnalysis( const wxString& aNetworkKey, const PDN_LAYOUT_DATA& aLayoutData,
+                                const wxString& aObservationRefdes )
+{
+    LOCALE_IO dummy;
+
+    m_frequencies.clear();
+    m_impedance.clear();
+    m_transferImpedance.clear();
+
+    auto it = m_networks.find( aNetworkKey );
+
+    if( it == m_networks.end() )
+    {
+        addWarning( aNetworkKey, wxString::Format( _( "Network '%s' not found." ), aNetworkKey ) );
+        return false;
+    }
+
+    const PDN_NETWORK& network = it->second;
+
+    if( network.components.empty() )
+    {
+        addWarning( aNetworkKey, wxString::Format( _( "Network '%s' has no capacitors." ),
+                                                   network.supplyRail ) );
+        return false;
+    }
+
+    std::shared_ptr<SPICE_SIMULATOR> sim = SIMULATOR::CreateInstance( "ngspice" );
+
+    if( !sim )
+    {
+        addWarning( aNetworkKey, _( "Failed to create ngspice simulator instance." ) );
+        return false;
+    }
+
+    if( !sim->Settings() )
+        sim->Settings() = std::make_shared<NGSPICE_SETTINGS>( nullptr, "" );
+
+    sim->SetReporter( nullptr );
+
+    sim->Command( "destroy all" );
+    sim->Init();
+    wxString netlist = BuildSpiceNetlist( aNetworkKey, aLayoutData, aObservationRefdes );
+
+    if( !sim->LoadNetlist( netlist.ToStdString() ) )
+    {
+        addWarning( aNetworkKey, wxString::Format( _( "Failed to load netlist for '%s'." ),
+                                                   network.supplyRail ) );
+        return false;
+    }
+
+    if( !sim->Command( "run" ) )
+    {
+        addWarning( aNetworkKey,
+                    wxString::Format( _( "Simulation failed for '%s'." ), network.supplyRail ) );
+        return false;
+    }
+
+    // Find the observation node — must match what BuildSpiceNetlist used
+    wxString obsRefdes = aObservationRefdes;
+
+    if( obsRefdes.IsEmpty() && !network.components.empty() )
+        obsRefdes = network.components[0].refdes;
+
+    wxString obsNode = wxS( "local" );
+
+    if( !obsRefdes.IsEmpty() )
+    {
+        // Same rule as BuildSpiceNetlist: observe V at the component's
+        // power-side pad node.  Net-side lookup, not pin-number lookup.
+        wxString prefix = obsRefdes + wxS( ":" );
+
+        for( const auto& [padKey, nodeName] : aLayoutData.powerPadPortMap )
+        {
+            if( padKey.StartsWith( prefix ) )
+            {
+                obsNode = nodeName;
+                break;
+            }
+        }
+    }
+
+    m_frequencies = sim->GetGainVector( "frequency" );
+    m_impedance = sim->GetGainVector( "v(" + obsNode.ToStdString() + ")" );
+
+    if( m_frequencies.empty() || m_impedance.empty() )
+    {
+        addWarning( aNetworkKey,
+                    wxString::Format( _( "No results returned for '%s'." ), network.supplyRail ) );
+        return false;
+    }
+
+    return true;
+}

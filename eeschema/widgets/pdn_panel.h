@@ -66,6 +66,12 @@ public:
     void OnHighlightedNetChanged( const wxString& aNetName );
 
     /**
+     * Called by the cross-probing handler when pcbnew sends back extracted
+     * layout parasitics via MAIL_PDN_EXTRACT_RESULT.
+     */
+    void OnLayoutDataReceived( const wxString& aPayload );
+
+    /**
      * Called when the schematic selection changes.  Inspects the current
      * selection for capacitor symbols or nets and updates the panel
      * accordingly.  Checks its own visibility before doing any work.
@@ -95,8 +101,13 @@ private:
     PDN_ANALYZER                            m_analyzer;
     std::unique_ptr<SPICE_MODEL_DOWNLOADER> m_downloader;
     bool                                    m_updatePending;
+    bool                                    m_useLayout;
+    PDN_LAYOUT_DATA                         m_layoutData;
+    wxString                                m_layoutNetworkKey;
+    bool                                    m_layoutRequestPending;
 
     wxString           m_selectedNetwork;
+    wxString           m_observationRefdes;  ///< Refdes of selected component (observation point)
     SCH_SHEET_PATH     m_observationSheet;
     mpWindow*          m_plotWindow;
     mpFXYVector*       m_impedanceTrace;
