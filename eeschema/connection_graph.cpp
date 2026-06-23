@@ -609,8 +609,9 @@ CONNECTION_SUBGRAPH::PRIORITY CONNECTION_SUBGRAPH::GetDriverPriority( SCH_ITEM* 
     {
     case SCH_SHEET_PIN_T:     return PRIORITY::SHEET_PIN;
     case SCH_HIER_LABEL_T:    return PRIORITY::HIER_LABEL;
-    case SCH_LABEL_T:         return PRIORITY::LOCAL_LABEL;
     case SCH_GLOBAL_LABEL_T:  return PRIORITY::GLOBAL;
+
+    case SCH_LABEL_T:         return PRIORITY::LOCAL_LABEL;
 
     case SCH_PIN_T:
     {
@@ -2940,10 +2941,26 @@ void CONNECTION_GRAPH::propagateToNeighbors( CONNECTION_SUBGRAPH* aSubgraph, boo
         child->m_dirty = false;
     }
 
-    // Now, find the best driver for this chain of subgraphs
+    // Now, find the best driver for this chain of subgraphs.
+    // Alias labels (=prefix) keep LOCAL_LABEL priority for same-sheet merging, but during
+    // hierarchy propagation they must not win over hierarchical labels.  Demote them here
+    // so that the hierarchical name propagates correctly into the netlist.
+    auto hierarchyPriority = []( CONNECTION_SUBGRAPH* sg ) -> CONNECTION_SUBGRAPH::PRIORITY
+    {
+        CONNECTION_SUBGRAPH::PRIORITY p =
+                CONNECTION_SUBGRAPH::GetDriverPriority( sg->m_driver );
+
+        if( p == CONNECTION_SUBGRAPH::PRIORITY::LOCAL_LABEL
+                && IsAliasLabel( sg->m_driver, *sg ) )
+        {
+            return CONNECTION_SUBGRAPH::PRIORITY::SHEET_PIN;
+        }
+
+        return p;
+    };
+
     CONNECTION_SUBGRAPH*          bestDriver = aSubgraph;
-    CONNECTION_SUBGRAPH::PRIORITY highest =
-            CONNECTION_SUBGRAPH::GetDriverPriority( aSubgraph->m_driver );
+    CONNECTION_SUBGRAPH::PRIORITY highest    = hierarchyPriority( aSubgraph );
     bool     bestIsStrong = ( highest >= CONNECTION_SUBGRAPH::PRIORITY::HIER_LABEL );
     wxString bestName     = aSubgraph->m_driver_connection->Name();
 
@@ -2955,8 +2972,7 @@ void CONNECTION_GRAPH::propagateToNeighbors( CONNECTION_SUBGRAPH* aSubgraph, boo
             if( subgraph == aSubgraph )
                 continue;
 
-            CONNECTION_SUBGRAPH::PRIORITY priority =
-                    CONNECTION_SUBGRAPH::GetDriverPriority( subgraph->m_driver );
+            CONNECTION_SUBGRAPH::PRIORITY priority = hierarchyPriority( subgraph );
 
             bool     candidateStrong = ( priority >= CONNECTION_SUBGRAPH::PRIORITY::HIER_LABEL );
             wxString candidateName   = subgraph->m_driver_connection->Name();

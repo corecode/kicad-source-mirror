@@ -1,0 +1,82 @@
+(kicad_sch
+	(version 20240620)
+	(generator "eeschema")
+	(generator_version "8.99")
+	(uuid "d0000001-0000-0000-0000-000000000001")
+	(paper "A4")
+	(lib_symbols)
+	(wire
+		(pts
+			(xy 100 100) (xy 130 100)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e0000001-0000-0000-0000-000000000001")
+	)
+	(label "PARENT_NET"
+		(at 100 100 0)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "e0000002-0000-0000-0000-000000000001")
+	)
+	(sheet
+		(at 130 97.46)
+		(size 25.4 5.08)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0.0000)
+		)
+		(uuid "e0000003-0000-0000-0000-000000000001")
+		(property "Sheetname" "SubSheet"
+			(at 130 96.7484 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "erc_alias_hier_priority_sub.kicad_sch"
+			(at 130 103.1246 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(pin "NET1" bidirectional
+			(at 130 100 180)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+			(uuid "e0000004-0000-0000-0000-000000000001")
+		)
+		(instances
+			(project "erc_alias_hier_priority"
+				(path "/d0000001-0000-0000-0000-000000000001"
+					(page "2")
+				)
+			)
+		)
+	)
+	(sheet_instances
+		(path "/"
+			(page "1")
+		)
+	)
+)

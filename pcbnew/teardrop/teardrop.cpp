@@ -392,15 +392,18 @@ void TEARDROP_MANAGER::setTeardropPriorities()
     int priority_base = MAGIC_TEARDROP_ZONE_ID;
 
     // The sort function to sort by increasing copper layers. Group by layers.
-    // For same layers sort by decreasing areas
+    // For same layers sort by decreasing areas; use UUID as tiebreaker for stability.
     struct
     {
         bool operator()(ZONE* a, ZONE* b) const
             {
-                if( a->GetFirstLayer() == b->GetFirstLayer() )
+                if( a->GetFirstLayer() != b->GetFirstLayer() )
+                    return a->GetFirstLayer() < b->GetFirstLayer();
+
+                if( a->GetOutlineArea() != b->GetOutlineArea() )
                     return a->GetOutlineArea() > b->GetOutlineArea();
 
-                return a->GetFirstLayer() < b->GetFirstLayer();
+                return a->m_Uuid < b->m_Uuid;
             }
     } compareLess;
 

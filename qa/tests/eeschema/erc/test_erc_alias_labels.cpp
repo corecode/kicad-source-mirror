@@ -139,3 +139,42 @@ BOOST_FIXTURE_TEST_CASE( ERCAliasMultipleOnSameNet, ERC_ALIAS_TEST_FIXTURE )
 
     BOOST_CHECK_MESSAGE( errors == 0, "Expected 0 errors but got " << errors << "\n" << reportWriter.GetTextReport() );
 }
+
+
+BOOST_FIXTURE_TEST_CASE( ERCAliasHierarchicalPriority, ERC_ALIAS_TEST_FIXTURE )
+{
+    LOCALE_IO dummy;
+
+    // A subsheet has hier label "NET1" and alias "=PB8" on the same wire.
+    // The parent connects via sheet pin "NET1" with local label "PARENT_NET".
+    // After hierarchy propagation, the net name should be "PARENT_NET"
+    // (from the parent's local label), NOT "=PB8" (from the alias).
+    KI_TEST::LoadSchematic( m_settingsManager, "erc_alias_hier_priority", m_schematic );
+
+    CONNECTION_GRAPH* graph = m_schematic->ConnectionGraph();
+    SCH_SHEET_LIST    sheets = m_schematic->BuildSheetListSortedByPageNumbers();
+
+    // Find the subsheet path
+    SCH_SHEET_PATH subSheetPath;
+
+    for( const SCH_SHEET_PATH& path : sheets )
+    {
+        if( path.size() > 1 )
+        {
+            subSheetPath = path;
+            break;
+        }
+    }
+
+    BOOST_REQUIRE_MESSAGE( subSheetPath.size() > 1, "Could not find subsheet path" );
+
+    // The net in the subsheet should have been named "PARENT_NET" by
+    // hierarchy propagation, not "=PB8" from the alias label.
+    // FindSubgraphByName expects the full path-qualified name from Connection::Name().
+    CONNECTION_SUBGRAPH* sg =
+            graph->FindSubgraphByName( "/PARENT_NET", subSheetPath );
+
+    BOOST_CHECK_MESSAGE( sg != nullptr,
+                         "Expected net 'PARENT_NET' in subsheet but it was not found"
+                                 " — alias label may have overridden the hierarchical name" );
+}

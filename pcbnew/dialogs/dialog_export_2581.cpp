@@ -25,6 +25,9 @@
 
 #include <wx/filedlg.h>
 #include <wx/filefn.h>
+#include <wx/wfstream.h>
+#include <wx/zipstrm.h>
+#include <wildcards_and_files_ext.h>
 
 #include <board.h>
 #include <footprint.h>
@@ -310,6 +313,26 @@ void DIALOG_EXPORT_2581::onOKClick( wxCommandEvent& event )
         return;
     }
 
+    if( GetCompress() )
+    {
+        wxFileName tempfn( pcbFileName );
+        tempfn.SetExt( FILEEXT::Ipc2581FileExtension );
+        wxFileName zipfn( tempFile );
+        zipfn.SetExt( "zip" );
+
+        {
+            wxFFileOutputStream fnout( zipfn.GetFullPath() );
+            wxZipOutputStream   zip( fnout );
+            wxFFileInputStream  fnin( tempFile );
+
+            zip.PutNextEntry( tempfn.GetFullName() );
+            fnin.Read( zip );
+        }
+
+        wxRemoveFile( tempFile );
+        tempFile = zipfn.GetFullPath();
+    }
+
     if( wxFileExists( pcbFileName.GetFullPath() ) )
         wxRemoveFile( pcbFileName.GetFullPath() );
 
@@ -320,6 +343,8 @@ void DIALOG_EXPORT_2581::onOKClick( wxCommandEvent& event )
         wxRemoveFile( tempFile );
         return;
     }
+
+    m_parent->SetLastPath( LAST_PATH_2581, pcbFileName.GetFullPath() );
 
     reporter.Report( _( "IPC-2581 file generated successfully." ), RPT_SEVERITY_ACTION );
 }

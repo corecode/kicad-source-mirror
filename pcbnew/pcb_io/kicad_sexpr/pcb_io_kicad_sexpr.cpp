@@ -22,6 +22,9 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+#include <algorithm>
+#include <numeric>
+
 #include <wx/dir.h>
 #include <wx/ffile.h>
 #include <wx/log.h>
@@ -2642,7 +2645,31 @@ void PCB_IO_KICAD_SEXPR::format( const ZONE* aZone ) const
     {
         const std::shared_ptr<SHAPE_POLY_SET>& fv = aZone->GetFilledPolysList( layer );
 
-        for( int ii = 0; ii < fv->OutlineCount(); ++ii )
+        // Build a sorted index so that filled polygons are written in a deterministic order
+        // (the zone filler uses boolean operations whose output order is not stable).
+        int outlineCount = fv->OutlineCount();
+        std::vector<int> order( outlineCount );
+        std::iota( order.begin(), order.end(), 0 );
+
+        std::sort( order.begin(), order.end(),
+                   [&]( int a, int b )
+                   {
+                       const BOX2I bboxA = fv->COutline( a ).BBox();
+                       const BOX2I bboxB = fv->COutline( b ).BBox();
+
+                       if( bboxA.GetX() != bboxB.GetX() )
+                           return bboxA.GetX() < bboxB.GetX();
+
+                       if( bboxA.GetY() != bboxB.GetY() )
+                           return bboxA.GetY() < bboxB.GetY();
+
+                       if( bboxA.GetWidth() != bboxB.GetWidth() )
+                           return bboxA.GetWidth() < bboxB.GetWidth();
+
+                       return bboxA.GetHeight() < bboxB.GetHeight();
+                   } );
+
+        for( int ii : order )
         {
             m_out->Print( "(filled_polygon" );
             m_out->Print( "(layer %s)", m_out->Quotew( LSET::Name( layer ) ).c_str() );
